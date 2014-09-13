@@ -7,6 +7,7 @@ from enact import data, nmat_measure, filedb
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
+config.default("map_precon", "bin", "Preconditioner to use for map-making")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
@@ -18,6 +19,7 @@ parser.add_argument("--ncomp",      type=int, default=3)
 parser.add_argument("--ndet",       type=int, default=0)
 args = parser.parse_args()
 
+precon= config.get("map_precon")
 dtype = np.float32 if config.get("map_bits") == 32 else 64
 comm  = mpi4py.MPI.COMM_WORLD
 myid  = comm.rank
@@ -52,7 +54,7 @@ if nread == 0:
 	sys.exit(1)
 
 if myid == 0: print "Building equation system"
-eq  = map_equation.LinearSystemMap(myscans, area, precon="bin")
+eq  = map_equation.LinearSystemMap(myscans, area, precon=precon)
 rhs = eq.dof.unzip(eq.b)[0]
 if myid == 0: enmap.write_map(args.odir + "/rhs.hdf", rhs)
 

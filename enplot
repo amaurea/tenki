@@ -1,0 +1,87 @@
+#!/usr/bin/env python
+import numpy as np, argparse, Image, time, sys
+from enlib import enmap, colorize
+parser = argparse.ArgumentParser()
+parser.add_argument("ifile")
+parser.add_argument("ofile", nargs="?")
+parser.add_argument("-c", "--color", default="wmap")
+parser.add_argument("-r", "--range", type=str)
+parser.add_argument("--min", type=str)
+parser.add_argument("--max", type=str)
+parser.add_argument("-q", "--quantile", type=float, default=0.01)
+parser.add_argument("-v", dest="verbosity", action="count")
+parser.add_argument("--verbosity", dest="verbosity", type=int)
+parser.add_argument("--method", default="fast")
+args = parser.parse_args()
+
+class dprint:
+	def __init__(self, desc):
+		self.desc = desc
+	def __enter__(self):
+		self.t1 = time.time()
+	def __exit__(self, type, value, traceback):
+		if args.verbosity >= 2:
+			sys.stderr.write("%6.2f %s\n" % (time.time()-self.t1,self.desc))
+
+# Allow slicing of input argument
+with dprint("read"):
+	toks = args.ifile.split(":")
+	ifile, slice = toks[0], ":".join(toks[1:])
+	m = enmap.read_map(ifile)
+	m = eval("m"+slice)
+	assert m.ndim >= 2, "Image must have at least 2 dimensions"
+
+# Flatten pre-dimensions
+mf = m.reshape((-1,)+m.shape[-2:])
+ncomp = mf.shape[0]
+
+with dprint("ranges"):
+	# Construct color ranges
+	def parse_range(desc,n):
+		res = np.array([float(w) for w in desc.split(":")])[:n]
+		return np.concatenate([res,np.repeat([res[-1]],n-len(res))])
+	crange = np.zeros((2,ncomp))+np.nan
+	# Try explicit limits if given
+	if args.range is not None:
+		crange[1] = parse_range(args.range)
+		crange[0] = -crange[1]
+	if args.min is not None: crange[0] = parse_range(args.min)
+	if args.max is not None: crange[1] = parse_range(args.max)
+	# Fall back on quantile otherwise
+	if np.any(np.isnan(crange)):
+		vals = np.sort(mf[np.isfinite(mf)])
+		n    = len(vals)
+		v1,v2 = vals[int(round(n*args.quantile))], vals[min(n-1,int(round(n*(1-args.quantile))))]
+		crange[0,np.isnan(crange[0])] = v1
+		crange[1,np.isnan(crange[1])] = v2
+
+# Construct default out format
+ndigit = int(np.log10(ncomp))+1
+dot  = args.ifile.rfind(".")
+if dot < 0: dot = len(args.ifile)
+if m.ndim == 2:
+	ofmt = args.ifile[:dot] + ".png"
+else:
+	ofmt = args.ifile[:dot] + "_%%0%dd.png" % ndigit
+if args.ofile: ofmt = args.ofile
+
+# Loop over fields
+for i in range(ncomp):
+	istr = ("%%0%dd/%%d" % ndigit) % (i+1,ncomp)
+	mdata = mf[i,::-1,::-1]
+	with dprint("%s rescale" % istr):
+		m_scaled = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
+	with dprint("%s colorize" % istr):
+		m_color  = colorize.colorize(m_scaled, desc=args.color, method=args.method)
+	with dprint("%s to image" % istr):
+		m_img    = Image.fromarray(m_color).convert('RGBA')
+	try:
+		oname = ofmt % i
+	except TypeError:
+		oname = ofmt
+	with dprint("%s write to %s" % (istr,oname)):
+		m_img.save(oname)
+	# Progress report
+	if args.verbosity == 1:
+		sys.stderr.write("\r%5d/%d" % (i+1,ncomp))
+if args.verbosity == 1: sys.stderr.write("\n")

@@ -80,7 +80,12 @@ for ifile in args.ifiles[comm.rank::comm.size]:
 	# Loop over fields
 	for i in range(ncomp):
 		istr = ("%%0%dd/%%d" % ndigit) % (i+1,ncomp)
-		mdata = mf[i,::-1,::-1]
+		# We want dec to increase upwards (negative pixel diretion)
+		# and ra to increae leftwards (negative pixel direction).
+		mdata = mf[i]
+		box = mf.box()
+		if box[1,0] > box[0,0]: mdata = mdata[::-1,:]
+		if box[1,1] > box[0,1]: mdata = mdata[:,::-1]
 		with dprint("%s rescale" % istr):
 			m_scaled = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
 		with dprint("%s colorize" % istr):

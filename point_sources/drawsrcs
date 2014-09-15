@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+if [[ ${#@} -lt 3 ]]; then
+	echo "Usage: drawsrcs imap.png srcs.txt omap.png [flip]" >&2
+	exit 1
+fi
+fy=0;fx=0
+flip=$4
+if [[ $flip == *x* ]]; then fx=1; fi
+if [[ $flip == *y* ]]; then fy=1; fi
+tmpfile=/tmp/draw${RANDOM}.txt
+# All coordinates will be flipped because png images
+# and enmaps count from opposite corners!
+dim=($(identify -format "%w %h" "$1"))
+awk -v w=${dim[0]} -v h=${dim[1]} -v fy=$y -v fx=$fx 'BEGIN{
+	print "xc:"
+}{
+	printf("-fill none -stroke black -strokewidth 2\n")
+	printf("-draw \"circle %f,%f %f,%f\"\n", fx?$5:w-1-$5,fy?$4:h-1-$4,(fx?$5:w-1-$5)+16,fy?$4:h-1-$4)
+	printf("-fill black -stroke black -pointsize 16 -strokewidth 0\n")
+	printf("-draw \"text %f,%f '"'"'%d'"'"'\"\n",(fx?$5:w-1-$5)+20,(fy?$4:h-1-$4)+20,NR)
+}' "$2" > "$tmpfile" && convert "$1" @"$tmpfile" -delete 1--1 "$3" #; rm -f "$tmpfile"

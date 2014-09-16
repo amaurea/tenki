@@ -13,6 +13,7 @@ parser.add_argument("-q", "--quantile", type=float, default=0.01)
 parser.add_argument("-v", dest="verbosity", action="count")
 parser.add_argument("--verbosity", dest="verbosity", type=int)
 parser.add_argument("--method", default="fast")
+parser.add_argument("--slice", type=str)
 args = parser.parse_args()
 
 if args.verbosity >= 3:
@@ -42,6 +43,8 @@ for ifile in args.ifiles[comm.rank::comm.size]:
 		ifile, slice = toks[0], ":".join(toks[1:])
 		m = enmap.read_map(ifile)
 		m = eval("m"+slice)
+		if args.slice is not None:
+			m = eval("m"+args.slice)
 		assert m.ndim >= 2, "Image must have at least 2 dimensions"
 
 	# Flatten pre-dimensions
@@ -102,4 +105,4 @@ for ifile in args.ifiles[comm.rank::comm.size]:
 		if args.verbosity == 2:
 			sys.stderr.write("\r%s %5d/%d" % (ifile, i+1,ncomp))
 	if args.verbosity == 2: sys.stderr.write("\n")
-	if args.verbosity == 1: sys.stderr.write("%s\n",ifile)
+	if args.verbosity == 1: sys.stderr.write("%s\n" % ifile)

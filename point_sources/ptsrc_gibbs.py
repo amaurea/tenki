@@ -17,6 +17,7 @@ parser.add_argument("-n", "--nsamp", type=int, default=50)
 parser.add_argument("--dump", type=int, default=0)
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-i", type=int, default=0)
+parser.add_argument("--mindist-group", type=float, default=10)
 args = parser.parse_args()
 
 comm = MPI.COMM_WORLD
@@ -75,16 +76,36 @@ noise = read_noise(args.noise, maps.shape, maps.wcs, len(freqs))
 ps    = powspec.read_spectrum(args.powspec, expand="diag")[:ncomp,:ncomp]
 poss  = np.loadtxt(args.posfile)[:,:2]/r2c
 R     = args.radius/r2c/60
-beam_fiducial = 1.0/r2b
+beam_fiducial = 1.5/r2b
 apod_rad = R/10
 
 # We will cut out small mini-maps around each source candadate and
 # sample the CMB and source parameters jointly. But some candiates
-# are so near each other that they aren't independent. This should
-# be handled, ideally. For now, we require each source to be within
-# mindist away from its starting position. That should at least
-# avoid having sources not being able to decide which source they
-# are.
+# are so near each other that they aren't independent. These must
+# be grouped into groups.
+def build_groups(poss):
+	def dist(a,b): return np.sum((poss[a]-poss[b])**2)**0.5*180*60/np.pi
+	rest   = set(range(len(poss)))
+	groups = []
+	while len(rest) > 0:
+		group = []
+		tocheck = [rest.pop()]
+		# Find distance to all other points
+		while len(tocheck) > 0:
+			current = tocheck.pop()
+			rnew = set()
+			while rest:
+				other = rest.pop()
+				if dist(current,other) < args.mindist_group:
+					tocheck.append(other)
+				else:
+					rnew.add(other)
+			rest = rnew
+			group.append(current)
+		groups.append(group)
+	return groups
+groups = build_groups(poss)
+print "Found %d groups" % len(groups)
 
 # We will sample (cmb,A,pos,ibeam) jointly in gibbs fashion:
 #  cmb,A   <- P(cmb,A|data,A,pos,ibeam)   # direct, but requires cr
@@ -170,6 +191,8 @@ class CMBSampler:
 		return self.dof.unzip(self.x)
 
 class PtsrcModel:
+	"""This class converts from point source shape parameters to amplitude
+	basis functions."""
 	def __init__(self, template):
 		self.pos   = template.posmap()
 		self.nfreq, self.ncomp = template.shape[:2]
@@ -237,6 +260,19 @@ class ShapeSampler:
 		for i in range(self.nsamp): self.subsample(verbose)
 		return self.amps, self.pos, self.irads
 
+class ShapeSamplerMulti:
+	def __init__(self, maps, inoise, model, amps, pos, pos0, irads, nsamp=200, stepsize=0.02, maxdist=1.5*np.pi/180/60):
+		self.samplers = [ShapeSampler(maps, inoise, model, amp1, pos1, pos01, irads1, nsamp=1, stepsize=stepsize, maxdist=maxdist) for amp1, pos1, pos01, irads1 in zip(amps, pos, pos0, irads)]
+		self.nsamp   = nsamp
+	def sample(self, verbose=False):
+		for i in range(self.nsamp):
+			for sampler in self.samplers:
+				sampler.sample(verbose)
+		amps = np.array([s.amps  for s in self.samplers])
+		pos  = np.array([s.pos   for s in self.samplers])
+		irads= np.array([s.irads for s in self.samplers])
+		return amps, pos, irads
+
 class GibbsSampler:
 	def __init__(self, maps, inoise, ps, pos0, amp0, irads0, cmb0):
 		self.maps   = maps
@@ -254,6 +290,30 @@ class GibbsSampler:
 		# Then draw pos,irads <- P(pos,irads|data,cmb,amp)
 		maps_nocmb = self.maps - self.cmb[None,:,:,:]
 		shape_sampler = ShapeSampler(maps_nocmb, self.inoise, self.src_model, self.amp, self.pos, self.pos0, self.irads)
+		self.amp, self.pos, self.irads = shape_sampler.sample(verbose)
+		return self.pos, self.amp, self.irads, self.cmb
+
+class GibbsSamplerMulti:
+	"""Like GibbsSampler, but samples multiple points jointly.
+	This means that the source amplitude parameters will be arrays."""
+	def __init__(self, maps, inoise, ps, pos0, amp0, irads0, cmb0):
+		self.maps   = maps
+		self.inoise = inoise
+		self.ps     = ps
+		self.src_model = PtsrcModel(maps)
+		self.pos, self.amp, self.irads, self.cmb = pos0, amp0, irads0, cmb0
+		self.pos0 = pos0
+		self.cmb_sampler = CMBSampler(maps, inoise, ps)
+	def sample(self, verbose=False):
+		# First draw cmb,amp <- P(cmb,amp|data,pos,irads)
+		src_template = np.concatenate([self.src_model.get_templates(pos, irads) for pos,irads in zip(self.pos, self.irads)])
+		self.cmb_sampler.set_template(src_template)
+		self.cmb, self.amp = self.cmb_sampler.sample(verbose)
+		# Separate amps for each source
+		self.amp = self.amp.reshape(self.pos.shape[0],-1)
+		# Then draw pos,irads <- P(pos,irads|data,cmb,amp)
+		maps_nocmb = self.maps - self.cmb[None,:,:,:]
+		shape_sampler = ShapeSamplerMulti(maps_nocmb, self.inoise, self.src_model, self.amp, self.pos, self.pos0, self.irads)
 		self.amp, self.pos, self.irads = shape_sampler.sample(verbose)
 		return self.pos, self.amp, self.irads, self.cmb
 
@@ -289,35 +349,39 @@ def get_startpoint(maps, inoise, ps, rad=5):
 
 utils.mkdir(args.odir)
 
-for i in range(myid, len(poss), nproc):
+for i in range(myid, len(groups), nproc):
 	if i < args.i: continue
-	print "%5d/%d %3d" % (i+1, len(poss), myid)
-	pos0 = poss[i]
+	group = groups[i]
+	print "%5d/%d %3d:" % (i+1, len(groups), myid),
+	print (" %3d"*len(group)) % tuple(group)
+	pos0  = np.array([poss[j] for j in group])
 	# Cut out a relevant region
-	box      = np.array([pos0-R,pos0+R])
+	box      = np.array([np.min(pos0,0)-R,np.max(pos0,0)+R])
 	submap   = maps.submap(box)
 	subnoise = apodize(noise.submap(box), apod_rad, apod_step)
-	# Set up initial values for the sampler. First find a starting
-	# point by fitting CMB, and then using the strongest residual
-	# in a search area.
-	irads    = np.array([1/beam_fiducial**2,1/beam_fiducial**2,0])
-	#pos0     = get_startpoint(submap, subnoise, ps)
-	amp      = np.zeros(ncomp*nfreq)
+	# Set up initial values for the sampler
+	irads    = np.tile(np.array([1/beam_fiducial**2,1/beam_fiducial**2,0]),(len(group),1))
+	amp      = np.zeros([len(group),ncomp*nfreq])
 	cmb      = submap[0]
-	sampler  = GibbsSampler(submap, subnoise, ps, pos0, amp, irads, cmb)
-	with open(args.odir + "/samps%03d.txt" % i, "w") as ofile:
-		for j in xrange(-args.burnin, args.nsamp):
-			pos, amp, irads, cmb = sampler.sample(args.verbose)
-			if j >= 0:
-				sigma, phi = expand_beam(irads)
-				print >> ofile, (" %10.5f"*2 + " %6.1f"*len(amp) + "%8.3f %8.3f %8.3f") % (tuple(pos*r2c)+tuple(amp)+tuple(sigma*r2b)+(phi*r2c,))
+	sampler  = GibbsSamplerMulti(submap, subnoise, ps, pos0, amp, irads, cmb)
+	# Open ofiles
+	ofiles = [open(args.odir + "/samps%03d.txt" % j, "w") for j in group]
+	for j in xrange(-args.burnin, args.nsamp):
+		pos, amp, irad, cmb = sampler.sample(args.verbose)
+		if j >= 0:
+			for mypos, myamp, myirad, ofile, isrc in zip(pos, amp, irad, ofiles,group):
+				sigma, phi = expand_beam(myirad)
+				print >> ofile, (" %10.5f"*2 + " %6.1f"*len(myamp) + "%8.3f %8.3f %8.3f") % (tuple(mypos*r2c)+tuple(myamp)+tuple(sigma*r2b)+(phi*r2c,))
 				ofile.flush()
 				if args.dump > 0 and j % args.dump == 0:
-					dumpdir = args.odir + "/dump%03d" % i
+					dumpdir = args.odir + "/dump%03d" % isrc
 					utils.mkdir(dumpdir)
-					src = sampler.src_model.get_model(amp, pos, irads)
+					src = sampler.src_model.get_model(myamp, mypos, myirad)
 					residual = submap - src - cmb[None]
-					en.write_map(dumpdir + "/cmb%03d.hdf" % j, cmb)
-					en.write_map(dumpdir + "/residual%03d.hdf" % j, residual)
-					en.write_map(dumpdir + "/model%03d.hdf" % j, src)
-					en.write_map(dumpdir + "/submap.hdf", submap)
+					# Cut out our area
+					mybox = np.array([poss[isrc]-R,poss[isrc]+R])
+					mycmb, myres, mymod, mysub = [a.submap(box) for a in [cmb,residual,src,submap]]
+					en.write_map(dumpdir + "/cmb%03d.hdf" % j, mycmb)
+					en.write_map(dumpdir + "/residual%03d.hdf" % j, myres)
+					en.write_map(dumpdir + "/model%03d.hdf" % j, mymod)
+					en.write_map(dumpdir + "/submap.hdf", mysub)

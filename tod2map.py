@@ -14,7 +14,6 @@ parser.add_argument("filelist")
 parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("-d", "--dump", type=int, default=10)
-parser.add_argument("-n", "--ntod", type=int, default=0)
 parser.add_argument("--ncomp",      type=int, default=3)
 parser.add_argument("--ndet",       type=int, default=0)
 args = parser.parse_args()
@@ -26,8 +25,11 @@ myid  = comm.rank
 nproc = comm.size
 
 db       = filedb.ACTdb(config.get("filedb"))
-filelist = [line.split()[0] for line in open(args.filelist,"r") if line[0] != "#"]
-if args.ntod > 0: filelist = filelist[:args.ntod]
+# Allow filelist to take the format filename:[slice]
+toks = args.filelist.split(":")
+filelist, fslice = toks[0], ":".join(toks[1:])
+filelist = [line.split()[0] for line in open(filelist,"r") if line[0] != "#"]
+filelist = eval("filelist"+fslice)
 
 area = enmap.read_map(args.area)
 area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)

@@ -18,6 +18,7 @@ parser.add_argument("--dump", type=int, default=0)
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-i", type=int, default=0)
 parser.add_argument("--mindist-group", type=float, default=10)
+parser.add_argument("-c", "--cont", action="store_true")
 args = parser.parse_args()
 
 comm = MPI.COMM_WORLD
@@ -77,6 +78,8 @@ ps    = powspec.read_spectrum(args.powspec, expand="diag")[:ncomp,:ncomp]
 poss  = np.loadtxt(args.posfile)[:,:2]/r2c
 R     = args.radius/r2c/60
 beam_fiducial = 1.5/r2b
+beam_range = [0.8/r2b,3.0/r2b]
+beam_max_asym = 2
 apod_rad = R/10
 
 # We will cut out small mini-maps around each source candadate and
@@ -222,6 +225,10 @@ class ShapeSampler:
 	def getlik(self, amps, pos, irads):
 		if irads[0] < 0 or irads[1] < 0: return np.inf
 		if irads[0]*irads[1]-irads[2]**2 <= 0: return np.inf
+		sigma, phi = expand_beam(irads)
+		# The beam has a tendency to run off in unrealistic directions,
+		# so we need a relatively strong prior on it.
+		if np.min(sigma) < beam_range[0] or np.max(sigma) > beam_range[1] or np.max(sigma)/np.min(sigma) > beam_max_asym: return np.inf
 		template = self.model.get_model(amps, pos, irads)
 		residual = self.maps-template
 		tmp = np.einsum("fabyx,abyx->fayx",self.inoise, residual)
@@ -347,17 +354,42 @@ def get_startpoint(maps, inoise, ps, rad=5):
 	pos = center.posmap()[:,ipix[0],ipix[1]]
 	return pos
 
+def B(T,nu):
+	c = 299792458.0
+	h = 6.62606957e-34
+	k = 1.3806488e-23
+	return 2*h*nu**3/c**2/(np.exp(h*nu/k/T)-1)
+def uK2mJ(amp,b1,b2):
+	T0 = 2.73; nu=148e9
+	dB = B(T0+amp*1e-6,nu)-B(T0,nu)
+	return dB*2*np.pi*b1*b2/1e-29
+
+def output_dummy(id):
+	with open(args.odir+"/samps%03d.txt" % id, "w") as ofile:
+		pass
+
 utils.mkdir(args.odir)
 
 for i in range(myid, len(groups), nproc):
 	if i < args.i: continue
 	group = groups[i]
+	if args.cont:
+		# If all our members are done, skip to next group
+		try:
+			lens = [len(np.loadtxt(args.odir + "/samps%03d.txt" % j)) for j in group]
+			if np.min(lens) >= args.nsamp:
+				continue
+		except IOError: pass
 	print "%5d/%d %3d:" % (i+1, len(groups), myid),
 	print (" %3d"*len(group)) % tuple(group)
 	pos0  = np.array([poss[j] for j in group])
 	# Cut out a relevant region
 	box      = np.array([np.min(pos0,0)-R,np.max(pos0,0)+R])
 	submap   = maps.submap(box)
+	if submap.size == 0:
+		for g in group:
+			output_dummy(g)
+		continue
 	subnoise = apodize(noise.submap(box), apod_rad, apod_step)
 	# Set up initial values for the sampler
 	irads    = np.tile(np.array([1/beam_fiducial**2,1/beam_fiducial**2,0]),(len(group),1))
@@ -371,7 +403,8 @@ for i in range(myid, len(groups), nproc):
 		if j >= 0:
 			for mypos, myamp, myirad, ofile, isrc in zip(pos, amp, irad, ofiles,group):
 				sigma, phi = expand_beam(myirad)
-				print >> ofile, (" %10.5f"*2 + " %6.1f"*len(myamp) + "%8.3f %8.3f %8.3f") % (tuple(mypos*r2c)+tuple(myamp)+tuple(sigma*r2b)+(phi*r2c,))
+				mJ = uK2mJ(myamp,sigma[0],sigma[1])
+				print >> ofile, (" %10.5f"*2 + " %6.1f"*len(myamp) + "%8.3f %8.3f %8.3f" + " %6.2f"*len(mJ)) % (tuple(mypos*r2c)+tuple(myamp)+tuple(sigma*r2b)+(phi*r2c,)+tuple(mJ))
 				ofile.flush()
 				if args.dump > 0 and j % args.dump == 0:
 					dumpdir = args.odir + "/dump%03d" % isrc
@@ -380,7 +413,7 @@ for i in range(myid, len(groups), nproc):
 					residual = submap - src - cmb[None]
 					# Cut out our area
 					mybox = np.array([poss[isrc]-R,poss[isrc]+R])
-					mycmb, myres, mymod, mysub = [a.submap(box) for a in [cmb,residual,src,submap]]
+					mycmb, myres, mymod, mysub = [a.submap(mybox) for a in [cmb,residual,src,submap]]
 					en.write_map(dumpdir + "/cmb%03d.hdf" % j, mycmb)
 					en.write_map(dumpdir + "/residual%03d.hdf" % j, myres)
 					en.write_map(dumpdir + "/model%03d.hdf" % j, mymod)

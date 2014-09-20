@@ -8,7 +8,7 @@ awk '{
 	}
 }END{
 	for(i=1;i<=am;i++){
-		for(j=1;j<=8;j++){
+		for(j=1;j<=11;j++){
 			v=a[i,j]/n[i,j]
 			vv=aa[i,j]/n[i,j]
 			s=(vv-v**2)**0.5

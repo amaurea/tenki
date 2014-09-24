@@ -10,6 +10,7 @@ config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("map_precon", "bin", "Preconditioner to use for map-making")
 config.default("map_cg_nmax", 1000, "Max number of CG steps to perform in map-making")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
+config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for myid:n:nproc-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
@@ -58,6 +59,7 @@ L = log.init(level=log_level, file=logfile, rank=myid)
 utils.mkdir(args.odir + "/bench")
 benchfile = args.odir + "/bench/bench%03d.txt" % myid
 
+# Read in all our scans
 L.info("Reading scans")
 tmpinds    = np.arange(len(filelist))[myid::nproc]
 myscans, myinds  = [], []
@@ -76,6 +78,28 @@ L.info("Found %d tods" % nread)
 if nread == 0:
 	L.info("Giving up")
 	sys.exit(1)
+
+if config.get("task_dist") == "size":
+	# Try to get about the same amount of data for each mpi task.
+	mycosts = [s.nsamp*s.ndet for s in myscans]
+	all_costs = comm.allreduce(mycosts)
+	all_inds  = comm.allreduce(myinds)
+	myinds_old = myinds
+	myinds = [all_inds[i] for i in utils.equal_split(all_costs, nproc)[myid]]
+	# And reread the correct files this time. Ideally we would
+	# transfer this with an mpi all-to-all, but then we would
+	# need to serialize and unserialize lots of data, which
+	# would require lots of code.
+	if sorted(myinds_old) != sorted(myinds):
+		L.info("Rereading shuffled scans")
+		myscans = []
+		for ind in myinds:
+			d = data.ACTScan(db[filelist[ind]])[:,::config.get("downsample")]
+			if args.ndet > 0: d = d[:args.ndet]
+			myscans.append(d)
+			L.debug("Read %s" % filelist[ind])
+	else:
+		myinds = myinds_old
 
 L.info("Building equation system")
 eq  = map_equation.LinearSystemMap(myscans, area, precon=precon)

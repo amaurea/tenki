@@ -22,7 +22,7 @@ parser.add_argument("--ndet",       type=int, default=0)
 args = parser.parse_args()
 
 precon= config.get("map_precon")
-dtype = np.float32 if config.get("map_bits") == 32 else 64
+dtype = np.float32 if config.get("map_bits") == 32 else np.float64
 comm  = mpi4py.MPI.COMM_WORLD
 myid  = comm.rank
 nproc = comm.size

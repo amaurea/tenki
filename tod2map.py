@@ -1,6 +1,6 @@
 import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil
 from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
-from enlib import log, bench
+from enlib import log, bench, scan
 from enlib.cg import CG
 from enact import data, nmat_measure, filedb
 
@@ -65,13 +65,18 @@ tmpinds    = np.arange(len(filelist))[myid::nproc]
 myscans, myinds  = [], []
 for ind in tmpinds:
 	try:
-		d = data.ACTScan(db[filelist[ind]])[:,::config.get("downsample")]
-		if args.ndet > 0: d = d[:args.ndet]
-		myscans.append(d)
-		myinds.append(ind)
-		L.debug("Read %s" % filelist[ind])
-	except errors.DataMissing as e:
-		L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
+		d = scan.read_scan(filelist[ind])
+	except IOError:
+		try:
+			d = data.ACTScan(db[filelist[ind]])
+		except errors.DataMissing as e:
+			L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
+			continue
+	d = d[:,::config.get("downsample")]
+	if args.ndet > 0: d = d[:args.ndet]
+	myscans.append(d)
+	myinds.append(ind)
+	L.debug("Read %s" % filelist[ind])
 
 nread = comm.allreduce(len(myscans))
 L.info("Found %d tods" % nread)

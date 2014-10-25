@@ -1,4 +1,4 @@
-import numpy as np, argparse, time, os
+import numpy as np, argparse, time, os, zipfile
 from mpi4py import MPI
 from enlib import utils, fft, nmat, errors, config
 from enact import filedb, data, nmat_measure
@@ -17,7 +17,7 @@ model = args.model
 
 utils.mkdir(args.odir)
 
-db       = filedb.ACTdb(config.get("filedb"))
+db       = filedb.ACTFiles(config.get("filedb"))
 filelist = [line.split()[0] for filelist in args.filelists for line in open(filelist,"r") if line[0] != "#"]
 myinds   = range(len(filelist))[myid::nproc]
 n        = len(filelist)
@@ -34,10 +34,14 @@ for i in myinds:
 	except errors.DataMissing as e:
 		print "%3d/%d %25s skip (%s)" % (i+1,n,id, e.message)
 		continue
+	except zipfile.BadZipfile:
+		print "%d/%d %25s bad zip" % (i+1,n,id)
+		continue
 	ft = fft.rfft(d.tod) * d.tod.shape[1]**-0.5                          ; t.append(time.time())
 	if model == "old":
 		noise = nmat_measure.detvecs_old(ft, d.srate, d.dets)
 	elif model == "jon":
+		di = np.where(d.dets==20)[0]
 		noise = nmat_measure.detvecs_jon(ft, d.srate, d.dets)
 	elif model == "simple":
 		noise = nmat_measure.detvecs_simple(ft, d.srate, d.dets)

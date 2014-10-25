@@ -28,7 +28,7 @@ myid  = comm.rank
 nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 
-db       = filedb.ACTdb(config.get("filedb"))
+db       = filedb.ACTFiles(config.get("filedb"))
 # Allow filelist to take the format filename:[slice]
 toks = args.filelist.split(":")
 filelist, fslice = toks[0], ":".join(toks[1:])

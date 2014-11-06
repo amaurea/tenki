@@ -1,7 +1,7 @@
 import numpy as np, argparse, sys, itertools, os, errno
 from mpi4py import MPI
 from enlib import enmap as en, powspec, utils
-from enlib.degrees_of_freedom import DOF
+from enlib.degrees_of_freedom import DOF, Arg
 from enlib.cg import CG
 #from matplotlib.pylab import *
 parser = argparse.ArgumentParser()
@@ -144,7 +144,7 @@ class CMBSampler:
 		if T is None: T = np.zeros((0,)+self.d.shape)
 		self.T   = T
 		self.TT = np.einsum("aijyx,bijyx->ab",self.T,self.T)
-		self.dof = DOF(self.d[0], T.shape[:1])
+		self.dof = DOF(Arg(default=self.d[0]), Arg(shape=T.shape[:1]))
 	def P(self, u):
 		s, a = self.dof.unzip(u)
 		return s[None,:,:,:] + np.sum(self.T*a[:,None,None,None,None],0)

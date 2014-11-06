@@ -41,10 +41,11 @@ for ifile in args.ifiles[comm.rank::comm.size]:
 	with dprint("read %s" % ifile):
 		toks = ifile.split(":")
 		ifile, slice = toks[0], ":".join(toks[1:])
-		m = enmap.read_map(ifile)
-		m = eval("m"+slice)
+		m0 = enmap.read_map(ifile)
+		m = eval("m0"+slice)
 		if args.slice is not None:
 			m = eval("m"+args.slice)
+		flip = (m.wcs.wcs.cdelt*m0.wcs.wcs.cdelt)[::-1]<0
 		assert m.ndim >= 2, "Image must have at least 2 dimensions"
 
 	# Flatten pre-dimensions
@@ -89,6 +90,8 @@ for ifile in args.ifiles[comm.rank::comm.size]:
 		box = mf.box()
 		if box[1,0] > box[0,0]: mdata = mdata[::-1,:]
 		if box[1,1] > box[0,1]: mdata = mdata[:,::-1]
+		if flip[0]: mdata = mdata[::-1,:]
+		if flip[1]: mdata = mdata[:,::-1]
 		with dprint("%s rescale" % istr):
 			m_scaled = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
 		with dprint("%s colorize" % istr):

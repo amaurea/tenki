@@ -17,6 +17,7 @@ parser.add_argument("--siglim", type=float, default=3.5)
 parser.add_argument("--masklim", type=float, default=6)
 parser.add_argument("--mindist", type=int, default=2)
 parser.add_argument("--nmax", type=int, default=350)
+parser.add_argument("--noise-max", type=float, default=1e5)
 args = parser.parse_args()
 
 utils.mkdir(args.odir)
@@ -25,12 +26,23 @@ map    = enmap.read_map(args.map)
 map    = map.reshape((-1,)+map.shape[-2:])[0][None]
 inoise  = enmap.read_map(args.noise)
 inoise  = inoise.reshape((-1,)+inoise.shape[-2:])[0][None,None]
-# Truncate to fft-friendly areas
-h = fft.fft_len(map.shape[-2],[2,3,5])
-w = fft.fft_len(map.shape[-1],[2,3,5])
-map    = map[:,:h,:w]
-inoise = inoise[:,:,:h,:w]
-map[~np.isfinite(map)] = 0
+shape_orig = map.shape[-2:]
+# Mask out too noisy areas
+mask = inoise[0,0] < args.noise_max**-2
+map[:,mask] = np.nan
+map, info = enmap.autocrop(map, method="fft", return_info=True)
+inoise = enmap.padcrop(inoise, info)
+map[np.isnan(map)] = 0
+shape_crop = map.shape[-2:]
+print "Cropped from %s to %s" % (str(shape_orig),str(shape_crop))
+
+## Truncate to fft-friendly areas
+#h = fft.fft_len(map.shape[-2],[2,3,5])
+#w = fft.fft_len(map.shape[-1],[2,3,5])
+#map    = map[:,:h,:w]
+#inoise = inoise[:,:,:h,:w]
+#map[~np.isfinite(map)] = 0
+
 # Kill extreme values
 map = np.minimum(1e6,np.maximum(-1e6,map))
 

@@ -1,4 +1,4 @@
-import numpy as np, mpi4py.MPI, os
+import numpy as np, mpi4py.MPI, os, sys
 from enlib import config, utils, coordinates, targets
 from enact import filedb, files
 
@@ -30,3 +30,4 @@ for ind in range(comm.rank, len(filelist), comm.size):
 	name  = obj.name if obj else "misc"
 
 	print "%s %s" % (id, name)
+	sys.stdout.flush()

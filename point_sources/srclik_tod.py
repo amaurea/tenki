@@ -21,14 +21,15 @@ parser.add_argument("filelist")
 parser.add_argument("srcs")
 parser.add_argument("odir")
 parser.add_argument("--ncomp", type=int, default=1)
-parser.add_argument("--nsamp", type=int, default=300)
-parser.add_argument("--burnin",type=int, default=100)
+parser.add_argument("--nsamp", type=int, default=50)
+parser.add_argument("--burnin",type=int, default=50)
 parser.add_argument("--thin", type=int, default=2)
 parser.add_argument("--minrange", type=int, default=100)
 parser.add_argument("-R", "--radius", type=float, default=5.0)
 parser.add_argument("-r", "--resolution", type=float, default=0.25)
 parser.add_argument("-d", "--dump", type=int, default=100)
 parser.add_argument("--freeze-beam", type=float, default=0)
+parser.add_argument("--nchain", type=int, default=3)
 args = parser.parse_args()
 
 verbosity = config.get("verbosity")
@@ -45,7 +46,7 @@ beam_min = 0.6*b2r
 beam_max = 3.0*b2r
 beam_ratio_max = 3.0
 # prior on position
-pos_deviation_max = 2*m2r
+pos_deviation_max = 3*m2r
 
 log_level = log.verbosity2level(verbosity)
 L = log.init(level=log_level, rank=comm.rank)
@@ -72,6 +73,19 @@ def amp2pflux(amp, beam):
 	return amp*np.product(beam[:2])**0.5
 def pflux2amp(pflux, beam):
 	return pflux/np.product(beam[:2])**0.5
+
+def estimate_SN(d, srcs):
+	# Estimate signal-to-noise in this TOD by generating a fiducial model
+	model = d.tod.astype(dtype)
+	params = np.zeros([len(srcs),2+3+ncomp],dtype=dtype)
+	bfid = srcs[0,19]*b2r
+	params[:,:2] = srcs[:,[3,5]]*d2r
+	params[:,2:-3] = srcs[:,7:7+2*ncomp:2]
+	params[:,-3:] = utils.compress_beam(np.array([bfid,bfid]),0.0)[None,:]
+	ptsrc_data.pmat_model(model, params, d)
+	nmodel = model.copy()
+	ptsrc_data.nmat_mwhite(nmodel, d)
+	return np.sum(model*nmodel)
 
 # Define our sampling scheme
 class SrcSampler:
@@ -262,22 +276,6 @@ class SrcSampler:
 		self.step += 1
 		return self.off, np.concatenate([sigma,[phi]]), pflux2amp(self.pflux,self.beam)
 
-#def beam_prior(sigma, phi):
-#	"""We want a uniform prior in log(sigma) and phi."""
-#	# First do the beam to ibeam part
-#	c,s = np.cos(phi), np.sin(phi)
-#	b2, b3 = sigma**-2, sigma**-3
-#	db = b2[0]-b2[1]
-#	J_ib_b = np.array([
-#			[ -2*c*c*b3[0], +2*s*s*b3[1], -2*s*c*db ],
-#			[ +2*s*s*b3[0], -2*c*c*b3[1], +2*c*s*db ],
-#			[ -2*c*s*b3[0], +2*s*c*b3[1], (c*c-s*s)*db ]])
-#	det_J_ib_b = np.log(np.abs(np.linalg.det(J_ib_b)))
-#	# Then do the log(sigma) to sigma part. This one is diagonal
-#	det_J_ls_s = np.log(np.abs(1/np.product(sigma)))
-#	# Combine into a full prior
-#	return -det_J_ib_b+det_J_ls_s
-
 def make_maps(tod, data, pos, ncomp, radius, resolution):
 	tod = tod.copy()
 	nsrc= len(pos)
@@ -315,42 +313,44 @@ for ind in range(comm.rank, ntod, comm.size):
 
 	d = ptsrc_data.read_srcscan(fname)
 
-	# Validate the noise model
+	# Override noise model - the one from the files
+	# doesn't seem to be reliable enough.
 	vars, nvars = ptsrc_data.measure_mwhite(d.tod, d)
 	ivars = np.sum(nvars,0)/np.sum(vars,0)
-	# I don't trust the supplied noise model. 
 	d.ivars = ivars
-	#print d.ivars/ivars
-	#1/0
 
 	# Discard sources that aren't sufficiently hit
 	srcmask = d.offsets[:,-1]-d.offsets[:,0] > args.minrange
+	if np.sum(srcmask) == 0:
+		L.debug("Too few sources in %s, skipping" % id)
+		continue
+
 	# We don't like detectors the noise properties vary too much.
 	detmask = np.zeros(len(ivars),dtype=bool)
 	for di, (dvar,ndvar) in enumerate(zip(vars.T,nvars.T)):
 		dhit = ndvar > 20
+		if np.sum(dhit) == 0:
+			# oops, rejected everything
+			detmask[di] = False
+			continue
 		dvar, ndvar = dvar[dhit], ndvar[dhit]
 		mean_variance = np.sum(dvar)/np.sum(ndvar)
 		individual_variances = dvar/ndvar
 		# It is dangerous if the actual variance in a segment of the tod
 		# is much higher than what we think it is.
 		detmask[di] = np.max(individual_variances/mean_variance) < 3
-		#print "%5d %12.5f %12.5f %12.5f" % (di, mvar*d.ivars[di], std*d.ivars[di], np.max(dvar/ndvar)*d.ivars[di])
-		#detmask[di] = std < mvar * 0.1
 	hit_srcs = np.where(srcmask)[0]
 	hit_dets = np.where(detmask)[0]
+	if len(hit_srcs) == 0 or len(hit_dets) == 0:
+		L.debug("All data rejected in %s, skipping" % id)
+		continue
 
 	d = d[hit_srcs,hit_dets]
 	my_nsrc, my_ndet = len(hit_srcs), len(hit_dets)
 	my_pos = pos[hit_srcs]
+	my_srcs= srcs[hit_srcs]
 
-	#nvars, vars = nvars[hit_srcs][:,hit_dets], vars[hit_srcs][:,hit_dets]
-	#ivars_src = nvars/vars
-	#for j in range(my_ndet):
-	#	for i in range(my_nsrc):
-	#		if d.offsets[i,-1]-d.offsets[i,0] <= args.minrange: continue
-	#		if np.isfinite(ivars_src[i,j]):
-	#			print "%4d %4d %12.5f %15.7e %15.7e %5d" % (i,j,(ivars_src[i,j]/d.ivars[j])**-1,(ivars_src[i,j])**-1,(d.ivars[j])**-1,nvars[i,j])
+	SN = estimate_SN(d, my_srcs)
 
 	# Make minimaps of our data, for visual inspection
 	dmaps, drhs, ddiv = make_maps(d.tod.astype(dtype), d, my_pos, ncomp, args.radius*m2r, args.resolution*m2r)
@@ -359,39 +359,43 @@ for ind in range(comm.rank, ntod, comm.size):
 		hfile["rhs"]  = drhs
 		hfile["div"]  = ddiv
 
-	# Start off with zero shift and a standard beam
-	off0  = np.array([0.0,0.0])
-	amp0  = np.zeros([my_nsrc,ncomp])
-	doff  = 0.20*m2r
-	if args.freeze_beam != 0:
-		beam0 = np.array([args.freeze_beam*b2r,args.freeze_beam*b2r,0.0])
-		dbeam = np.array([0.00*b2r,0.00*b2r,00*d2r])
-	else:
-		dbeam = np.array([0.20*b2r,0.20*b2r,40*d2r])
-	damp  = amp0 + 1500
-	# And sample from this data set
-	sampler = SrcSampler(d, my_pos, off0, beam0, amp0, doff, dbeam, damp)
-	offsets = np.zeros([args.nsamp, 2])
-	beams   = np.zeros([args.nsamp, 3])
-	amps    = np.zeros([args.nsamp,my_nsrc,ncomp])
-	for i in range(-args.burnin, args.nsamp):
-		for j in range(args.thin):
-			offset, beam, amp = sampler.draw(verbose=verbosity>1, fullmetro=False)
-		if i >= 0: 
-			offsets[i] = offset
-			beams[i]   = beam
-			amps[i]    = amp
-			if i % args.dump == 0:
-				params = sampler.get_params(offset, beam, amp2pflux(amp,beam))
-				model  = sampler.get_model(params)
-				mmaps, mrhs, mdiv = make_maps(model, d, my_pos, ncomp, args.radius*m2r, args.resolution*m2r)
-				with h5py.File(tdir + "/model%04d.hdf" % i, "w") as hfile:
-					hfile["data"] = mmaps
-					hfile["rhs"]  = mrhs
-					hfile["div"]  = mdiv
+	offsets = np.zeros([args.nchain,args.nsamp, 2])
+	beams   = np.zeros([args.nchain,args.nsamp, 3])
+	amps    = np.zeros([args.nchain,args.nsamp,my_nsrc,ncomp])
+	for chain in range(args.nchain):
+		# Start each chain with a random position to probe initial
+		# condition dependence.
+		off0  = np.random.standard_normal(2)*pos_deviation_max/4
+		amp0  = np.zeros([my_nsrc,ncomp])
+		doff  = 0.20*m2r
+		if args.freeze_beam != 0:
+			beam0 = np.array([args.freeze_beam*b2r,args.freeze_beam*b2r,0.0])
+			dbeam = np.array([0.00*b2r,0.00*b2r,00*d2r])
+		else:
+			beam0 = np.array([bfid,bfid,0.0])
+			dbeam = np.array([0.20*b2r,0.20*b2r,40*d2r])
+		damp  = amp0 + 1500
+		# And sample from this data set
+		sampler = SrcSampler(d, my_pos, off0, beam0, amp0, doff, dbeam, damp)
+		for i in range(-args.burnin, args.nsamp):
+			for j in range(args.thin):
+				offset, beam, amp = sampler.draw(verbose=verbosity>1, fullmetro=False)
+			if i >= 0: 
+				offsets[chain,i] = offset
+				beams[chain,i]   = beam
+				amps[chain,i]    = amp
+				if i % args.dump == 0:
+					params = sampler.get_params(offset, beam, amp2pflux(amp,beam))
+					model  = sampler.get_model(params)
+					mmaps, mrhs, mdiv = make_maps(model, d, my_pos, ncomp, args.radius*m2r, args.resolution*m2r)
+					with h5py.File(tdir + "/model%d_%04d.hdf" % (chain,i), "w") as hfile:
+						hfile["data"] = mmaps
+						hfile["rhs"]  = mrhs
+						hfile["div"]  = mdiv
 	# And save the results
 	with h5py.File(tdir + "/params.hdf", "w") as hfile:
 		hfile["offsets"] = offsets
 		hfile["beams"] = beams
 		hfile["amps"] = amps
 		hfile["srcs"] = hit_srcs
+		hfile["SN"] = SN

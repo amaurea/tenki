@@ -1,8 +1,10 @@
-import numpy as np, argparse, sys, itertools, os, errno
+import numpy as np, argparse, sys, itertools, os, errno, warnings
 from mpi4py import MPI
 from enlib import enmap as en, powspec, utils
 from enlib.degrees_of_freedom import DOF, Arg
 from enlib.cg import CG
+warnings.filterwarnings("ignore")
+
 #from matplotlib.pylab import *
 parser = argparse.ArgumentParser()
 parser.add_argument("freqs")

@@ -28,6 +28,7 @@ parser.add_argument("--minrange", type=int, default=100)
 parser.add_argument("-R", "--radius", type=float, default=5.0)
 parser.add_argument("-r", "--resolution", type=float, default=0.25)
 parser.add_argument("-d", "--dump", type=int, default=100)
+parser.add_argument("-c", action="store_true")
 parser.add_argument("--freeze-beam", type=float, default=0)
 parser.add_argument("--nchain", type=int, default=3)
 args = parser.parse_args()
@@ -310,6 +311,8 @@ for ind in range(comm.rank, ntod, comm.size):
 	# Make our per-tod output dir
 	tdir = args.odir + "/" + id
 	utils.mkdir(tdir)
+	if args.c and os.path.isfile(tdir + "/params.hdf"):
+		continue
 
 	d = ptsrc_data.read_srcscan(fname)
 

@@ -35,9 +35,9 @@ w = nonan(enmap.read_map(ihits[0]))
 wm = mul(w,m)
 
 for mif,wif in zip(imaps[1:],ihits[1:]):
-	L.info("Reading %s" % imaps[0])
+	L.info("Reading %s" % mif)
 	mi = nonan(enmap.read_map(mif))
-	L.info("Reading %s" % ihits[0])
+	L.info("Reading %s" % wif)
 	wi = nonan(enmap.read_map(wif))
 	w  += wi
 	wm += mul(wi,mi)

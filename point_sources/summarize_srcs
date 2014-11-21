@@ -9,8 +9,9 @@ awk '{
 }END{
 	for(i=1;i<=am;i++){
 		for(j=1;j<=11;j++){
-			v=a[i,j]/n[i,j]
-			vv=aa[i,j]/n[i,j]
+			N=n[i,j]<1?1:n[i,j]
+			v=a[i,j]/N
+			vv=aa[i,j]/N
 			s=(vv-v**2)**0.5
 			printf(" %9.4f %9.4f",v,s)
 		}

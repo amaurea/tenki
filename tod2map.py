@@ -16,6 +16,7 @@ parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
 parser.add_argument("area")
 parser.add_argument("odir")
+parser.add_argument("prefix",nargs="?")
 parser.add_argument("-d", "--dump", type=int, default=10)
 parser.add_argument("--ncomp",      type=int, default=3)
 parser.add_argument("--ndet",       type=int, default=0)
@@ -38,26 +39,31 @@ filelist = eval("filelist"+fslice)
 area = enmap.read_map(args.area)
 area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 utils.mkdir(args.odir)
+if args.prefix:
+	root = args.odir + "/" + args.prefix + "_"
+else:
+	root = args.odir + "/"
+
 # Dump our settings
 if myid == 0:
-	config.save(args.odir + "/config.txt")
-	with open(args.odir + "/args.txt","w") as f:
+	config.save(root + "config.txt")
+	with open(root + "args.txt","w") as f:
 		f.write(" ".join([pipes.quote(a) for a in sys.argv[1:]]) + "\n")
-	with open(args.odir + "/env.txt","w") as f:
+	with open(root + "env.txt","w") as f:
 		for k,v in os.environ.items():
 			f.write("%s: %s\n" %(k,v))
-	with open(args.odir + "/ids.txt","w") as f:
+	with open(root + "ids.txt","w") as f:
 		for id in filelist:
 			f.write("%s\n" % id)
-	shutil.copyfile(config.get("filedb"), args.odir + "/filedb.txt")
+	shutil.copyfile(config.get("filedb"), root + "filedb.txt")
 # Set up logging
-utils.mkdir(args.odir + "/log")
-logfile   = args.odir + "/log/log%03d.txt" % myid
+utils.mkdir(root + "log")
+logfile   = root + "log/log%03d.txt" % myid
 log_level = log.verbosity2level(config.get("verbosity"))
 L = log.init(level=log_level, file=logfile, rank=myid)
 # And benchmarking
-utils.mkdir(args.odir + "/bench")
-benchfile = args.odir + "/bench/bench%03d.txt" % myid
+utils.mkdir(root + "bench")
+benchfile = root + "bench/bench%03d.txt" % myid
 
 # Read in all our scans
 L.info("Reading scans")
@@ -108,13 +114,13 @@ if config.get("task_dist") == "size":
 
 L.info("Building equation system")
 eq  = map_equation.LinearSystemMap(myscans, area, precon=precon)
-eq.write(args.odir)
+eq.write(root)
 bench.stats.write(benchfile)
 
 L.info("Computing approximate map")
 x  = eq.M(eq.b)
 bmap = eq.dof.unzip(x)[0]
-if myid == 0: enmap.write_map(args.odir + "/bin.fits", bmap)
+if myid == 0: enmap.write_map(root + "bin.fits", bmap)
 
 def solve_cg(eq, nmax=1000, ofmt=None, dump_interval=10):
 	cg = CG(eq.A, eq.b, M=eq.M, dot=eq.dof.dot)
@@ -132,4 +138,4 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump_interval=10):
 
 if nmax > 0:
 	L.info("Solving equation")
-	x = solve_cg(eq, nmax=nmax, ofmt=args.odir + "/dump%04d.fits", dump_interval=args.dump)
+	x = solve_cg(eq, nmax=nmax, ofmt=root + "map%04d.fits", dump_interval=args.dump)

@@ -16,6 +16,7 @@ parser.add_argument("odir")
 parser.add_argument("--ncomp",      type=int,   default=3)
 parser.add_argument("--ndet",       type=int,   default=0)
 parser.add_argument("--minsigma",   type=float, default=4)
+parser.add_argument("-c", action="store_true")
 args = parser.parse_args()
 
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
@@ -54,7 +55,7 @@ if myid == 0:
 utils.mkdir(args.odir + "/log")
 logfile   = args.odir + "/log/log%03d.txt" % myid
 log_level = log.verbosity2level(config.get("verbosity"))
-L = log.init(level=log_level, file=logfile, rank=myid)
+L = log.init(level=log_level, file=logfile, rank=myid, shared=False)
 # And benchmarking
 utils.mkdir(args.odir + "/bench")
 benchfile = args.odir + "/bench/bench%03d.txt" % myid
@@ -74,9 +75,9 @@ params = np.vstack([pos,amps,ibeam]).astype(dtype)
 params = params[:,sigma>args.minsigma]
 srcs   = srcs  [:,sigma>args.minsigma]
 
-L.info("Got %d sources, keeping %d > %d sigma" % (totsrcs,params.shape[1],args.minsigma))
-
-np.savetxt(args.odir + "/srcs.txt", srcs.T, fmt="%12.5f")
+if comm.rank == 0:
+	L.info("Got %d sources, keeping %d > %d sigma" % (totsrcs,params.shape[1],args.minsigma))
+	np.savetxt(args.odir + "/srcs.txt", srcs.T, fmt="%12.5f")
 
 # Our noise model is slightly different from the main noise model,
 # since we assume it is white and independent between detectors,
@@ -97,6 +98,8 @@ def onlyfinite(a): return a[np.isfinite(a)]
 # Process each scan independently
 myinds = np.arange(len(filelist))[myid::nproc]
 for ind in myinds:
+	ofile = args.odir + "/%s.hdf" % filelist[ind]
+	if args.c and os.path.isfile(ofile): continue
 	L.info("Processing %s" % filelist[ind])
 	try:
 		d = scan.read_scan(filelist[ind])
@@ -106,13 +109,17 @@ for ind in myinds:
 		except errors.DataMissing as e:
 			L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
 			continue
-	
-	# Set up pmat for this scan
-	L.debug("Pmats")
-	Psrc  = pmat.PmatPtsrc(d, params)
-	Pcut  = pmat.PmatCut(d)
-	L.debug("Reading samples")
-	tod   = d.get_samples().astype(dtype)
+
+	try:
+		# Set up pmat for this scan
+		L.debug("Pmats")
+		Psrc  = pmat.PmatPtsrc(d, params)
+		Pcut  = pmat.PmatCut(d)
+		L.debug("Reading samples")
+		tod   = d.get_samples().astype(dtype)
+	except errors.DataMissing as e:
+		L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
+		continue
 
 	# Measure noise
 	L.debug("Noise")
@@ -122,15 +129,16 @@ for ind in myinds:
 	srcdata = Psrc.extract(tod)
 	# Kill detectors where the noise measured in the actually kept samples is too
 	# far off from the noise measured overall. This won't work for planets!
-	L.debug("Measure white noise")
-	vars, nvars = ptsrc_data.measure_mwhite(srcdata.tod, srcdata)
-	ivar_src = np.sum(nvars,0)/np.sum(vars,0)
-	#for v,vs in zip(ivar,ivar_src):
-	#	print "%12.2f %12.2f" % (v**-0.5, vs**-0.5)
-	bad = np.log(ivar/ivar_src)**2 > np.log(1.5)**2
-	ivar[bad] *= 0.01
+	if False:
+		L.debug("Measure white noise")
+		vars, nvars = ptsrc_data.measure_mwhite(srcdata.tod, srcdata)
+		ivar_src = np.sum(nvars,0)/np.sum(vars,0)
+		#for v,vs in zip(ivar,ivar_src):
+		#	print "%12.2f %12.2f" % (v**-0.5, vs**-0.5)
+		bad = np.log(ivar/ivar_src)**2 > np.log(1.5)**2
+		ivar[bad] *= 0.01
 
 	#srcdata.ivars = d.noise.iD[-1]
 	srcdata.ivars = ivar
 	L.debug("Writing")
-	ptsrc_data.write_srcscan(args.odir + "/%s.hdf" % filelist[ind], srcdata)
+	ptsrc_data.write_srcscan(ofile, srcdata)

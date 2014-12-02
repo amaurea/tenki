@@ -440,12 +440,14 @@ for ind in range(comm.rank, len(filelist), comm.size):
 		# Since we are dealing with logarithms, what we need to return is
 		# log(1-f(am)).
 		# Some amplitudes are actually supposed to be negative, so invert those
-		a_ml  = adist_strong.x
-		a_fid = adist_strong.dof.zip(p.amp_fid)
-		aset = a_ml * np.sign(a_fid)
-		Aset = np.diag(adist_strong.A)
-		def f(a,A): return 0.5*(1+erf(-2**-0.5 * A**-0.5*a))
-		res = np.log(1-np.product([f(a,A) for a,A in zip(aset,Aset)]))
+		res = 0
+		if adist_strong.x.size > 0:
+			a_ml  = adist_strong.x
+			a_fid = adist_strong.dof.zip(p.amp_fid)
+			aset = a_ml * np.sign(a_fid)
+			Aset = np.diag(adist_strong.A)
+			def f(a,A): return 0.5*(1+erf(-2**-0.5 * A**-0.5*a))
+			res = np.log(1-np.product([f(a,A) for a,A in zip(aset,Aset)]))
 		return res
 
 	if args.map:
@@ -454,8 +456,15 @@ for ind in range(comm.rank, len(filelist), comm.size):
 
 	if args.grid:
 		L.info("Building pos grid")
-		grid = grid_pos(d, params, shape=(args.grid,args.grid))
+		g = np.abs(args.grid)
+		p = params.copy()
+		if args.grid < 0:
+			p.strong[:] = False
+		grid = grid_pos(d, p, shape=(g,g))
 		grid -= np.max(grid)
+		maxpos = grid.pix2sky(np.unravel_index(np.argmax(grid),grid.shape))
+		if np.sum(maxpos**2)**0.5 <= pos_rel_max*2/3:
+			params.pos_rel[...] = maxpos
 		enmap.write_map(tdir + "/grid.hdf", grid)
 
 	L.info("Drawing %d samples" % args.nsamp)

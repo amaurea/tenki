@@ -9,6 +9,7 @@ strong and weak based on offset and beam."""
 import numpy as np, argparse, warnings, mpi4py.MPI, copy, h5py, os
 from enlib import utils, ptsrc_data, log, bench, cg, array_ops, enmap, errors
 from enlib.degrees_of_freedom import DOF, Arg
+from scipy.special import erf
 
 parser = argparse.ArgumentParser()
 parser.add_argument("filelist")
@@ -23,12 +24,13 @@ parser.add_argument("--nbasis", type=int, default=-50)
 parser.add_argument("--strong", type=float, default=3.0)
 parser.add_argument("-s", "--seed", type=int, default=0)
 parser.add_argument("-c", action="store_true")
+parser.add_argument("-g", "--grid", type=int, default=0)
 parser.add_argument("--minrange", type=int, default=0x40)
 parser.add_argument("--allow-clusters", action="store_true")
 #parser.add_argument("--nchain", type=int, default=3)
-#parser.add_argument("-R", "--radius", type=float, default=5.0)
-#parser.add_argument("-r", "--resolution", type=float, default=0.25)
-#parser.add_argument("-d", "--dump", type=int, default=100)
+parser.add_argument("-R", "--radius", type=float, default=5.0)
+parser.add_argument("-r", "--resolution", type=float, default=0.25)
+parser.add_argument("-m", "--map", action="store_true")
 args = parser.parse_args()
 
 if args.seed: np.random.seed(args.seed)
@@ -44,9 +46,9 @@ b2r   = np.pi/180/60/(8*np.log(2))**0.5
 beam_global = 1.4*b2r
 beam_rel_min = 0.5
 beam_rel_max = 2.0
-beam_ratio_max = 2.5
+beam_ratio_max = 3.0
 # prior on position
-pos_rel_max = 4*m2r
+pos_rel_max = 5*m2r
 
 log_level = log.verbosity2level(args.verbosity)
 L = log.init(level=log_level, rank=comm.rank, shared=False)
@@ -305,15 +307,14 @@ class HybridSampler:
 		# Adjust amps to preserve flux
 		area_ratio = p_new.area/self.p.area
 		p_new.amp_rel = (p_new.amp_fid+p_new.amp_rel)/area_ratio[:,None] - p_new.amp_fid
-		logP_new = self.prior(p_new)
-		if np.isfinite(logP_new):
-			P_s, P_w, adist_strong = calc_marginal_amps_strong(self.d, p_new)
-			logP_new += P_s + P_w
-			if np.random.uniform() < np.exp(logP_new-self.logP):
-				self.p = p_new
-				self.logP = logP_new
-				self.adist_strong = adist_strong
-				self.naccept += 1
+		P_s, P_w, adist_strong = calc_marginal_amps_strong(self.d, p_new)
+		logP_new = self.prior(p_new, adist_strong)
+		logP_new += P_s + P_w
+		if np.random.uniform() < np.exp(logP_new-self.logP):
+			self.p = p_new
+			self.logP = logP_new
+			self.adist_strong = adist_strong
+			self.naccept += 1
 		self.ntry += 1
 		if self.verbose:
 			print "%6d %5.3f %8.3f %8.3f %8.4f %8.4f %8.2f" % ((self.ntry, float(self.naccept)/self.ntry) + 
@@ -344,6 +345,44 @@ class HybridSampler:
 		self.dbeam *= factor
 		self.naccept, self.ntry = 0,0
 
+def make_maps(tod, data, pos, ncomp, radius, resolution):
+	tod = tod.copy()
+	nsrc= len(pos)
+	# Set up pixels
+	n   = int(np.round(2*radius/resolution))
+	boxes = np.array([[p-radius,p+radius] for p in pos])
+	# Set up output maps
+	rhs  = np.zeros([nsrc,ncomp,n,n],dtype=dtype)
+	div  = np.zeros([ncomp,nsrc,ncomp,n,n],dtype=dtype)
+	# Build rhs
+	ptsrc_data.nmat_basis(tod, data)
+	ptsrc_data.pmat_thumbs(-1, tod, rhs, data.point, data.phase, boxes)
+	# Build div
+	for c in range(ncomp):
+		idiv = div[0].copy(); idiv[:,c] = 1
+		wtod = data.tod.astype(dtype,copy=True); wtod[...] = 0
+		ptsrc_data.pmat_thumbs( 1, wtod, idiv, data.point, data.phase, boxes)
+		ptsrc_data.nmat_basis(wtod, data, white=True)
+		ptsrc_data.pmat_thumbs(-1, wtod, div[c], data.point, data.phase, boxes)
+	div = np.rollaxis(div,1)
+	bin = rhs/div[:,0] # Fixme: only works for ncomp == 1
+	return bin, rhs, div
+def stack_maps(rhs, div, amps=None):
+	if amps is None: amps = np.zeros(len(rhs))+1
+	ar = (rhs.T*amps.T).T; ad = (div.T*amps.T**2).T
+	sr = np.sum(ar,0)
+	sd = np.sum(ad,0)
+	return sr/sd[0]*amps[0]
+def dump_maps(ofile, tod, data, pos, amp, rad=args.radius*m2r, res=args.resolution*m2r):
+	ncomp = amp.shape[1]
+	dmaps, drhs, ddiv = make_maps(tod.astype(dtype), data, pos, ncomp, rad, res)
+	dstack = stack_maps(drhs, ddiv, amp[:,0])
+	with h5py.File(ofile, "w") as hfile:
+		hfile["data"] = dmaps
+		hfile["rhs"]  = drhs
+		hfile["div"]  = ddiv
+		hfile["stack"] = dstack
+
 # Utility functions end
 
 # Process all the tods, one by one
@@ -369,24 +408,59 @@ for ind in range(comm.rank, len(filelist), comm.size):
 	my_srcs = srcs[hit_srcs]
 	nsrc = len(my_srcs)
 
+	# Extract the mean dec,ra of this observation. This will be weighted
+	# towards the exposed point sources, and so will only be approximate.
+	mean_point = np.mean(d.point,0)
+
 	pos_fid, amp_fid = my_srcs[:,posi]*d2r, my_srcs[:,ampi[:ncomp]]
 	#beam_fid = np.hstack([my_srcs[:,beami[:2]]*b2r, my_srcs[:,beami[2:]]*d2r])
 	beam_fid = np.hstack([np.full((nsrc,2),beam_global),np.zeros((nsrc,1))])
 	params = Parameters(pos_fid, beam_fid, amp_fid)
 	params.groups = independent_groups(d)
 	# Decide which sources are strong enough to include in the full sampling
-	SN = estimate_SN(d, params.flat, params.groups)
-	params.strong = mask=SN >= args.strong**2
-	L.info("SN: %.1f, strong: %s" % (np.sum(SN)**0.5,",".join(["%.1f"%sn**0.5 for sn in SN[params.strong]])))
+	SN = estimate_SN(d, params.flat, params.groups)**0.5
+	params.strong = mask=SN >= args.strong
+	L.info("SN: %.1f, strong: %s" % (np.sum(SN**2)**0.5,",".join(["%.1f"%sn for sn in SN[params.strong]])))
+	for i in np.where(np.any(params.strong,1))[0]:
+		L.info("src %3d: SN %3.1f amp %5.0f pos %7.2f %7.2f" % ((i, np.sum(SN[i]), params.amp_fid[i,0]) + tuple(params.pos_fid[i]/d2r)))
 
 	dpos  = np.array([0.1,0.1])*m2r
 	dbeam = np.array([0.1,0.1,20*d2r])
-	def prior(p):
+	def prior(p, adist_strong):
 		if np.sum(p.pos_rel**2)**0.5 > pos_rel_max: return -np.inf
 		if np.any(p.beam_rel[:2] < beam_rel_min): return -np.inf
 		if np.any(p.beam_rel[:2] > beam_rel_max): return -np.inf
-		return 0
+		# We are supposed to be able to detect strong sources at high S/N, so
+		# we should be able to require that their amplitudes are correct without
+		# truncating the distribution. So I want to multiply by the fraction of
+		# the probability volume that's actually allowed.
+		# int_{-inf}^0 exp(-0.5(a-aml)...) daml / int_{-inf}^{inf} ... daml
+		# Assuming the as are independent (good enough for a prior like this)
+		# the normalized integral is just f(am) = prod 0.5*(1+erf(-1/2**0.5 A**0.5 am))
+		# Since we are dealing with logarithms, what we need to return is
+		# log(1-f(am)).
+		# Some amplitudes are actually supposed to be negative, so invert those
+		a_ml  = adist_strong.x
+		a_fid = adist_strong.dof.zip(p.amp_fid)
+		aset = a_ml * np.sign(a_fid)
+		Aset = np.diag(adist_strong.A)
+		def f(a,A): return 0.5*(1+erf(-2**-0.5 * A**-0.5*a))
+		res = np.log(1-np.product([f(a,A) for a,A in zip(aset,Aset)]))
+		return res
+
+	if args.map:
+		L.info("Building source map")
+		dump_maps(tdir + "/map.hdf", d.tod, d, pos_fid, amp_fid)
+
+	if args.grid:
+		L.info("Building pos grid")
+		grid = grid_pos(d, params, shape=(args.grid,args.grid))
+		grid -= np.max(grid)
+		enmap.write_map(tdir + "/grid.hdf", grid)
+
+	L.info("Drawing %d samples" % args.nsamp)
 	sampler = HybridSampler(d, params, dpos, dbeam, nstep=args.thin, prior=prior, dist=np.random.standard_cauchy)
+
 	pos_rel  = np.zeros([args.nsamp,2])
 	beam_rel = np.zeros([args.nsamp,3])
 	amp = np.zeros((args.nsamp,)+params.amp_fid.shape)
@@ -406,6 +480,7 @@ for ind in range(comm.rank, len(filelist), comm.size):
 		hfile["srcs"] = hit_srcs
 		hfile["SN"] = SN
 		hfile["id"] = id
+		hfile["point"] = mean_point
 
 	#probs = grid_pos(d, params, shape=(40,40))
 	#probs -= np.max(probs)

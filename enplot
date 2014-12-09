@@ -5,15 +5,20 @@ from PIL import Image
 from mpi4py import MPI
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
+parser.add_argument("-o", "--oname", default="{pre}{base}{suf}{comp}.{ext}")
 parser.add_argument("-c", "--color", default="wmap")
 parser.add_argument("-r", "--range", type=str)
 parser.add_argument("--min", type=str)
 parser.add_argument("--max", type=str)
 parser.add_argument("-q", "--quantile", type=float, default=0.01)
 parser.add_argument("-v", dest="verbosity", action="count")
+parser.add_argument("-s", "--scale", type=int, default=1)
 parser.add_argument("--verbosity", dest="verbosity", type=int)
 parser.add_argument("--method", default="fast")
 parser.add_argument("--slice", type=str)
+parser.add_argument("--prefix", type=str, default="")
+parser.add_argument("--suffix", type=str, default="")
+parser.add_argument("--ext", type=str, default="png")
 args = parser.parse_args()
 
 if args.verbosity >= 3:
@@ -36,7 +41,8 @@ class dprint:
 
 comm = MPI.COMM_WORLD
 
-for ifile in args.ifiles[comm.rank::comm.size]:
+for fi in range(comm.rank,len(args.ifiles),comm.size):
+	ifile = args.ifiles[fi]
 	# Allow slicing of input argument
 	with dprint("read %s" % ifile):
 		toks = ifile.split(":")
@@ -47,6 +53,10 @@ for ifile in args.ifiles[comm.rank::comm.size]:
 			m = eval("m"+args.slice)
 		flip = (m.wcs.wcs.cdelt*m0.wcs.wcs.cdelt)[::-1]<0
 		assert m.ndim >= 2, "Image must have at least 2 dimensions"
+
+	# Scale if requested
+	if args.scale > 1:
+		m = enmap.upgrade(m, args.scale)
 
 	# Flatten pre-dimensions
 	mf = m.reshape((-1,)+m.shape[-2:])
@@ -76,10 +86,6 @@ for ifile in args.ifiles[comm.rank::comm.size]:
 	ndigit = int(np.log10(ncomp))+1
 	dot  = ifile.rfind(".")
 	if dot < 0: dot = len(ifile)
-	if m.ndim == 2:
-		ofmt = ifile[:dot] + ".png"
-	else:
-		ofmt = ifile[:dot] + "_%%0%dd.png" % ndigit
 
 	# Loop over fields
 	for i in range(ncomp):
@@ -98,10 +104,12 @@ for ifile in args.ifiles[comm.rank::comm.size]:
 			m_color  = colorize.colorize(m_scaled, desc=args.color, method=args.method)
 		with dprint("%s to image" % istr):
 			m_img    = Image.fromarray(m_color).convert('RGBA')
-		try:
-			oname = ofmt % i
-		except TypeError:
-			oname = ofmt
+		# Build output file name
+		fields = {"base":ifile[:dot], "iext":ifile[dot+1:], "fi":fi, "fn":len(args.ifiles),
+				"ci":i, "cn":ncomp, "pi":comm.rank, "pn":comm.size, "pre":args.prefix,
+				"suf":args.suffix, "comp": "_%0*d" % (ndigit,i) if m.ndim > 2 else "",
+				"ext":args.ext}
+		oname = args.oname.format(**fields)
 		with dprint("%s write to %s" % (istr,oname)):
 			m_img.save(oname)
 		# Progress report

@@ -1,6 +1,6 @@
 import numpy as np, argparse, time, os, zipfile
 from mpi4py import MPI
-from enlib import utils, fft, nmat, errors, config
+from enlib import utils, fft, nmat, errors, config, bench
 from enact import filedb, data, nmat_measure
 
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
@@ -8,6 +8,7 @@ parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
 parser.add_argument("filelists", nargs="+")
 parser.add_argument("odir")
 parser.add_argument("-m", "--model", default="jon")
+parser.add_argument("--shared", action="store_true")
 parser.add_argument("-c", "--resume", action="store_true")
 args = parser.parse_args()
 
@@ -42,7 +43,7 @@ for i in myinds:
 		noise = nmat_measure.detvecs_old(ft, d.srate, d.dets)
 	elif model == "jon":
 		di = np.where(d.dets==20)[0]
-		noise = nmat_measure.detvecs_jon(ft, d.srate, d.dets)
+		noise = nmat_measure.detvecs_jon(ft, d.srate, d.dets, args.shared)
 	elif model == "simple":
 		noise = nmat_measure.detvecs_simple(ft, d.srate, d.dets)
 	t.append(time.time())

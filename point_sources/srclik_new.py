@@ -275,12 +275,14 @@ def grid_pos(d, params, box=np.array([[-1,-1],[1,1]])*pos_rel_max, shape=(10,10)
 	shape, wcs = enmap.geometry(pos=box, shape=shape, proj="car")
 	probs = enmap.zeros(shape, wcs)
 	pos_rel = probs.posmap()
+	best = -np.inf
 	for iy in range(shape[0]):
 		for ix in range(shape[1]):
 			p.pos_rel = pos_rel[:,iy,ix]
 			P_s, P_w, adist_strong = calc_marginal_amps_strong(d, p)
 			probs[iy,ix] = P_s + P_w
-			print "%4d %4d %6.2f %6.2f %9.3f %9.3f %9.3f" % ((iy,ix)+tuple(pos_rel[:,iy,ix]/m2r)+(probs[iy,ix],P_s,P_w))
+			best = max(best,probs[iy,ix])
+			print "%4d %4d %6.2f %6.2f %9.3f %9.3f %9.3f %s" % ((iy,ix)+tuple(pos_rel[:,iy,ix]/m2r)+(probs[iy,ix],P_s,P_w) + ("*" if probs[iy,ix]>=best else "",))
 	return probs
 
 class HybridSampler:
@@ -302,8 +304,10 @@ class HybridSampler:
 		distribution given the data and weak amplitudes, which are kept constant. Returns
 		an updated params object as well as an AmpDist object."""
 		p_new = self.p.copy()
-		p_new.pos_rel  += self.dist(len(self.dpos))*self.dpos
-		p_new.beam_rel += self.dist(len(self.dbeam))*self.dbeam
+		first_step = np.isinf(self.logP)
+		if not first_step:
+			p_new.pos_rel  += self.dist(len(self.dpos))*self.dpos
+			p_new.beam_rel += self.dist(len(self.dbeam))*self.dbeam
 		# Adjust amps to preserve flux
 		area_ratio = p_new.area/self.p.area
 		p_new.amp_rel = (p_new.amp_fid+p_new.amp_rel)/area_ratio[:,None] - p_new.amp_fid
@@ -348,12 +352,14 @@ class HybridSampler:
 def make_maps(tod, data, pos, ncomp, radius, resolution):
 	tod = tod.copy()
 	nsrc= len(pos)
+	dbox= np.array([[-1,-1],[1,1]])*radius
+	shape, wcs = enmap.geometry(pos=dbox, res=resolution)
 	# Set up pixels
 	n   = int(np.round(2*radius/resolution))
 	boxes = np.array([[p-radius,p+radius] for p in pos])
 	# Set up output maps
-	rhs  = np.zeros([nsrc,ncomp,n,n],dtype=dtype)
-	div  = np.zeros([ncomp,nsrc,ncomp,n,n],dtype=dtype)
+	rhs  = enmap.zeros((nsrc,ncomp)      +shape, wcs, dtype=dtype)
+	div  = enmap.zeros((ncomp,nsrc,ncomp)+shape, wcs, dtype=dtype)
 	# Build rhs
 	ptsrc_data.nmat_basis(tod, data)
 	ptsrc_data.pmat_thumbs(-1, tod, rhs, data.point, data.phase, boxes)
@@ -377,11 +383,14 @@ def dump_maps(ofile, tod, data, pos, amp, rad=args.radius*m2r, res=args.resoluti
 	ncomp = amp.shape[1]
 	dmaps, drhs, ddiv = make_maps(tod.astype(dtype), data, pos, ncomp, rad, res)
 	dstack = stack_maps(drhs, ddiv, amp[:,0])
-	with h5py.File(ofile, "w") as hfile:
-		hfile["data"] = dmaps
-		hfile["rhs"]  = drhs
-		hfile["div"]  = ddiv
-		hfile["stack"] = dstack
+	dmaps = np.concatenate((dmaps,[dstack]),0)
+	dmaps = enmap.samewcs(dmaps, ddiv)
+	enmap.write_map(ofile, dmaps)
+	#with h5py.File(ofile, "w") as hfile:
+	#	hfile["data"] = dmaps
+	#	hfile["rhs"]  = drhs
+	#	hfile["div"]  = ddiv
+	#	hfile["stack"] = dstack
 
 # Utility functions end
 
@@ -422,7 +431,7 @@ for ind in range(comm.rank, len(filelist), comm.size):
 	params.strong = mask=SN >= args.strong
 	L.info("SN: %.1f, strong: %s" % (np.sum(SN**2)**0.5,",".join(["%.1f"%sn for sn in SN[params.strong]])))
 	for i in np.where(np.any(params.strong,1))[0]:
-		L.info("src %3d: SN %3.1f amp %5.0f pos %7.2f %7.2f" % ((i, np.sum(SN[i]), params.amp_fid[i,0]) + tuple(params.pos_fid[i]/d2r)))
+		L.info("src %3d: SN %3.1f amp %5.0f pos %7.2f %7.2f" % ((i, np.sum(SN[i]**2)**0.5, params.amp_fid[i,0]) + tuple(params.pos_fid[i]/d2r)))
 
 	dpos  = np.array([0.1,0.1])*m2r
 	dbeam = np.array([0.1,0.1,20*d2r])
@@ -463,6 +472,7 @@ for ind in range(comm.rank, len(filelist), comm.size):
 		grid = grid_pos(d, p, shape=(g,g))
 		grid -= np.max(grid)
 		maxpos = grid.pix2sky(np.unravel_index(np.argmax(grid),grid.shape))
+		print np.max(grid), maxpos*180*60/np.pi
 		if np.sum(maxpos**2)**0.5 <= pos_rel_max*2/3:
 			params.pos_rel[...] = maxpos
 		enmap.write_map(tdir + "/grid.hdf", grid)

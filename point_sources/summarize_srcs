@@ -5,15 +5,22 @@ awk '{
 		aa[ARGIND,i]+=$i**2
 		n[ARGIND,i]++
 		am=ARGIND
+		nm=NF>nm?NF:nm
 	}
 }END{
+	ncomp=(nm-5)/2
 	for(i=1;i<=am;i++){
-		for(j=1;j<=11;j++){
-			N=n[i,j]<1?1:n[i,j]
-			v=a[i,j]/N
-			vv=aa[i,j]/N
-			s=(vv-v**2)**0.5
-			printf(" %9.4f %9.4f",v,s)
+		j=0
+		for(k=1;k<=11;k++){
+			if(k>2+ncomp&&k<6||k>8&&k>8+ncomp){printf(" %9.4f %9.4f",0,0)}
+			else {
+				j+=1
+				N=n[i,j]<1?1:n[i,j]
+				v=a[i,j]/N
+				vv=aa[i,j]/N
+				s=(vv-v**2)**0.5
+				printf(" %9.4f %9.4f",v,s)
+			}
 		}
 		printf("\n")
 	}

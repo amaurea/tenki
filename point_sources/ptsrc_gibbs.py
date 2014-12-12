@@ -19,6 +19,7 @@ parser.add_argument("-n", "--nsamp", type=int, default=50)
 parser.add_argument("--dump", type=int, default=0)
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-i", type=int, default=0)
+parser.add_argument("--nmax", type=int, default=0)
 parser.add_argument("--mindist-group", type=float, default=10)
 parser.add_argument("-c", "--cont", action="store_true")
 args = parser.parse_args()
@@ -203,7 +204,7 @@ class PtsrcModel:
 		self.nfreq, self.ncomp = template.shape[:2]
 		self.nparam = self.nfreq*self.ncomp
 	def get_templates(self, pos, irads):
-		x   = self.pos - pos[:,None,None]
+		x   = utils.rewind(self.pos - pos[:,None,None],0,2*np.pi)
 		W   = np.array([[irads[0],irads[2]],[irads[2],irads[1]]])
 		xWx = np.sum(np.einsum("ab,byx->ayx", W, x)*x,0)
 		profile = np.exp(-0.5*xWx)
@@ -270,7 +271,7 @@ class ShapeSampler:
 		return self.amps, self.pos, self.irads
 
 class ShapeSamplerMulti:
-	def __init__(self, maps, inoise, model, amps, pos, pos0, irads, nsamp=200, stepsize=0.02, maxdist=1.5*np.pi/180/60):
+	def __init__(self, maps, inoise, model, amps, pos, pos0, irads, nsamp=1500, stepsize=0.02, maxdist=1.5*np.pi/180/60):
 		self.samplers = [ShapeSampler(maps, inoise, model, amp1, pos1, pos01, irads1, nsamp=1, stepsize=stepsize, maxdist=maxdist) for amp1, pos1, pos01, irads1 in zip(amps, pos, pos0, irads)]
 		self.nsamp   = nsamp
 	def sample(self, verbose=False):
@@ -371,6 +372,8 @@ def output_dummy(id):
 		pass
 
 utils.mkdir(args.odir)
+
+if args.nmax > 0: groups = groups[:args.nmax]
 
 for i in range(myid, len(groups), nproc):
 	if i < args.i: continue

@@ -17,6 +17,7 @@ parser.add_argument("odir")
 parser.add_argument("prefix",nargs="?")
 parser.add_argument("--ncomp",      type=int, default=3)
 parser.add_argument("--ndet",       type=int, default=0)
+parser.add_argument("-c", action="store_true")
 args = parser.parse_args()
 
 precon= config.get("map_precon")
@@ -25,7 +26,7 @@ comm  = mpi4py.MPI.COMM_WORLD
 myid  = comm.rank
 nproc = comm.size
 
-comm_single = comm.split(np.arange(nproc))
+comm_single = comm.Split(myid)
 
 db       = filedb.ACTFiles(config.get("filedb"))
 # Allow filelist to take the format filename:[slice]
@@ -58,15 +59,17 @@ if myid == 0:
 utils.mkdir(root + "log")
 logfile   = root + "log/log%03d.txt" % myid
 log_level = log.verbosity2level(config.get("verbosity"))
-L = log.init(level=log_level, file=logfile, rank=myid)
+L = log.init(level=log_level, file=logfile, rank=myid, shared=False)
 # And benchmarking
 utils.mkdir(root + "bench")
 benchfile = root + "bench/bench%03d.txt" % myid
 
 # Read in all our scans
-L.info("Reading scans")
 inds = np.arange(len(filelist))[myid::nproc]
 for ind in inds:
+	myroot = root + "_" + filelist[ind] + "_"
+	ofile = myroot + "bin.fits"
+	if args.c and os.path.isfile(ofile): continue
 	try:
 		d = scan.read_scan(filelist[ind])
 	except IOError:
@@ -75,6 +78,7 @@ for ind in inds:
 		except errors.DataMissing as e:
 			L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
 			continue
+	L.info("Reading %s", filelist[ind])
 	d = d[:,::config.get("downsample")]
 	if args.ndet > 0: d = d[:args.ndet]
 	L.debug("Read %s" % filelist[ind])
@@ -82,6 +86,5 @@ for ind in inds:
 	eq = map_equation.LinearSystemMap([d], area, precon=precon, comm=comm_single)
 	x  = eq.M(eq.b)
 	bmap = eq.dof.unzip(x)[0]
-	myroot = root + "_" + filelist[ind] + "_"
 	eq.write(myroot)
-	enmap.write_map(myroot + "bin.fits", bmap)
+	enmap.write_map(ofile, bmap)

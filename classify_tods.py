@@ -5,6 +5,7 @@ from enact import filedb, files
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
+parser.add_argument("-r", "--focalplane-radius", type=float, default=1.0)
 args = parser.parse_args()
 
 comm  = mpi4py.MPI.COMM_WORLD
@@ -37,7 +38,7 @@ for ind in range(comm.rank, len(filelist), comm.size):
 		bsub[1:3] = coordinates.transform("hor","equ",bsub[1:3]*utils.degree,time=bsub[0],site=site)
 		# Compute matching object
 		targdb= targets.TargetDB(entry.targets)
-		obj   = targdb.match(bsub.T)
+		obj   = targdb.match(bsub.T, margin=args.focalplane_radius*np.pi/180)
 		name  = obj.name if obj else "misc"
 	except AttributeError:
 		name = "error"
@@ -50,5 +51,7 @@ for ind in range(comm.rank, len(filelist), comm.size):
 	except AttributeError:
 		equ = np.array([np.nan,np.nan])
 
-	print "%s %9.3f %9.3f %9.3f %9.3f %s" % (id, hor[0],hor[1],equ[0],equ[1], name)
+	hour = t/3600%24
+
+	print "%s %9.3f %9.3f %9.3f %9.3f %5.2f %s" % (id, hor[0],hor[1],equ[0],equ[1], hour, name)
 	sys.stdout.flush()

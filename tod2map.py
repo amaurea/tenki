@@ -30,19 +30,12 @@ nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 
 db       = filedb.ACTFiles(config.get("filedb"))
-# Allow filelist to take the format filename:[slice]
-toks = args.filelist.split(":")
-filelist, fslice = toks[0], ":".join(toks[1:])
-filelist = [line.split()[0] for line in open(filelist,"r") if line[0] != "#"]
-filelist = eval("filelist"+fslice)
+filelist = utils.read_lines(args.filelist)
 
 area = enmap.read_map(args.area)
 area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 utils.mkdir(args.odir)
-if args.prefix:
-	root = args.odir + "/" + args.prefix + "_"
-else:
-	root = args.odir + "/"
+root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
 
 # Dump our settings
 if myid == 0:

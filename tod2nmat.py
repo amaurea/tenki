@@ -8,13 +8,13 @@ parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
 parser.add_argument("filelists", nargs="+")
 parser.add_argument("odir")
 parser.add_argument("-m", "--model", default="jon")
-parser.add_argument("--shared", action="store_true")
 parser.add_argument("-c", "--resume", action="store_true")
 args = parser.parse_args()
 
 comm = MPI.COMM_WORLD
 myid, nproc = comm.rank, comm.size
 model = args.model
+shared = True
 
 utils.mkdir(args.odir)
 
@@ -43,7 +43,7 @@ for i in myinds:
 		noise = nmat_measure.detvecs_old(ft, d.srate, d.dets)
 	elif model == "jon":
 		di = np.where(d.dets==20)[0]
-		noise = nmat_measure.detvecs_jon(ft, d.srate, d.dets, args.shared)
+		noise = nmat_measure.detvecs_jon(ft, d.srate, d.dets, shared)
 	elif model == "simple":
 		noise = nmat_measure.detvecs_simple(ft, d.srate, d.dets)
 	t.append(time.time())

@@ -1,0 +1,66 @@
+#!/usr/bin/env python2
+import numpy as np, argparse, sys
+from scipy import ndimage
+from enlib import enmap
+np.seterr(all="ignore")
+parser = argparse.ArgumentParser()
+parser.add_argument("imap")
+parser.add_argument("hitmap", nargs="?", default=None)
+parser.add_argument("omap")
+parser.add_argument("-F", "--filter", action="append")
+args = parser.parse_args()
+
+filter_specs = args.filter or ["b:200:-5"]
+
+m = enmap.read_map(args.imap)
+ishape = m.shape
+m = np.reshape(m, [np.prod(ishape[:-2])]+list(ishape[-2:]))
+if args.hitmap != None:
+	w = enmap.read_map(args.hitmap)
+	while w.ndim > 2: w = w[0]
+else:
+	w = enmap.zeros(m.shape[-2:], m.wcs, dtype=m.dtype)+1
+
+mask  = np.any(np.isnan(m),0)+np.isnan(w)+(w<np.max(w)*1e-3)
+m[:,mask] = 0
+w[mask] = 0
+# The function of the mask is to apodize edges, so smooth out the middle
+w0 = np.max(w)*0.05
+w = 1/(1+w0/w)
+wm = m*w
+
+# Pad to fft-friendly size
+def filter_gauss(l, lsigma):
+	f = np.exp(-0.5*(l/lsigma)**2)
+	return f if lsigma > 0 else 1-f
+def filter_butter(l, lknee, alpha):
+	return 1.0/(1+(l/lknee)**alpha)
+
+# Set up filter
+l = np.sum(wm.lmap()**2,0)**0.5
+filters = enmap.zeros(wm.shape, wm.wcs, dtype=wm.dtype)
+for i, fspec in enumerate(filter_specs):
+	filter = l*0+1
+	for fstr in fspec.split(","):
+		toks = fstr.split(":")
+		if toks[0] in ["g","gauss"]:
+			lsigma = float(toks[1])
+			filter *= filter_gauss(l, lsigma)
+		elif toks[0] in ["b", "butter", "butterworth"]:
+			lknee = float(toks[1])
+			alpha = float(toks[2])
+			filter *= filter_butter(l, lknee, alpha)
+		else: raise ValueError("Unknown filter type: " + toks[0])
+	filters[i] = filter
+for j in range(i,len(filters)):
+	filters[j] = filters[i]
+
+# Apply filter
+wm = enmap.harm2map(enmap.map2harm(wm)*filters)
+
+# And recover filtered map
+m   = wm/w
+m[:,mask] = np.nan
+m   = np.reshape(m, ishape)
+
+enmap.write_map(args.omap, m)

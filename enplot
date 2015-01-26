@@ -93,9 +93,8 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 		# We want dec to increase upwards (negative pixel diretion)
 		# and ra to increae leftwards (negative pixel direction).
 		mdata = mf[i]
-		box = mf.box()
-		if box[1,0] > box[0,0]: mdata = mdata[::-1,:]
-		if box[1,1] > box[0,1]: mdata = mdata[:,::-1]
+		if mdata.wcs.wcs.cdelt[1] > 0: mdata = mdata[::-1,:]
+		if mdata.wcs.wcs.cdelt[0] > 0: mdata = mdata[:,::-1]
 		if flip[0]: mdata = mdata[::-1,:]
 		if flip[1]: mdata = mdata[:,::-1]
 		with dprint("%s rescale" % istr):

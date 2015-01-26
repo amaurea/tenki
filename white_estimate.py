@@ -14,7 +14,6 @@ dm = (m[1]-m[0])/2
 
 pixarea = dm.area()/np.product(dm.shape[-2:])*(180*60/np.pi)**2
 
-
 # Compute standard deviation in bins
 dm = dm[...,:dm.shape[-2]/b*b,:dm.shape[-1]/b*b]
 dm_blocks = dm.reshape(dm.shape[:-2]+(dm.shape[-2]/b,b,dm.shape[-1]/b,b))

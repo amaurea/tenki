@@ -1,12 +1,11 @@
 #!/usr/bin/env python
 import numpy as np, argparse, time, sys
 from enlib import enmap, colorize
-from PIL import Image
 from mpi4py import MPI
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("-o", "--oname", default="{pre}{base}{suf}{comp}.{ext}")
-parser.add_argument("-c", "--color", default="wmap")
+parser.add_argument("-c", "--color", default="gray")
 parser.add_argument("-r", "--range", type=str)
 parser.add_argument("--min", type=str)
 parser.add_argument("--max", type=str)
@@ -16,9 +15,16 @@ parser.add_argument("-s", "--scale", type=int, default=1)
 parser.add_argument("--verbosity", dest="verbosity", type=int)
 parser.add_argument("--method", default="fast")
 parser.add_argument("--slice", type=str)
+parser.add_argument("-d", "--downgrade", type=int, default=1)
 parser.add_argument("--prefix", type=str, default="")
 parser.add_argument("--suffix", type=str, default="")
 parser.add_argument("--ext", type=str, default="png")
+parser.add_argument("-g", "--grid", action="count", default=1)
+parser.add_argument("--ticks", type=float, default=1.0)
+parser.add_argument("--subticks", type=float, default=0)
+parser.add_argument("-D", "--driver", type=str, default="pil")
+parser.add_argument("--mpl-dpi", type=float, default=75)
+parser.add_argument("--mpl-pad", type=float, default=1.6)
 args = parser.parse_args()
 
 if args.verbosity >= 3:
@@ -47,7 +53,7 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 	with dprint("read %s" % ifile):
 		toks = ifile.split(":")
 		ifile, slice = toks[0], ":".join(toks[1:])
-		m0 = enmap.read_map(ifile)
+		m0 = enmap.downgrade(enmap.read_map(ifile), args.downgrade)
 		m = eval("m0"+slice)
 		if args.slice is not None:
 			m = eval("m"+args.slice)
@@ -97,20 +103,51 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 		if mdata.wcs.wcs.cdelt[0] > 0: mdata = mdata[:,::-1]
 		if flip[0]: mdata = mdata[::-1,:]
 		if flip[1]: mdata = mdata[:,::-1]
-		with dprint("%s rescale" % istr):
-			m_scaled = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
-		with dprint("%s colorize" % istr):
-			m_color  = colorize.colorize(m_scaled, desc=args.color, method=args.method)
-		with dprint("%s to image" % istr):
-			m_img    = Image.fromarray(m_color).convert('RGBA')
 		# Build output file name
 		fields = {"base":ifile[:dot], "iext":ifile[dot+1:], "fi":fi, "fn":len(args.ifiles),
 				"ci":i, "cn":ncomp, "pi":comm.rank, "pn":comm.size, "pre":args.prefix,
 				"suf":args.suffix, "comp": "_%0*d" % (ndigit,i) if m.ndim > 2 else "",
 				"ext":args.ext}
 		oname = args.oname.format(**fields)
-		with dprint("%s write to %s" % (istr,oname)):
-			m_img.save(oname)
+		with dprint("%s rescale" % istr):
+			m_scaled = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
+		with dprint("%s colorize" % istr):
+			m_color  = colorize.colorize(m_scaled, desc=args.color, method=args.method)
+		if args.driver.lower() == "pil":
+			from PIL import Image
+			with dprint("%s to image" % istr):
+				m_img = Image.fromarray(m_color).convert('RGBA')
+			with dprint("%s write to %s" % (istr,oname)):
+				m_img.save(oname)
+		elif args.driver.lower() in ["matplotlib","mpl"]:
+			import matplotlib, warnings
+			matplotlib.use("Agg")
+			from matplotlib import pyplot, ticker
+			warnings.filterwarnings('ignore')
+			matplotlib.rcParams.update({'font.size': 10})
+			with dprint("%s to image" % istr):
+				dpi, pad = args.mpl_dpi, args.mpl_pad
+				winch, hinch = mdata.shape[1]/dpi, mdata.shape[0]/dpi
+				fig  = pyplot.figure(figsize=(winch+pad,hinch+pad))
+				box  = mdata.box()*180/np.pi
+				pyplot.imshow(m_color, extent=[box[0,1],box[1,1],box[1,0],box[0,0]])
+				# Make conformal in center of image
+				pyplot.axes().set_aspect(1/np.cos(np.mean(mdata.box()[:,0])))
+				if args.grid % 2:
+					ax = pyplot.axes()
+					ax.xaxis.set_major_locator(ticker.MultipleLocator(args.ticks))
+					ax.yaxis.set_major_locator(ticker.MultipleLocator(args.ticks))
+					if args.subticks:
+						ax.xaxis.set_minor_locator(ticker.MultipleLocator(args.sub))
+						ax.yaxis.set_minor_locator(ticker.MultipleLocator(args.sub))
+						pyplot.minorticks_on()
+						pyplot.grid(True, which="major", linewidth=2)
+						pyplot.grid(True, which="minor", linewidth=1)
+					else:
+						pyplot.grid(True)
+			with dprint("%s write to %s" % (istr,oname)):
+				pyplot.tight_layout(pad=0.0,h_pad=0.0,w_pad=0.0)
+				pyplot.savefig(oname,bbox_inches="tight",dpi=dpi)
 		# Progress report
 		if args.verbosity == 2:
 			sys.stderr.write("\r%s %5d/%d" % (ifile, i+1,ncomp))

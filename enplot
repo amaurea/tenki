@@ -5,7 +5,7 @@ from mpi4py import MPI
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("-o", "--oname", default="{pre}{base}{suf}{comp}.{ext}")
-parser.add_argument("-c", "--color", default="gray")
+parser.add_argument("-c", "--color", default="wmap")
 parser.add_argument("-r", "--range", type=str)
 parser.add_argument("--min", type=str)
 parser.add_argument("--max", type=str)

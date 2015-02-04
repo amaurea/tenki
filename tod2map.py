@@ -2,9 +2,10 @@ import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shut
 from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
 from enlib import log, bench, scan
 from enlib.cg import CG
-from enact import data, nmat_measure, filedb
+from enact import data, nmat_measure, filedb, todinfo
 
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
+config.default("todinfo", "todinfo.txt", "File describing location of the TOD id lists")
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("map_precon", "bin", "Preconditioner to use for map-making")
@@ -30,7 +31,7 @@ nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 
 db       = filedb.ACTFiles(config.get("filedb"))
-filelist = utils.read_lines(args.filelist)
+filelist = todinfo.get_tods(args.filelist, config.get("todinfo"))
 
 area = enmap.read_map(args.area)
 area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)

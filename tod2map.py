@@ -1,4 +1,4 @@
-import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil
+import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch
 from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
 from enlib import log, bench, scan
 from enlib.cg import CG
@@ -17,9 +17,10 @@ parser.add_argument("filelist")
 parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("prefix",nargs="?")
-parser.add_argument("-d", "--dump", type=int, default=10)
-parser.add_argument("--ncomp",      type=int, default=3)
-parser.add_argument("--ndet",       type=int, default=0)
+parser.add_argument("-d", "--dump", type=int, default=10, help="CG map dump interval")
+parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
+parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
+parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
 args = parser.parse_args()
 
 precon= config.get("map_precon")
@@ -36,6 +37,10 @@ area = enmap.read_map(args.area)
 area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 utils.mkdir(args.odir)
 root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
+imap = None
+if args.imap:
+	sys, fname = args.imap.split(":")
+	imap = bunch.Bunch(sys=sys, map=enmap.read_map(fname))
 
 # Dump our settings
 if myid == 0:
@@ -65,6 +70,8 @@ myscans, myinds  = [], []
 for ind in tmpinds:
 	try:
 		d = scan.read_scan(filelist[ind])
+		#print "FIXME"
+		#if ind == 1: d.cut = d.cut + data.cuts.test_cut(d.boresight.T)
 	except IOError:
 		try:
 			d = data.ACTScan(db[filelist[ind]])
@@ -106,7 +113,7 @@ if config.get("task_dist") == "size":
 		myinds = myinds_old
 
 L.info("Building equation system")
-eq  = map_equation.LinearSystemMap(myscans, area, precon=precon)
+eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap)
 eq.write(root)
 bench.stats.write(benchfile)
 
@@ -125,6 +132,19 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump_interval=10):
 		xmap, xjunk = eq.dof.unzip(cg.x)
 		if ofmt and cg.i % dump_interval == 0 and myid == 0:
 			enmap.write_map(ofmt % cg.i, eq.dof.unzip(cg.x)[0])
+
+			## Remove this
+			#map, junk = eq.dof.unzip(cg.x)
+			#for si, d in enumerate(eq.mapeq.data):
+			#	tod = np.zeros([d.scan.ndet,d.scan.nsamp],dtype=eq.mapeq.dtype)
+			#	with h5py.File(root + "mtod%d_%04d.fits" % (si,cg.i), "w") as hfile:
+			#		d.pmap.forward(tod,map)
+			#		d.pcut.forward(tod,junk[d.cutrange[0]:d.cutrange[1]])
+			#		hfile["data"] = tod
+			#		d.pmap.forward(tod,map*0)
+			#		d.pcut.forward(tod,junk[d.cutrange[0]:d.cutrange[1]]*0+1)
+			#		hfile["jmask"] = tod
+
 		# Output benchmarking information
 		bench.stats.write(benchfile)
 	return cg.x

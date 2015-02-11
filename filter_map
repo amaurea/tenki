@@ -7,7 +7,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("imap")
 parser.add_argument("hitmap", nargs="?", default=None)
 parser.add_argument("omap")
-parser.add_argument("-F", "--filter", action="append")
+parser.add_argument("-F", "--filter", action="append", help="Filter specification. Can be specified multiple times. Formats: g:lcut = gaussian filter, lowpass for positive lcut, highpass for negative. b:lcut:alpha = butterworth filter. Lowpass for positive alpha, highpass for negative.")
 args = parser.parse_args()
 
 filter_specs = args.filter or ["b:200:-5"]

@@ -20,7 +20,12 @@ parser.add_argument("prefix",nargs="?")
 parser.add_argument("-d", "--dump", type=int, default=10)
 parser.add_argument("--ncomp",      type=int, default=3)
 parser.add_argument("--ndet",       type=int, default=0)
+parser.add_argument("--dump-config", action="store_true")
 args = parser.parse_args()
+
+if args.dump_config:
+	print config.to_str()
+	sys.exit(0)
 
 precon= config.get("map_precon")
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
@@ -121,7 +126,7 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump_interval=10):
 		with bench.mark("cg_step"):
 			cg.step()
 		dt = bench.stats["cg_step"]["time"].last
-		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/len(eq.scans)))
+		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
 		xmap, xjunk = eq.dof.unzip(cg.x)
 		if ofmt and cg.i % dump_interval == 0 and myid == 0:
 			enmap.write_map(ofmt % cg.i, eq.dof.unzip(cg.x)[0])

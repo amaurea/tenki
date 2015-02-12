@@ -1,10 +1,11 @@
-import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil
+import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch
 from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
 from enlib import log, bench, scan
 from enlib.cg import CG
-from enact import data, nmat_measure, filedb
+from enact import data, nmat_measure, filedb, todinfo
 
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
+config.default("todinfo", "todinfo.txt", "File describing location of the TOD id lists")
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("map_precon", "bin", "Preconditioner to use for map-making")
@@ -17,10 +18,11 @@ parser.add_argument("filelist")
 parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("prefix",nargs="?")
-parser.add_argument("-d", "--dump", type=int, default=10)
-parser.add_argument("--ncomp",      type=int, default=3)
-parser.add_argument("--ndet",       type=int, default=0)
-parser.add_argument("--dump-config", action="store_true")
+parser.add_argument("-d", "--dump", type=int, default=10, help="CG map dump interval")
+parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
+parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
+parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
+parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 args = parser.parse_args()
 
 if args.dump_config:
@@ -35,12 +37,16 @@ nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 
 db       = filedb.ACTFiles(config.get("filedb"))
-filelist = utils.read_lines(args.filelist)
+filelist = todinfo.get_tods(args.filelist, config.get("todinfo"))
 
 area = enmap.read_map(args.area)
 area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 utils.mkdir(args.odir)
 root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
+imap = None
+if args.imap:
+	sys, fname = args.imap.split(":")
+	imap = bunch.Bunch(sys=sys, map=enmap.read_map(fname))
 
 # Dump our settings
 if myid == 0:
@@ -53,7 +59,8 @@ if myid == 0:
 	with open(root + "ids.txt","w") as f:
 		for id in filelist:
 			f.write("%s\n" % id)
-	shutil.copyfile(config.get("filedb"), root + "filedb.txt")
+	shutil.copyfile(config.get("filedb"),  root + "filedb.txt")
+	shutil.copyfile(config.get("todinfo"), root + "todinfo.txt")
 # Set up logging
 utils.mkdir(root + "log")
 logfile   = root + "log/log%03d.txt" % myid
@@ -64,12 +71,14 @@ utils.mkdir(root + "bench")
 benchfile = root + "bench/bench%03d.txt" % myid
 
 # Read in all our scans
-L.info("Reading scans")
+L.info("Reading %d scans" % len(filelist))
 tmpinds    = np.arange(len(filelist))[myid::nproc]
 myscans, myinds  = [], []
 for ind in tmpinds:
 	try:
 		d = scan.read_scan(filelist[ind])
+		#print "FIXME"
+		#if ind == 1: d.cut = d.cut + data.cuts.test_cut(d.boresight.T)
 	except IOError:
 		try:
 			d = data.ACTScan(db[filelist[ind]])
@@ -111,7 +120,7 @@ if config.get("task_dist") == "size":
 		myinds = myinds_old
 
 L.info("Building equation system")
-eq  = map_equation.LinearSystemMap(myscans, area, precon=precon)
+eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap)
 eq.write(root)
 bench.stats.write(benchfile)
 
@@ -130,6 +139,19 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump_interval=10):
 		xmap, xjunk = eq.dof.unzip(cg.x)
 		if ofmt and cg.i % dump_interval == 0 and myid == 0:
 			enmap.write_map(ofmt % cg.i, eq.dof.unzip(cg.x)[0])
+
+			## Remove this
+			#map, junk = eq.dof.unzip(cg.x)
+			#for si, d in enumerate(eq.mapeq.data):
+			#	tod = np.zeros([d.scan.ndet,d.scan.nsamp],dtype=eq.mapeq.dtype)
+			#	with h5py.File(root + "mtod%d_%04d.fits" % (si,cg.i), "w") as hfile:
+			#		d.pmap.forward(tod,map)
+			#		d.pcut.forward(tod,junk[d.cutrange[0]:d.cutrange[1]])
+			#		hfile["data"] = tod
+			#		d.pmap.forward(tod,map*0)
+			#		d.pcut.forward(tod,junk[d.cutrange[0]:d.cutrange[1]]*0+1)
+			#		hfile["jmask"] = tod
+
 		# Output benchmarking information
 		bench.stats.write(benchfile)
 	return cg.x

@@ -102,6 +102,7 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None):
 	if toks[0] == "ptsrc":
 		# This one always operates in the same coordinates as 
 		nsrc, amp, fwhm = int(toks[1]), float(toks[2]), float(toks[3])
+		np.random.seed(seed)
 		sim_srcs = scansim.rand_srcs(area.box(), nsrc, amp, abs(fwhm)*np.pi/180/60, rand_fwhm=fwhm<0)
 		for i in range(nsim):
 			scans.append(scansim.SimSrcs(sim_bore[i], sim_dets[i], sim_srcs, sim_nmat[i], seed=seed+i, nonoise=noiseless))

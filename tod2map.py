@@ -54,7 +54,8 @@ if myid == 0:
 	with open(root + "ids.txt","w") as f:
 		for id in filelist:
 			f.write("%s\n" % id)
-	shutil.copyfile(config.get("filedb"), root + "filedb.txt")
+	shutil.copyfile(config.get("filedb"),  root + "filedb.txt")
+	shutil.copyfile(config.get("todinfo"), root + "todinfo.txt")
 # Set up logging
 utils.mkdir(root + "log")
 logfile   = root + "log/log%03d.txt" % myid
@@ -65,7 +66,7 @@ utils.mkdir(root + "bench")
 benchfile = root + "bench/bench%03d.txt" % myid
 
 # Read in all our scans
-L.info("Reading scans")
+L.info("Reading %d scans" % len(filelist))
 tmpinds    = np.arange(len(filelist))[myid::nproc]
 myscans, myinds  = [], []
 for ind in tmpinds:

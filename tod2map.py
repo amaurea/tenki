@@ -18,7 +18,7 @@ parser.add_argument("filelist")
 parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("prefix",nargs="?")
-parser.add_argument("-d", "--dump", type=int, default=10, help="CG map dump interval")
+parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,500,1000,2000,5000,10000", help="CG map dump steps")
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
 parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
@@ -129,7 +129,7 @@ x  = eq.M(eq.b)
 bmap = eq.dof.unzip(x)[0]
 if myid == 0: enmap.write_map(root + "bin.fits", bmap)
 
-def solve_cg(eq, nmax=1000, ofmt=None, dump_interval=10):
+def solve_cg(eq, nmax=1000, ofmt=None, dump=None):
 	cg = CG(eq.A, eq.b, M=eq.M, dot=eq.dof.dot)
 	while cg.i < nmax:
 		with bench.mark("cg_step"):
@@ -137,25 +137,13 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump_interval=10):
 		dt = bench.stats["cg_step"]["time"].last
 		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
 		xmap, xjunk = eq.dof.unzip(cg.x)
-		if ofmt and cg.i % dump_interval == 0 and myid == 0:
+		if ofmt and cg.i in dump and myid == 0:
 			enmap.write_map(ofmt % cg.i, eq.dof.unzip(cg.x)[0])
-
-			## Remove this
-			#map, junk = eq.dof.unzip(cg.x)
-			#for si, d in enumerate(eq.mapeq.data):
-			#	tod = np.zeros([d.scan.ndet,d.scan.nsamp],dtype=eq.mapeq.dtype)
-			#	with h5py.File(root + "mtod%d_%04d.fits" % (si,cg.i), "w") as hfile:
-			#		d.pmap.forward(tod,map)
-			#		d.pcut.forward(tod,junk[d.cutrange[0]:d.cutrange[1]])
-			#		hfile["data"] = tod
-			#		d.pmap.forward(tod,map*0)
-			#		d.pcut.forward(tod,junk[d.cutrange[0]:d.cutrange[1]]*0+1)
-			#		hfile["jmask"] = tod
-
 		# Output benchmarking information
 		bench.stats.write(benchfile)
 	return cg.x
 
 if nmax > 0:
 	L.info("Solving equation")
-	x = solve_cg(eq, nmax=nmax, ofmt=root + "map%04d.fits", dump_interval=args.dump)
+	dump_steps = [int(w) for w in args.dump.split(",")]
+	x = solve_cg(eq, nmax=nmax, ofmt=root + "map%04d.fits", dump=dump_steps)

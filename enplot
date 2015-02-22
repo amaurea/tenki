@@ -19,9 +19,15 @@ parser.add_argument("-d", "--downgrade", type=int, default=1)
 parser.add_argument("--prefix", type=str, default="")
 parser.add_argument("--suffix", type=str, default="")
 parser.add_argument("--ext", type=str, default="png")
+parser.add_argument("--mask", type=float)
+parser.add_argument("--mask-tol", type=float, default=1e-10)
 parser.add_argument("-g", "--grid", action="count", default=1)
+parser.add_argument("--grid-color", type=str, default="00000020")
 parser.add_argument("--ticks", type=float, default=1.0)
 parser.add_argument("--subticks", type=float, default=0)
+parser.add_argument("--font", type=str, default="arial.ttf")
+parser.add_argument("--font-size", type=int, default=20)
+parser.add_argument("--font-color", type=str, default="000000")
 parser.add_argument("-D", "--driver", type=str, default="pil")
 parser.add_argument("--mpl-dpi", type=float, default=75)
 parser.add_argument("--mpl-pad", type=float, default=1.6)
@@ -109,14 +115,24 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 				"suf":args.suffix, "comp": "_%0*d" % (ndigit,i) if m.ndim > 2 else "",
 				"ext":args.ext}
 		oname = args.oname.format(**fields)
+		if args.mask is not None:
+			mdata[np.abs(mdata-args.mask)<=args.mask_tol] = np.nan
 		with dprint("%s rescale" % istr):
 			m_scaled = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
 		with dprint("%s colorize" % istr):
 			m_color  = colorize.colorize(m_scaled, desc=args.color, method=args.method)
 		if args.driver.lower() == "pil":
-			from PIL import Image
+			import PIL.Image, enlib.cgrid
 			with dprint("%s to image" % istr):
-				m_img = Image.fromarray(m_color).convert('RGBA')
+				m_img = PIL.Image.fromarray(m_color).convert('RGBA')
+			if args.grid % 2:
+				with dprint("draw grid"):
+					ginfo = enlib.cgrid.calc_gridinfo(mdata.shape, mdata.wcs, steps=args.ticks)
+					m_img = enlib.cgrid.draw_grid(m_img, ginfo, color=args.grid_color)
+					linfo = []
+					for gi in [ginfo.lat, ginfo.lon]:
+						linfo += enlib.cgrid.calc_label_pos(gi, m_img.size)
+					m_img = enlib.cgrid.draw_labels(m_img, linfo, fname=args.font, fsize=args.font_size, color=args.font_color)
 			with dprint("%s write to %s" % (istr,oname)):
 				m_img.save(oname)
 		elif args.driver.lower() in ["matplotlib","mpl"]:

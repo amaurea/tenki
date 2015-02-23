@@ -45,8 +45,9 @@ utils.mkdir(args.odir)
 root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
 imap = None
 if args.imap:
-	sys, fname = args.imap.split(":")
-	imap = bunch.Bunch(sys=sys, map=enmap.read_map(fname))
+	toks = args.imap.split(":")
+	imap_sys, fname = ":".join(toks[:-1]), toks[-1]
+	imap = bunch.Bunch(sys=imap_sys or None, map=enmap.read_map(fname))
 
 # Dump our settings
 if myid == 0:

@@ -137,7 +137,7 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump=None):
 		dt = bench.stats["cg_step"]["time"].last
 		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
 		xmap, xjunk = eq.dof.unzip(cg.x)
-		if ofmt and cg.i in dump and myid == 0:
+		if ofmt and (cg.i in dump or cg.i % dump[-1] == 0) and myid == 0:
 			enmap.write_map(ofmt % cg.i, eq.dof.unzip(cg.x)[0])
 		# Output benchmarking information
 		bench.stats.write(benchfile)

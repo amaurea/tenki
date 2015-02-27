@@ -1,6 +1,6 @@
 import numpy as np, argparse
 from enlib import enmap
-parser = argparse.argumentParser()
+parser = argparse.ArgumentParser()
 parser.add_argument("div")
 parser.add_argument("-t", "--thin", type=int, default=1000)
 args = parser.parse_args()

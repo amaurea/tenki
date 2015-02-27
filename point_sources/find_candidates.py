@@ -10,7 +10,7 @@ parser.add_argument("noise")
 parser.add_argument("powspec")
 parser.add_argument("odir")
 parser.add_argument("--srcrms", type=float, default=5)
-parser.add_argument("-b", "--beam", type=float, default=1.2)
+parser.add_argument("-b", "--beam", type=float, default=1.5)
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("--rmask", type=int, default=5)
 parser.add_argument("--siglim", type=float, default=3.5)
@@ -73,7 +73,7 @@ N  = (inoise + np.max(inoise)*1e-3)**-1
 
 # apodize map based on a smooth noise map
 inoise_smooth = enmap.smooth_gauss(inoise,10*np.pi/180/60)
-apod = (np.minimum(1,inoise_smooth/(np.max(inoise_smooth)*0.1))**4)[0,0]
+apod = (np.minimum(1,inoise_smooth/(np.max(inoise_smooth)*0.05))**4)[0,0]
 map *= apod[None]
 
 def mul(mat, vec, axes=[0,1]):

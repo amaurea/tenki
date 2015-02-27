@@ -28,6 +28,8 @@ def nonan(a):
 	res[np.isnan(res)] = 0
 	return res
 
+# The first map will be used as a reference. All subsequent maps
+# must fit in its boundaries.
 L.info("Reading %s" % imaps[0])
 m = nonan(enmap.read_map(imaps[0]))
 L.info("Reading %s" % ihits[0])
@@ -39,6 +41,10 @@ for mif,wif in zip(imaps[1:],ihits[1:]):
 	mi = nonan(enmap.read_map(mif))
 	L.info("Reading %s" % wif)
 	wi = nonan(enmap.read_map(wif))
+	# We may need to reproject maps
+	if mi.shape != m.shape or mi.wcs.to_header() != m.wcs.to_header():
+		mi = enmap.project(mi, m.shape, m.wcs, mode="constant")
+		wi = enmap.project(wi, w.shape, w.wcs, mode="constant")
 	w  += wi
 	wm += mul(wi,mi)
 

@@ -1,6 +1,6 @@
 import numpy as np, argparse, enlib.scan, os, bunch
-from enlib import enmap, utils, config, scansim, log, powspec
-from enact import data, filedb
+from enlib import enmap, utils, config, scansim, log, powspec, fft
+from enact import data, filedb, nmat_measure
 
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
@@ -13,6 +13,7 @@ parser.add_argument("--dets",  type=str, default="scattered:3:3:2.0")
 parser.add_argument("--signal",type=str, default="ptsrc:100:1e3:-3")
 parser.add_argument("--noise", type=str, default="1/f:100:2:0.5")
 parser.add_argument("--seed",  type=int, default=1)
+parser.add_argument("--measure", type=float, default=None)
 parser.add_argument("--real",  type=str, default=None)
 args = parser.parse_args()
 
@@ -28,7 +29,7 @@ else:
 	wcs  = enmap.create_wcs(shape, np.array([[-1,-1],[1,1]])*np.pi/180)
 	area = enmap.zeros(shape, wcs)
 
-def get_scans(area, signal, bore, dets, noise, seed=0, real=None):
+def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override=None):
 	scans = []
 	# Get real scan information if necessary
 	L.debug("real")
@@ -77,15 +78,15 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None):
 	L.debug("noise")
 	sim_nmat = []
 	toks = noise.split(":")
-	noiseless = False
+	nonoise = False
 	if toks[0] == "1/f":
 		sigma, alpha, fknee = [float(v) for v in toks[1:4]]
-		noiseless = sigma < 0
+		nonoise = sigma < 0
 		for i in range(nsim):
 			sim_nmat.append(scansim.oneoverf_noise(sim_dets[i].comps.shape[0], sim_bore[i].boresight.shape[0], sigma=np.abs(sigma), alpha=alpha, fknee=fknee))
 	elif toks[0] == "detcorr":
 		sigma, alpha, fknee = [float(v) for v in toks[1:4]]
-		noiseless = sigma < 0
+		nonoise = sigma < 0
 		for i in range(nsim):
 			sim_nmat.append(scansim.oneoverf_detcorr_noise(sim_dets[i].comps.shape[0], sim_bore[i].boresight.shape[0], sigma=np.abs(sigma), alpha=alpha, fknee=fknee))
 	elif toks[0] == "real":
@@ -95,6 +96,7 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None):
 			nmat = s.noise[:ndet]*scale**-2
 			sim_nmat.append(nmat)
 	else: raise ValueError
+	noise_scale = not nonoise if noise_override is None else noise_override
 	sim_nmat = sim_nmat*(nsim/len(sim_nmat))+sim_nmat[:nsim%len(sim_nmat)]
 	# Signal
 	L.debug("signal")
@@ -105,13 +107,13 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None):
 		np.random.seed(seed)
 		sim_srcs = scansim.rand_srcs(area.box(), nsrc, amp, abs(fwhm)*np.pi/180/60, rand_fwhm=fwhm<0)
 		for i in range(nsim):
-			scans.append(scansim.SimSrcs(sim_bore[i], sim_dets[i], sim_srcs, sim_nmat[i], seed=seed+i, nonoise=noiseless))
+			scans.append(scansim.SimSrcs(sim_bore[i], sim_dets[i], sim_srcs, sim_nmat[i], seed=seed+i, noise_scale=noise_scale))
 	elif toks[0] == "cmb":
 		np.random.seed(seed)
 		ps = powspec.read_spectrum(toks[1])
 		sim_map  = enmap.rand_map(area.shape, area.wcs, ps)
 		for i in range(nsim):
-			scans.append(scansim.SimMap(sim_bore[i], sim_dets[i], sim_map,    sim_nmat[i], seed=seed+i, nonoise=noiseless))
+			scans.append(scansim.SimMap(sim_bore[i], sim_dets[i], sim_map,    sim_nmat[i], seed=seed+i, noise_scale=noise_scale))
 	else: raise ValueError
 	return scans
 
@@ -128,7 +130,22 @@ def get_model(s, area):
 	model = np.rollaxis(s.get_model(pos),-1).reshape(-1,area.shape[1],area.shape[2])
 	return enmap.ndmap(model, area.wcs)[:area.shape[0]]
 
-scans = get_scans(area, args.signal, args.bore, args.dets, args.noise, seed=args.seed, real=args.real)
+if args.measure is None:
+	scans = get_scans(area, args.signal, args.bore, args.dets, args.noise, seed=args.seed, real=args.real)
+else:
+	# Build noise model the same way we do for the real data, i.e. based on
+	# measuring data itself. But do that based on a version with more noise
+	# than the real one, to simulate realistic S/N ratios without needing
+	# too many samples
+	scans = get_scans(area, args.signal, args.bore, args.dets, args.noise, seed=args.seed, real=args.real, noise_override=args.measure)
+	nmats = []
+	for scan in scans:
+		ft = fft.rfft(scan.get_samples()) * scan.nsamp**-0.5
+		nmats.append(nmat_measure.detvecs_jon(ft, 400.0, shared=True))
+	scans = get_scans(area, args.signal, args.bore, args.dets, args.noise, seed=args.seed, real=args.real)
+	for scan,nmat in zip(scans,nmats):
+		scan.noise = nmat
+
 enmap.write_map(args.odir + "/area.fits", area)
 model = get_model(scans[0], area)
 enmap.write_map(args.odir + "/model.fits", model)

@@ -61,7 +61,8 @@ if myid == 0:
 		for id in filelist:
 			f.write("%s\n" % id)
 	shutil.copyfile(config.get("filedb"),  root + "filedb.txt")
-	shutil.copyfile(config.get("todinfo"), root + "todinfo.txt")
+	try: shutil.copyfile(config.get("todinfo"), root + "todinfo.txt")
+	except IOError: pass
 # Set up logging
 utils.mkdir(root + "log")
 logfile   = root + "log/log%03d.txt" % myid
@@ -78,8 +79,6 @@ myscans, myinds  = [], []
 for ind in tmpinds:
 	try:
 		d = scan.read_scan(filelist[ind])
-		#print "FIXME"
-		#if ind == 1: d.cut = d.cut + data.cuts.test_cut(d.boresight.T)
 	except IOError:
 		try:
 			d = data.ACTScan(db[filelist[ind]])

@@ -15,7 +15,7 @@ parser.add_argument("-s", "--scale", type=int, default=1)
 parser.add_argument("--verbosity", dest="verbosity", type=int)
 parser.add_argument("--method", default="fast")
 parser.add_argument("--slice", type=str)
-parser.add_argument("-d", "--downgrade", type=int, default=1)
+parser.add_argument("-d", "--downgrade", type=str, default="1")
 parser.add_argument("--prefix", type=str, default="")
 parser.add_argument("--suffix", type=str, default="")
 parser.add_argument("--ext", type=str, default="png")
@@ -59,7 +59,8 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 	with dprint("read %s" % ifile):
 		toks = ifile.split(":")
 		ifile, slice = toks[0], ":".join(toks[1:])
-		m0 = enmap.downgrade(enmap.read_map(ifile), args.downgrade)
+		downgrade = [int(w) for w in args.downgrade.split(":")]
+		m0 = enmap.downgrade(enmap.read_map(ifile), downgrade)
 		m = eval("m0"+slice)
 		if args.slice is not None:
 			m = eval("m"+args.slice)

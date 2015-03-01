@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-import numpy as np, argparse, time, sys
+import numpy as np, argparse, time, sys, warnings
 from enlib import enmap, colorize
 from mpi4py import MPI
+warnings.filterwarnings("ignore")
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("-o", "--oname", default="{pre}{base}{suf}{comp}.{ext}")
@@ -15,6 +16,7 @@ parser.add_argument("-s", "--scale", type=int, default=1)
 parser.add_argument("--verbosity", dest="verbosity", type=int)
 parser.add_argument("--method", default="fast")
 parser.add_argument("--slice", type=str)
+parser.add_argument("--op", type=str)
 parser.add_argument("-d", "--downgrade", type=str, default="1")
 parser.add_argument("--prefix", type=str, default="")
 parser.add_argument("--suffix", type=str, default="")
@@ -23,7 +25,7 @@ parser.add_argument("-m", "--mask", type=float)
 parser.add_argument("--mask-tol", type=float, default=1e-10)
 parser.add_argument("-g", "--grid", action="count", default=1)
 parser.add_argument("--grid-color", type=str, default="00000020")
-parser.add_argument("-t", "--ticks", type=float, default=1.0)
+parser.add_argument("-t", "--ticks", type=str, default="1")
 parser.add_argument("--subticks", type=float, default=0)
 parser.add_argument("--font", type=str, default="arial.ttf")
 parser.add_argument("--font-size", type=int, default=20)
@@ -52,6 +54,7 @@ class dprint:
 			sys.stderr.write("%6.2f %s\n" % (time.time()-self.t1,self.desc))
 
 comm = MPI.COMM_WORLD
+ticks = np.full(2,1.0); ticks[:] = [float(w) for w in args.ticks.split(",")]
 
 for fi in range(comm.rank,len(args.ifiles),comm.size):
 	ifile = args.ifiles[fi]
@@ -59,13 +62,16 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 	with dprint("read %s" % ifile):
 		toks = ifile.split(":")
 		ifile, slice = toks[0], ":".join(toks[1:])
-		downgrade = [int(w) for w in args.downgrade.split(":")]
+		downgrade = [int(w) for w in args.downgrade.split(",")]
 		m0 = enmap.downgrade(enmap.read_map(ifile), downgrade)
 		m = eval("m0"+slice)
 		if args.slice is not None:
 			m = eval("m"+args.slice)
 		flip = (m.wcs.wcs.cdelt*m0.wcs.wcs.cdelt)[::-1]<0
 		assert m.ndim >= 2, "Image must have at least 2 dimensions"
+
+	if args.op is not None:
+		m = eval(args.op, {"m":m},np.__dict__)
 
 	# Scale if requested
 	if args.scale > 1:
@@ -128,7 +134,7 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 				m_img = PIL.Image.fromarray(m_color).convert('RGBA')
 			if args.grid % 2:
 				with dprint("draw grid"):
-					ginfo = enlib.cgrid.calc_gridinfo(mdata.shape, mdata.wcs, steps=args.ticks)
+					ginfo = enlib.cgrid.calc_gridinfo(mdata.shape, mdata.wcs, steps=ticks)
 					m_img = enlib.cgrid.draw_grid(m_img, ginfo, color=args.grid_color)
 					linfo = []
 					for gi in [ginfo.lat, ginfo.lon]:
@@ -152,8 +158,8 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 				pyplot.axes().set_aspect(1/np.cos(np.mean(mdata.box()[:,0])))
 				if args.grid % 2:
 					ax = pyplot.axes()
-					ax.xaxis.set_major_locator(ticker.MultipleLocator(args.ticks))
-					ax.yaxis.set_major_locator(ticker.MultipleLocator(args.ticks))
+					ax.xaxis.set_major_locator(ticker.MultipleLocator(ticks[1]))
+					ax.yaxis.set_major_locator(ticker.MultipleLocator(ticks[0]))
 					if args.subticks:
 						ax.xaxis.set_minor_locator(ticker.MultipleLocator(args.sub))
 						ax.yaxis.set_minor_locator(ticker.MultipleLocator(args.sub))

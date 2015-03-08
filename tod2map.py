@@ -2,6 +2,7 @@ import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shut
 from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
 from enlib import log, bench, scan
 from enlib.cg import CG
+from enlib.source_model import SourceModel
 from enact import data, nmat_measure, filedb, todinfo
 
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
@@ -22,6 +23,7 @@ parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,50
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
 parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
+parser.add_argument("--isrc",       type=str,             help="Subtract point sources from map based on this source specification")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 args = parser.parse_args()
 
@@ -43,11 +45,20 @@ area = enmap.read_map(args.area)
 area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 utils.mkdir(args.odir)
 root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
+
+# Optinal input map to use in place of signal
 imap = None
 if args.imap:
 	toks = args.imap.split(":")
 	imap_sys, fname = ":".join(toks[:-1]), toks[-1]
 	imap = bunch.Bunch(sys=imap_sys or None, map=enmap.read_map(fname))
+
+# Optional point source model to subtract
+isrc = None
+if args.isrc:
+	toks = args.isrc.split(":")
+	isrc_sys, fname = ":".join(toks[:-1]), toks[-1]
+	isrc = bunch.Bunch(sys=isrc_sys or None, model=SourceModel(fname), tmul=1, pmul=-1)
 
 # Dump our settings
 if myid == 0:
@@ -120,7 +131,7 @@ if config.get("task_dist") == "size":
 		myinds = myinds_old
 
 L.info("Building equation system")
-eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap)
+eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc)
 eq.write(root)
 bench.stats.write(benchfile)
 
@@ -138,6 +149,11 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump=None):
 		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
 		xmap, xjunk = eq.dof.unzip(cg.x)
 		if ofmt and (cg.i in dump or cg.i % dump[-1] == 0) and myid == 0:
+			map = eq.dof.unzip(cg.x)[0]
+			# Add back sources if necessary. We recompute the map each time because
+			# dumps won't happen that frequently, and storing the map takes space.
+			if eq.isrc and eq.isrc.tmul != 0:
+				map += eq.isrc.model.draw(map.shape, map.wcs, window=True)
 			enmap.write_map(ofmt % cg.i, eq.dof.unzip(cg.x)[0])
 		# Output benchmarking information
 		bench.stats.write(benchfile)

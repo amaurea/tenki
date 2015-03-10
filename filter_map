@@ -52,7 +52,7 @@ for i, fspec in enumerate(filter_specs):
 			filter *= filter_butter(l, lknee, alpha)
 		else: raise ValueError("Unknown filter type: " + toks[0])
 	filters[i] = filter
-for j in range(i,len(filters)):
+for j in range(i+1,len(filters)):
 	filters[j] = filters[i]
 
 # Apply filter

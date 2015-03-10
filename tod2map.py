@@ -24,6 +24,7 @@ parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
 parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
 parser.add_argument("--isrc",       type=str,             help="Subtract point sources from map based on this source specification")
+parser.add_argument("--isrc-sim",    action="store_true", help="Simulate point sources rather than subtracting them")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 args = parser.parse_args()
 
@@ -58,7 +59,9 @@ isrc = None
 if args.isrc:
 	toks = args.isrc.split(":")
 	isrc_sys, fname = ":".join(toks[:-1]), toks[-1]
-	isrc = bunch.Bunch(sys=isrc_sys or None, model=SourceModel(fname), tmul=1, pmul=-1)
+	if args.isrc_sim: tmul, pmul = 0,1
+	else: tmul, pmul = 1,-1
+	isrc = bunch.Bunch(sys=isrc_sys or None, model=SourceModel(fname), tmul=tmul, pmul=pmul)
 
 # Dump our settings
 if myid == 0:
@@ -154,7 +157,7 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump=None):
 			# dumps won't happen that frequently, and storing the map takes space.
 			if eq.isrc and eq.isrc.tmul != 0:
 				map += eq.isrc.model.draw(map.shape, map.wcs, window=True)
-			enmap.write_map(ofmt % cg.i, eq.dof.unzip(cg.x)[0])
+			enmap.write_map(ofmt % cg.i, map)
 		# Output benchmarking information
 		bench.stats.write(benchfile)
 	return cg.x

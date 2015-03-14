@@ -16,7 +16,8 @@ utils.mkdir(args.odir)
 
 comm = mpi4py.MPI.COMM_WORLD
 ids  = filedb.scans[args.selector].fields["id"]
-nbin = 300
+nbin = 1000
+ndet = 33*32
 
 def white_est(tod): return np.std(tod[:,1:]-tod[:,:-1],1)
 def highpass(tod, f, srate=400):
@@ -26,44 +27,48 @@ def highpass(tod, f, srate=400):
 	fft.ifft(ft, tod, normalize=True)
 	return tod
 
-# cumulative az bin
-my_arhs, tot_arhs = np.zeros([2,3,nbin])
-my_adiv, tot_adiv = np.zeros([2,3,3,nbin])
-my_prhs, tot_prhs = np.zeros([2,3,nbin])
-my_pdiv, tot_pdiv = np.zeros([2,3,3,nbin])
-my_acc_arhs, tot_acc_arhs = np.zeros([2,nbin])
-my_acc_adiv, tot_acc_adiv = np.zeros([2,nbin])
-my_acc_prhs, tot_acc_prhs = np.zeros([2,nbin])
-my_acc_pdiv, tot_acc_pdiv = np.zeros([2,nbin])
+class Eq:
+	def __init__(self, nvar, ncomp, nbin, name="", diag=False):
+		self.rhs = np.zeros([nvar, ncomp,nbin])
+		if diag:
+			self.div = np.zeros([nvar,ncomp,nbin])
+		else:
+			self.div = np.zeros([nvar, ncomp,ncomp,nbin])
+		self.name = name
+	@property
+	def nvar(self): return self.rhs.shape[0]
+	@property
+	def ncomp(self): return self.rhs.shape[1]
+	@property
+	def nbin(self): return self.rhs.shape[2]
+	@property
+	def diag(self): return self.div.ndim == 3
+	def reduce(self):
+		res = Eq(self.nvar, self.ncomp, self.nbin, name=self.name, diag=self.diag)
+		comm.Allreduce(self.rhs, res.rhs)
+		comm.Allreduce(self.div, res.div)
+		return res
+	def solve(self):
+		if self.diag: return self.rhs/self.div
+		else: return array_ops.solve_multi(self.div, self.rhs, axes=[1,2])
+
+tod_eq = Eq(2,3,nbin,"tod")
+acc_eq = Eq(2,1,nbin,"acc")
+det_eq = Eq(2,ndet,nbin,"det",diag=True)
 
 def output_cum(si):
-	comm.Allreduce(my_arhs, tot_arhs)
-	comm.Allreduce(my_adiv, tot_adiv)
-	comm.Allreduce(my_prhs, tot_prhs)
-	comm.Allreduce(my_pdiv, tot_pdiv)
-	comm.Allreduce(my_acc_arhs, tot_acc_arhs)
-	comm.Allreduce(my_acc_adiv, tot_acc_adiv)
-	comm.Allreduce(my_acc_prhs, tot_acc_prhs)
-	comm.Allreduce(my_acc_pdiv, tot_acc_pdiv)
 	if comm.rank == 0:
-		tot_asig  = array_ops.solve_multi(tot_adiv, tot_arhs, axes=[0,1])
-		tot_psig  = array_ops.solve_multi(tot_pdiv, tot_prhs, axes=[0,1])
-		tot_acc_asig = tot_acc_arhs/tot_acc_adiv
-		tot_acc_psig = tot_acc_prhs/tot_acc_pdiv
-		with h5py.File(args.odir + "/cum%04d.hdf" % si, "w") as hfile:
-			hfile["arhs"] = tot_arhs
-			hfile["adiv"] = tot_adiv
-			hfile["asig"] = tot_asig
-			hfile["prhs"] = tot_prhs
-			hfile["pdiv"] = tot_pdiv
-			hfile["psig"] = tot_psig
-			hfile["acc/arhs"] = tot_acc_arhs
-			hfile["acc/adiv"] = tot_acc_adiv
-			hfile["acc/asig"] = tot_acc_asig
-			hfile["acc/prhs"] = tot_acc_prhs
-			hfile["acc/pdiv"] = tot_acc_pdiv
-			hfile["acc/psig"] = tot_acc_psig
-for si in range(comm.rank, len(ids), comm.size):
+		hfile = h5py.File(args.odir + "/cum%04d.hdf" % si, "w")
+	for eq in [tod_eq,acc_eq,det_eq]:
+		tot = eq.reduce()
+		if comm.rank == 0:
+			hfile[eq.name + "/rhs"] = tot.rhs
+			hfile[eq.name + "/div"] = tot.div
+			hfile[eq.name + "/sig"] = tot.solve()
+	if comm.rank == 0:
+		hfile.close()
+
+for si in range(comm.rank, len(ids)/comm.size*comm.size, comm.size):
 	entry = filedb.data[ids[si]]
 	print "Reading %s" % entry.id
 	try:
@@ -89,7 +94,6 @@ for si in range(comm.rank, len(ids), comm.size):
 	polrhs = comps.dot(d.tod*weight)
 	poldiv = np.einsum("ad,bd,di->abi",comps,comps,weight)
 	poltod = array_ops.solve_multi(poldiv,polrhs,axes=[0,1])
-	del weight
 	print "Computing az bin"
 	az    = d.boresight[1]
 	def build_bins(a, nbin):
@@ -117,48 +121,26 @@ for si in range(comm.rank, len(ids), comm.size):
 	ddaz = az_spline.derivative(2)(x)
 	phase = az.copy()
 	phase[daz<0] = 2*np.max(az)-az[daz<0]
-	# Bin by az
+	# Bin by az and phase
 	apix = build_bins(az, nbin)
-	arhs = bin_by_pix(polrhs, apix, nbin)
-	adiv = bin_by_pix(poldiv, apix, nbin)
-	asig = array_ops.solve_multi(adiv, arhs, axes=[0,1])
-	aacc_rhs = bin_by_pix(ddaz, apix, nbin)
-	aacc_div = bin_by_pix(1, apix, nbin)
-	aacc_sig = aacc_rhs/aacc_div
-	# Bin by phase
 	ppix = build_bins(phase, nbin)
-	prhs = bin_by_pix(polrhs, ppix, nbin)
-	pdiv = bin_by_pix(poldiv, ppix, nbin)
-	psig = array_ops.solve_multi(pdiv, prhs, axes=[0,1])
-	pacc_rhs = bin_by_pix(ddaz, ppix, nbin)
-	pacc_div = bin_by_pix(1, ppix, nbin)
-	pacc_sig = pacc_rhs/pacc_div
+	for i, pix in enumerate([apix, ppix]):
+		tod_eq.rhs[i] += bin_by_pix(polrhs, pix, nbin)
+		tod_eq.div[i] += bin_by_pix(poldiv, pix, nbin)
+		acc_eq.rhs[i] += bin_by_pix(ddaz,   pix, nbin)
+		acc_eq.div[i] += bin_by_pix(1,      pix, nbin)
+		for j in range(ndet):
+			di = d.dets[j]
+			det_eq.rhs[i,di] += bin_by_pix(d.tod[j]*weight[j], pix, nbin)
+			det_eq.div[i,di] += bin_by_pix(weight[j], pix, nbin)
+
 	with h5py.File(args.odir + "/"+ entry.id, "w") as hfile:
 		hfile["poltod"] = poltod
 		hfile["polrhs"] = polrhs
 		hfile["poldiv"] = poldiv
-		hfile["az"]    = az
-		hfile["asig"] = asig
-		hfile["arhs"] = arhs
-		hfile["adiv"] = adiv
-		hfile["aacc_sig"] = aacc_sig
-		hfile["aacc_rhs"] = aacc_rhs
-		hfile["aacc_div"] = aacc_div
-		hfile["phase"] = phase
-		hfile["psig"] = psig
-		hfile["prhs"] = prhs
-		hfile["pdiv"] = pdiv
-		hfile["pacc_sig"] = pacc_sig
-		hfile["pacc_rhs"] = pacc_rhs
-		hfile["pacc_div"] = pacc_div
-	# Update cumulative
-	my_arhs += arhs
-	my_adiv += adiv
-	my_prhs += prhs
-	my_pdiv += pdiv
-	my_acc_arhs += aacc_rhs
-	my_acc_adiv += aacc_div
-	my_acc_prhs += pacc_rhs
-	my_acc_pdiv += pacc_div
+		hfile["az"]     = az
+		hfile["daz"]    = daz
+		hfile["ddaz"]   = ddaz
+		hfile["phase"]  = phase
 
 	output_cum(si)

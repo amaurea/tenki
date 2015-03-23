@@ -10,6 +10,7 @@ parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("selector")
 parser.add_argument("odir")
 parser.add_argument("-f", "--filter", type=float, default=0)
+parser.add_argument("-c", "--cols", default="[0:32]")
 args = parser.parse_args()
 
 utils.mkdir(args.odir)
@@ -17,7 +18,18 @@ utils.mkdir(args.odir)
 comm = mpi4py.MPI.COMM_WORLD
 ids  = filedb.scans[args.selector].fields["id"]
 nbin = 1000
-ndet = 33*32
+ncol, nrow = 32,33
+ndet = ncol*nrow
+
+cols = []
+for centry in args.cols.split(","):
+	toks = centry.split(":")
+	if len(toks) == 1:
+		cols.append(int(centry))
+	else:
+		cols += range(int(toks[0]),int(toks[1]))
+colmask = np.full(ncol, False)
+colmask[cols] = True
 
 def white_est(tod): return np.std(tod[:,1:]-tod[:,:-1],1)
 def highpass(tod, f, srate=400):
@@ -78,8 +90,11 @@ for si in range(comm.rank, len(ids)/comm.size*comm.size, comm.size):
 		print "Skipping [%s]" % e.message
 		output_cum(si)
 		continue
+	# Get rid of the detectors we don't want
+	d = d[colmask[d.dets%ncol]]
 	print "Computing pol tod"
 	ndet, nsamp = d.tod.shape
+
 	# Estimate white noise level (rough)
 	rms = white_est(d.tod[:,:50000])
 	weight = (1-d.cut.to_mask())/rms[:,None]**2

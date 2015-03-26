@@ -28,8 +28,9 @@ for centry in args.cols.split(","):
 		cols.append(int(centry))
 	else:
 		cols += range(int(toks[0]),int(toks[1]))
-colmask = np.full(ncol, False)
+colmask = np.full(ncol, False, dtype=np.bool)
 colmask[cols] = True
+absdets = np.where(colmask[np.arange(ndet)%ncol])[0]
 
 def white_est(tod): return np.std(tod[:,1:]-tod[:,:-1],1)
 def highpass(tod, f, srate=400):
@@ -84,16 +85,15 @@ for si in range(comm.rank, len(ids)/comm.size*comm.size, comm.size):
 	entry = filedb.data[ids[si]]
 	print "Reading %s" % entry.id
 	try:
-		d = data.read(entry, fields=["gain","polangle","tconst","boresight","cut","tod"])
+		d = data.read(entry, fields=["gain","polangle","tconst","boresight","cut","tod"], absdets=absdets)
 		d = data.calibrate(d)
 	except (IOError,errors.DataMissing) as e:
 		print "Skipping [%s]" % e.message
 		output_cum(si)
 		continue
-	# Get rid of the detectors we don't want
-	d = d[colmask[d.dets%ncol]]
 	print "Computing pol tod"
 	ndet, nsamp = d.tod.shape
+	print ndet, nsamp
 
 	# Estimate white noise level (rough)
 	rms = white_est(d.tod[:,:50000])

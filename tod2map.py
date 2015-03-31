@@ -24,6 +24,7 @@ parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
 parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
 parser.add_argument("--isrc",       type=str,             help="Subtract point sources from map based on this source specification")
+parser.add_argument("--azmap",      type=str,             help="Solve for azimuth signal in addition to map. Example 300:phase:shared, 100:azimuth:individual")
 parser.add_argument("--isrc-sim",    action="store_true", help="Simulate point sources rather than subtracting them")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 args = parser.parse_args()
@@ -62,6 +63,12 @@ if args.isrc:
 	if args.isrc_sim: tmul, pmul = 0,1
 	else: tmul, pmul = 1,-1
 	isrc = bunch.Bunch(sys=isrc_sys or None, model=SourceModel(fname), tmul=tmul, pmul=pmul)
+
+# Optionally solve for azimuth profile
+azmap = None
+if args.azmap:
+	npix, mode, shared = args.azmap.split(":")
+	azmap = bunch.Bunch(npix=int(npix), mode=mode, shared=shared=="shared")
 
 # Dump our settings
 if myid == 0:
@@ -134,7 +141,7 @@ if config.get("task_dist") == "size":
 		myinds = myinds_old
 
 L.info("Building equation system")
-eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc)
+eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc, azmap=azmap)
 eq.write(root)
 bench.stats.write(benchfile)
 
@@ -143,14 +150,13 @@ x  = eq.M(eq.b)
 bmap = eq.dof.unzip(x)[0]
 if myid == 0: enmap.write_map(root + "bin.fits", bmap)
 
-def solve_cg(eq, nmax=1000, ofmt=None, dump=None):
+def solve_cg(eq, nmax=1000, ofmt=None, dump=None, azfmt=None):
 	cg = CG(eq.A, eq.b, M=eq.M, dot=eq.dof.dot)
 	while cg.i < nmax:
 		with bench.mark("cg_step"):
 			cg.step()
 		dt = bench.stats["cg_step"]["time"].last
 		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
-		xmap, xjunk = eq.dof.unzip(cg.x)
 		if ofmt and (cg.i in dump or cg.i % dump[-1] == 0) and myid == 0:
 			map = eq.dof.unzip(cg.x)[0]
 			# Add back sources if necessary. We recompute the map each time because
@@ -158,6 +164,9 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump=None):
 			if eq.isrc and eq.isrc.tmul != 0:
 				map += eq.isrc.model.draw(map.shape, map.wcs, window=True)
 			enmap.write_map(ofmt % cg.i, map)
+		if azfmt and azmap and azmap.shared and (cg.i in dump or cg.i % dump[-1] == 0) and myid == 0:
+			az = eq.dof.unzip(cg.x)[-1]
+			np.savetxt(azfmt % cg.i, az[0].T, "%15.7e")
 		# Output benchmarking information
 		bench.stats.write(benchfile)
 	return cg.x
@@ -165,4 +174,4 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump=None):
 if nmax > 0:
 	L.info("Solving equation")
 	dump_steps = [int(w) for w in args.dump.split(",")]
-	x = solve_cg(eq, nmax=nmax, ofmt=root + "map%04d.fits", dump=dump_steps)
+	x = solve_cg(eq, nmax=nmax, ofmt=root + "map%04d.fits", dump=dump_steps, azfmt=root + "az%04d.fits")

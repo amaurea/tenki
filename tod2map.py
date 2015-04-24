@@ -13,6 +13,7 @@ config.default("map_precon", "bin", "Preconditioner to use for map-making")
 config.default("map_cg_nmax", 1000, "Max number of CG steps to perform in map-making")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for myid:n:nproc-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
+config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
@@ -63,6 +64,11 @@ if args.isrc:
 	if args.isrc_sim: tmul, pmul = 0,1
 	else: tmul, pmul = 1,-1
 	isrc = bunch.Bunch(sys=isrc_sys or None, model=SourceModel(fname), tmul=tmul, pmul=pmul)
+
+# Optional azimuth filter
+azfilter = None
+if config.get("gfilter_jon"):
+	azfilter = bunch.Bunch(naz=None, nt=None)
 
 # Optionally solve for azimuth profile
 azmap = None
@@ -141,7 +147,7 @@ if config.get("task_dist") == "size":
 		myinds = myinds_old
 
 L.info("Building equation system")
-eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc, azmap=azmap)
+eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc, azmap=azmap, azfilter=azfilter)
 eq.write(root)
 bench.stats.write(benchfile)
 
@@ -157,13 +163,15 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump=None, azfmt=None):
 			cg.step()
 		dt = bench.stats["cg_step"]["time"].last
 		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
-		if ofmt and (cg.i in dump or cg.i % dump[-1] == 0) and myid == 0:
+		if ofmt and (cg.i in dump or cg.i % dump[-1] == 0):
 			map = eq.dof.unzip(cg.x)[0]
 			# Add back sources if necessary. We recompute the map each time because
 			# dumps won't happen that frequently, and storing the map takes space.
-			if eq.isrc and eq.isrc.tmul != 0:
-				map += eq.isrc.model.draw(map.shape, map.wcs, window=True)
-			enmap.write_map(ofmt % cg.i, map)
+			# Also finish the azimuth filtering. This is horribly ugly and needs
+			# to be redesigned. I should not have to access things deep down like this.
+			map = eq.mapeq.postprocess(map, eq.precon.div_map)
+			if myid == 0:
+				enmap.write_map(ofmt % cg.i, map)
 		if azfmt and azmap and azmap.shared and (cg.i in dump or cg.i % dump[-1] == 0) and myid == 0:
 			az = eq.dof.unzip(cg.x)[-1]
 			np.savetxt(azfmt % cg.i, az[0].T, "%15.7e")

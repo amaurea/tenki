@@ -33,7 +33,7 @@ for i in myinds:
 	if os.path.isfile(ofile) and args.resume: continue
 	t=[]; t.append(time.time())
 	try:
-		fields = ["gain","tconst","cut","tod","boresight"]
+		fields = ["gain","tconst","cut","tod","boresight", "noise_cut"]
 		if args.spikecut: fields.append("spikes")
 		d  = data.read(entry, fields)                ; t.append(time.time())
 		d  = data.calibrate(d)                       ; t.append(time.time())

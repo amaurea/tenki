@@ -63,6 +63,7 @@ for si in range(comm.rank, len(ids), comm.size):
 		ps_bin = np.bincount(x, ps_det, minlength=xaxis.n)/np.bincount(x, minlength=xaxis.n)
 		D_bin = ps_bin**0.5
 		y  = yaxis(D_bin)
+		y  = np.maximum(0,np.minimum(canvas.shape[0]-1,y))
 		canvas[(y, xinds)] += 1
 
 	enmap.write_map(ofile, canvas)

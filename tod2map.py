@@ -14,19 +14,19 @@ config.default("map_cg_nmax", 1000, "Max number of CG steps to perform in map-ma
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for myid:n:nproc-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
 config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
+config.default("map_ptsrc_handling", "subadd", "How to handle point sources in the map. Can be 'plain' for no special treatment, 'subadd' to subtract from the TOD and readd in pixel space, and 'sim' to simulate a pointsource-only TOD.")
+config.default("map_ptsrc_eqsys", "cel", "Equation system the point source positions are specified in. Default is 'cel'")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
 parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("prefix",nargs="?")
-parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,500,1000,2000,5000,10000", help="CG map dump steps")
+parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,300,400,500,600,800,1000,1200,1500,2000,3000,4000,5000,6000,8000,10000", help="CG map dump steps")
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
 parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
-parser.add_argument("--isrc",       type=str,             help="Subtract point sources from map based on this source specification")
 parser.add_argument("--azmap",      type=str,             help="Solve for azimuth signal in addition to map. Example 300:phase:shared, 100:azimuth:individual")
-parser.add_argument("--isrc-sim",    action="store_true", help="Simulate point sources rather than subtracting them")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 args = parser.parse_args()
 
@@ -58,11 +58,14 @@ if args.imap:
 
 # Optional point source model to subtract
 isrc = None
-if args.isrc:
-	toks = args.isrc.split(":")
-	isrc_sys, fname = ":".join(toks[:-1]), toks[-1]
-	if args.isrc_sim: tmul, pmul = 0,1
-	else: tmul, pmul = 1,-1
+ptsrc_handling = config.get("map_ptsrc_handling")
+if ptsrc_handling != 'none':
+	isrc_sys = config.get("map_ptsrc_eqsys")
+	# Only static point sources supported for now
+	fname = db.static.pointsrcs
+	if ptsrc_handling == "sim": tmul, pmul = 0,1
+	elif ptsrc_handling == "subadd": tmul, pmul = 1,-1
+	else: raise ValueError("Unrecognized map_ptsrc_handling: %s" % src_handling)
 	isrc = bunch.Bunch(sys=isrc_sys or None, model=SourceModel(fname), tmul=tmul, pmul=pmul)
 
 # Optional azimuth filter

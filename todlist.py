@@ -1,6 +1,7 @@
+import os
 from enact import filedb
-import argparse
-parser = argparse.ArgumentParser()
+from enlib import config
+parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("query", nargs="?", default=None)
 args = parser.parse_args()
 filedb.init()

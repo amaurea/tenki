@@ -1,6 +1,6 @@
-import numpy as np, argparse, time, os, zipfile, h5py
+import numpy as np, argparse, time, os, zipfile, h5py, bunch
 from mpi4py import MPI
-from enlib import utils, fft, nmat, errors, config, bench, array_ops
+from enlib import utils, fft, nmat, errors, config, bench, array_ops, pmat, enmap
 from enact import filedb, todinfo, data, nmat_measure
 
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
@@ -12,6 +12,7 @@ parser.add_argument("-m", "--model", default="jon")
 parser.add_argument("-c", "--resume", action="store_true")
 parser.add_argument("-s", "--spikecut", type=int, default=1)
 parser.add_argument("-C", "--covtest", action="store_true")
+parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
 args = parser.parse_args()
 
 comm = MPI.COMM_WORLD
@@ -26,6 +27,13 @@ filelist = todinfo.get_tods(args.filelist, config.get("todinfo"))
 myinds   = range(len(filelist))[myid::nproc]
 n        = len(filelist)
 
+# Optinal input map to subtract
+imap = None
+if args.imap:
+	toks = args.imap.split(":")
+	imap_sys, fname = ":".join(toks[:-1]), toks[-1]
+	imap = bunch.Bunch(sys=imap_sys or None, map=enmap.read_map(fname))
+
 for i in myinds:
 	id    = filelist[i]
 	entry = db[id]
@@ -35,8 +43,19 @@ for i in myinds:
 	try:
 		fields = ["gain","tconst","cut","tod","boresight", "noise_cut"]
 		if args.spikecut: fields.append("spikes")
+		if args.imap: fields += ["polangle","point_offsets","site"]
 		d  = data.read(entry, fields)                ; t.append(time.time())
 		d  = data.calibrate(d)                       ; t.append(time.time())
+		if args.imap:
+			# Make a full scan object, so we can perform pointing projection
+			# operations
+			d.noise = None
+			scan = data.ACTScan(entry, d=d)
+			imap.map = imap.map.astype(d.tod.dtype, copy=False)
+			pmap = pmat.PmatMap(scan, imap.map, sys=imap.sys)
+			# Subtract input map from tod inplace
+			pmap.forward(d.tod, imap.map, tmul=1, mmul=-1)
+			utils.deslope(d.tod, w=8, inplace=True)
 		ft = fft.rfft(d.tod) * d.tod.shape[1]**-0.5  ; t.append(time.time())
 		spikes = d.spikes[:2].T if args.spikecut else None
 		if model == "old":
@@ -53,7 +72,7 @@ for i in myinds:
 			nmat.write_nmat(hfile, noise)                ; t.append(time.time())
 			if args.covtest:
 				# Measure full cov per bin
-				ndet = d.tod.shape[0]
+				ndet = ft.shape[0]
 				bins = np.minimum((noise.bins*ft.shape[1]/noise.bins[-1,1]).astype(int),ft.shape[1]-1)
 				nbin = len(bins)
 				cov_full = np.zeros([nbin,ndet,ndet])
@@ -79,7 +98,8 @@ for i in myinds:
 		dt= t[1:]-t[:-1]
 	except (errors.DataMissing, ValueError, AssertionError, np.linalg.LinAlgError) as e:
 		print "%3d/%d %25s skip (%s)" % (i+1,n,id, e.message)
-		raise
+		#print entry
+		#raise
 		continue
 	except zipfile.BadZipfile:
 		print "%d/%d %25s bad zip" % (i+1,n,id)

@@ -26,6 +26,7 @@ parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,30
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
 parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
+parser.add_argument("--imap-op",    type=str, default='sim', help="What operation to do with imap. Can be 'sim' or 'sub'")
 parser.add_argument("--azmap",      type=str,             help="Solve for azimuth signal in addition to map. Example 300:phase:shared, 100:azimuth:individual")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 args = parser.parse_args()
@@ -54,7 +55,9 @@ imap = None
 if args.imap:
 	toks = args.imap.split(":")
 	imap_sys, fname = ":".join(toks[:-1]), toks[-1]
-	imap = bunch.Bunch(sys=imap_sys or None, map=enmap.read_map(fname))
+	if args.imap_op == "sim": tmul, mmul = 0, 1
+	elif args.imap_op == "sub": tmul, mmul = 1, -1
+	imap = bunch.Bunch(sys=imap_sys or None, map=enmap.read_map(fname), tmul=tmul, mmul=mmul)
 
 # Optional point source model to subtract
 isrc = None

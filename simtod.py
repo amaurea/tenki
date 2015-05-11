@@ -3,7 +3,6 @@ from enlib import enmap, utils, config, scansim, log, powspec, fft
 from enact import data, filedb, nmat_measure
 
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
-config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("odir")
@@ -35,16 +34,14 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 	L.debug("real")
 	if real:
 		real_scans = []
-		toks = real.split(":")
-		filelist, fslice = toks[0], ":".join(toks[1:])
-		filelist = [line.split()[0] for line in open(filelist,"r") if line[0] != "#"]
-		filelist = eval("filelist"+fslice)
-		db = filedb.ACTdb(config.get("filedb"))
-		for id in filelist:
+		filedb.init()
+		db   = filedb.data
+		ids  = fileb.scans[real].ids
+		for id in ids:
 			try:
 				real_scans.append(data.ACTScan(db[id]))
 			except errors.DataMissing as e:
-				L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
+				L.debug("Skipped %s (%s)" % (id, e.message))
 	# Dets
 	L.debug("dets")
 	sim_dets = []

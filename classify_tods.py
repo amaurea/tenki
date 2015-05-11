@@ -4,18 +4,15 @@ from enact import filedb, files
 
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
-parser.add_argument("filelist")
+parser.add_argument("query")
 parser.add_argument("-r", "--focalplane-radius", type=float, default=1.0)
 args = parser.parse_args()
 
 comm  = mpi4py.MPI.COMM_WORLD
 
-db    = filedb.ACTFiles(config.get("filedb"))
-# Allow filelist to take the format filename:[slice]
-toks = args.filelist.split(":")
-filelist, fslice = toks[0], ":".join(toks[1:])
-filelist = [line.split()[0] for line in open(filelist,"r") if line[0] != "#"]
-filelist = eval("filelist"+fslice)
+filedb.init()
+db       = filedb.data
+filelist = filedb.scans[args.query].ids
 
 for ind in range(comm.rank, len(filelist), comm.size):
 	id    = filelist[ind]

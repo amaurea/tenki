@@ -5,8 +5,6 @@ from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import data, nmat_measure, filedb, todinfo
 
-config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
-config.default("todinfo", "todinfo.txt", "File describing location of the TOD id lists")
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("map_precon", "bin", "Preconditioner to use for map-making")
@@ -42,8 +40,9 @@ myid  = comm.rank
 nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 
-db       = filedb.ACTFiles(config.get("filedb"))
-filelist = todinfo.get_tods(args.filelist, config.get("todinfo"))
+filedb.init()
+db = filedb.data
+filelist = todinfo.get_tods(args.filelist, filedb.scans)
 
 area = enmap.read_map(args.area)
 area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
@@ -93,8 +92,8 @@ if myid == 0:
 	with open(root + "ids.txt","w") as f:
 		for id in filelist:
 			f.write("%s\n" % id)
-	shutil.copyfile(config.get("filedb"),  root + "filedb.txt")
-	try: shutil.copyfile(config.get("todinfo"), root + "todinfo.txt")
+	shutil.copyfile(filedb.cjoin(["root","dataset","filedb"]),  root + "filedb.txt")
+	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), root + "todinfo.txt")
 	except IOError: pass
 # Set up logging
 utils.mkdir(root + "log")

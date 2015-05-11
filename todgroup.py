@@ -1,7 +1,6 @@
 import numpy as np, os
 from enlib import utils, coordinates, config
 from enact import files, filedb
-config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("todinfo")
 parser.add_argument("odir")
@@ -21,7 +20,8 @@ def calc_driftangle(hor, t, site):
 	angle = np.arctan2(vec_drift[1],vec_drift[0]*np.cos(hor[1]))%np.pi
 	return angle
 
-db = filedb.ACTFiles(config.get("filedb"))
+filedb.init()
+db = filedb.data
 utils.mkdir(args.odir)
 
 # Read in lines with format [id, az, el]

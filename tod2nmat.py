@@ -3,10 +3,8 @@ from mpi4py import MPI
 from enlib import utils, fft, nmat, errors, config, bench, array_ops, pmat, enmap
 from enact import filedb, todinfo, data, nmat_measure
 
-config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
-config.default("todinfo", "todinfo.txt", "File describing location of the TOD id lists")
 parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
-parser.add_argument("filelist")
+parser.add_argument("query")
 parser.add_argument("odir")
 parser.add_argument("-m", "--model", default="jon")
 parser.add_argument("-c", "--resume", action="store_true")
@@ -22,10 +20,11 @@ shared = True
 
 utils.mkdir(args.odir)
 
-db       = filedb.ACTFiles(config.get("filedb"))
-filelist = todinfo.get_tods(args.filelist, config.get("todinfo"))
-myinds   = range(len(filelist))[myid::nproc]
-n        = len(filelist)
+filedb.init()
+db       = filedb.data
+ids      = filedb.scans[args.query].ids
+myinds   = range(len(ids))[myid::nproc]
+n        = len(ids)
 
 # Optinal input map to subtract
 imap = None
@@ -35,7 +34,7 @@ if args.imap:
 	imap = bunch.Bunch(sys=imap_sys or None, map=enmap.read_map(fname))
 
 for i in myinds:
-	id    = filelist[i]
+	id    = ids[i]
 	entry = db[id]
 	ofile = "%s/%s.hdf" % (args.odir, id)
 	if os.path.isfile(ofile) and args.resume: continue

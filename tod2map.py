@@ -123,11 +123,20 @@ for ind in tmpinds:
 	myinds.append(ind)
 	L.debug("Read %s" % filelist[ind])
 
-nread = comm.allreduce(len(myscans))
-L.info("Found %d tods" % nread)
-if nread == 0:
+# Collect scan info
+read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]
+read_ndets= utils.allgatherv([len(scan.dets) for scan in myscans], comm)
+read_dets = utils.uncat(utils.allgatherv(np.concatenate([scan.dets for scan in myscans]),comm), read_ndets)
+read_ntot = len(read_ids)
+L.info("Found %d tods" % read_ntot)
+if read_ntot == 0:
 	L.info("Giving up")
 	sys.exit(1)
+# Save accept list
+if myid == 0:
+	with open(root + "accept.txt", "w") as f:
+		for id, dets in zip(read_ids, read_dets):
+			f.write("%s %3d: " % (id, len(dets)) + " ".join([str(d) for d in dets]) + "\n")
 
 if config.get("task_dist") == "size":
 	# Try to get about the same amount of data for each mpi task.

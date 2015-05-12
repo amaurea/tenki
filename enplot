@@ -110,7 +110,13 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 
 	# Construct default out format
 	ndigit = int(np.log10(ncomp))+1
-	dot  = ifile.rfind(".")
+	# Find the extension. Using the last dot does not work for .fits.gz.
+	# Using the first dot in basename does not work for foo2.5_bar.fits.
+	# Will therefore handle .gz as a special case.
+	if ifile.endswith(".gz"):
+		dot = ifile[:-3].rfind(".")
+	else:
+		dot  = ifile.rfind(".")
 	if dot < 0: dot = len(ifile)
 
 	# Loop over fields

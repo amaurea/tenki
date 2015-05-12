@@ -14,6 +14,7 @@ config.default("task_dist", "size", "How to assign scans to each mpi task. Can b
 config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
 config.default("map_ptsrc_handling", "subadd", "How to handle point sources in the map. Can be 'plain' for no special treatment, 'subadd' to subtract from the TOD and readd in pixel space, and 'sim' to simulate a pointsource-only TOD.")
 config.default("map_ptsrc_eqsys", "cel", "Equation system the point source positions are specified in. Default is 'cel'")
+config.default("map_format", "fits", "File format to use when writing maps. Can be 'fits', 'fits.gz' or 'hdf'.")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
@@ -39,6 +40,7 @@ comm  = mpi4py.MPI.COMM_WORLD
 myid  = comm.rank
 nproc = comm.size
 nmax  = config.get("map_cg_nmax")
+ext   = config.get("map_format")
 
 filedb.init()
 db = filedb.data
@@ -125,13 +127,13 @@ for ind in tmpinds:
 
 # Collect scan info
 read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]
-read_ndets= utils.allgatherv([len(scan.dets) for scan in myscans], comm)
-read_dets = utils.uncat(utils.allgatherv(np.concatenate([scan.dets for scan in myscans]),comm), read_ndets)
 read_ntot = len(read_ids)
 L.info("Found %d tods" % read_ntot)
 if read_ntot == 0:
 	L.info("Giving up")
 	sys.exit(1)
+read_ndets= utils.allgatherv([len(scan.dets) for scan in myscans], comm)
+read_dets = utils.uncat(utils.allgatherv(np.concatenate([scan.dets for scan in myscans]),comm), read_ndets)
 # Save accept list
 if myid == 0:
 	with open(root + "accept.txt", "w") as f:
@@ -162,13 +164,13 @@ if config.get("task_dist") == "size":
 
 L.info("Building equation system")
 eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc, azmap=azmap, azfilter=azfilter)
-eq.write(root)
+eq.write(root, ext=ext)
 bench.stats.write(benchfile)
 
 L.info("Computing approximate map")
 x  = eq.M(eq.b)
 bmap = eq.dof.unzip(x)[0]
-if myid == 0: enmap.write_map(root + "bin.fits", bmap)
+if myid == 0: enmap.write_map(root + "bin." + ext, bmap)
 
 def solve_cg(eq, nmax=1000, ofmt=None, dump=None, azfmt=None):
 	cg = CG(eq.A, eq.b, M=eq.M, dot=eq.dof.dot)
@@ -196,4 +198,4 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump=None, azfmt=None):
 if nmax > 0:
 	L.info("Solving equation")
 	dump_steps = [int(w) for w in args.dump.split(",")]
-	x = solve_cg(eq, nmax=nmax, ofmt=root + "map%04d.fits", dump=dump_steps, azfmt=root + "az%04d.fits")
+	x = solve_cg(eq, nmax=nmax, ofmt=root + "map%04d." + ext, dump=dump_steps, azfmt=root + "az%04d." + ext)

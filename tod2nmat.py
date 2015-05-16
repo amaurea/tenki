@@ -60,7 +60,6 @@ for i in myinds:
 		if model == "old":
 			noise = nmat_measure.detvecs_old(ft, d.srate, d.dets)
 		elif model == "jon":
-			di = np.where(d.dets==20)[0]
 			noise = nmat_measure.detvecs_jon(ft, d.srate, d.dets, shared, cut_bins=spikes)
 		elif model == "simple":
 			noise = nmat_measure.detvecs_simple(ft, d.srate, d.dets)

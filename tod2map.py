@@ -115,6 +115,12 @@ if myid == 0:
 # all at roughly the same part of the sky.
 mycosts = [s.nsamp*s.ndet for s in myscans]
 myboxes = [coordinates.transform(s.sys,mapsys,s.box.T[1:],time=s.mjd0+s.box[:,0]/3600/24,site=s.site)[::-1].T for s in myscans]
+print "myboxes", np.array(myboxes)*180/np.pi
+myboxes = [
+		utils.bounding_box([
+			coordinates.transform(s.sys,mapsys,b[1:,None],time=s.mjd0+b[0,None]/3600/24,site=s.site)[::-1,0] for b in utils.box2corners(s.box)
+	]) for s in myscans]
+print "myboxes", np.array(myboxes)*180/np.pi
 all_costs = comm.allreduce(mycosts)
 all_boxes = comm.allreduce(myboxes)
 all_inds  = comm.allreduce(myinds)

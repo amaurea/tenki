@@ -114,13 +114,10 @@ if myid == 0:
 # Try to get about the same amount of data for each mpi task,
 # all at roughly the same part of the sky.
 mycosts = [s.nsamp*s.ndet for s in myscans]
-myboxes = [coordinates.transform(s.sys,mapsys,s.box.T[1:],time=s.mjd0+s.box[:,0]/3600/24,site=s.site)[::-1].T for s in myscans]
-print "myboxes", np.array(myboxes)*180/np.pi
 myboxes = [
 		utils.bounding_box([
 			coordinates.transform(s.sys,mapsys,b[1:,None],time=s.mjd0+b[0,None]/3600/24,site=s.site)[::-1,0] for b in utils.box2corners(s.box)
 	]) for s in myscans]
-print "myboxes", np.array(myboxes)*180/np.pi
 all_costs = comm.allreduce(mycosts)
 all_boxes = comm.allreduce(myboxes)
 all_inds  = comm.allreduce(myinds)
@@ -143,13 +140,8 @@ for ind in myinds:
 	L.debug("Read %s" % filelist[ind])
 
 # We now have enough information to set up distributed maps
-print "moo"
 area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
-print "cow"
 area = dmap.Dmap((args.ncomp,)+area.shape[-2:], area.wcs, area.bbpix, tshape=tshape, comm=comm, dtype=dtype)
-print "dog"
-
-area.tile2work()
 
 # Optinal input map to use in place of signal
 imap = None
@@ -173,7 +165,7 @@ if ptsrc_handling != 'none':
 	model = SourceModel(fname)
 	srcmap = area.copy()
 	for tile in srcmap.tiles:
-		tile[:] = model.draw(tile.shape, tile.wcs, window=True)
+		tile[:] = model.draw(tile.shape, tile.wcs, window=True, pad=True)
 	isrc = bunch.Bunch(sys=isrc_sys or None, model=model, map=srcmap, tmul=tmul, pmul=pmul)
 
 # Optional azimuth filter

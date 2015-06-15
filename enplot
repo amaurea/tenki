@@ -12,7 +12,7 @@ parser.add_argument("--min", type=str)
 parser.add_argument("--max", type=str)
 parser.add_argument("-q", "--quantile", type=float, default=0.01)
 parser.add_argument("-v", dest="verbosity", action="count")
-parser.add_argument("-s", "--scale", type=int, default=1)
+parser.add_argument("-s", "-u", "--scale", "--upgrade", type=int, default=1)
 parser.add_argument("--verbosity", dest="verbosity", type=int)
 parser.add_argument("--method", default="fast")
 parser.add_argument("--slice", type=str)
@@ -107,6 +107,10 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 			v1,v2 = vals[int(round(n*args.quantile))], vals[min(n-1,int(round(n*(1-args.quantile))))]
 			crange[0,np.isnan(crange[0])] = v1
 			crange[1,np.isnan(crange[1])] = v2
+
+	if args.verbosity >= 4:
+		for ci, cr in enumerate(crange.T):
+			sys.stderr.write("color range %d: %15.7e to %15.7e\n" % (ci, cr[0], cr[1]))
 
 	# Construct default out format
 	ndigit = int(np.log10(ncomp))+1

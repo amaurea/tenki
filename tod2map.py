@@ -1,6 +1,6 @@
 import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch
 from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
-from enlib import log, bench, scan
+from enlib import log, bench, scan, dmap, coordinates
 from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import data, nmat_measure, filedb, todinfo
@@ -8,6 +8,7 @@ from enact import data, nmat_measure, filedb, todinfo
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("map_precon", "bin", "Preconditioner to use for map-making")
+config.default("map_eqsys",  "equ", "The coordinate system of the maps. Can be eg. 'hor', 'equ' or 'gal'.")
 config.default("map_cg_nmax", 1000, "Max number of CG steps to perform in map-making")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for myid:n:nproc-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
@@ -41,47 +42,15 @@ myid  = comm.rank
 nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
+mapsys= config.get("map_eqsys")
+tshape= (240,240)
 
 filedb.init()
 db = filedb.data
 filelist = todinfo.get_tods(args.filelist, filedb.scans)
 
-area = enmap.read_map(args.area)
-area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 utils.mkdir(args.odir)
 root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
-
-# Optinal input map to use in place of signal
-imap = None
-if args.imap:
-	toks = args.imap.split(":")
-	imap_sys, fname = ":".join(toks[:-1]), toks[-1]
-	if args.imap_op == "sim": tmul, mmul = 0, 1
-	elif args.imap_op == "sub": tmul, mmul = 1, -1
-	imap = bunch.Bunch(sys=imap_sys or None, map=enmap.read_map(fname), tmul=tmul, mmul=mmul)
-
-# Optional point source model to subtract
-isrc = None
-ptsrc_handling = config.get("map_ptsrc_handling")
-if ptsrc_handling != 'none':
-	isrc_sys = config.get("map_ptsrc_eqsys")
-	# Only static point sources supported for now
-	fname = db.static.pointsrcs
-	if ptsrc_handling == "sim": tmul, pmul = 0,1
-	elif ptsrc_handling == "subadd": tmul, pmul = 1,-1
-	else: raise ValueError("Unrecognized map_ptsrc_handling: %s" % src_handling)
-	isrc = bunch.Bunch(sys=isrc_sys or None, model=SourceModel(fname), tmul=tmul, pmul=pmul)
-
-# Optional azimuth filter
-azfilter = None
-if config.get("gfilter_jon"):
-	azfilter = bunch.Bunch(naz=None, nt=None)
-
-# Optionally solve for azimuth profile
-azmap = None
-if args.azmap:
-	npix, mode, shared = args.azmap.split(":")
-	azmap = bunch.Bunch(npix=int(npix), mode=mode, shared=shared=="shared")
 
 # Dump our settings
 if myid == 0:
@@ -109,7 +78,7 @@ benchfile = root + "bench/bench%03d.txt" % myid
 # Read in all our scans
 L.info("Reading %d scans" % len(filelist))
 tmpinds    = np.arange(len(filelist))[myid::nproc]
-myscans, myinds  = [], []
+myscans, myinds, mysubs  = [], [], []
 for ind in tmpinds:
 	try:
 		d = scan.read_scan(filelist[ind])
@@ -121,8 +90,10 @@ for ind in tmpinds:
 			continue
 	d = d[:,::config.get("downsample")]
 	if args.ndet > 0: d = d[:args.ndet]
+	# Add a subset tag to 
 	myscans.append(d)
 	myinds.append(ind)
+	mysubs.append(0)
 	L.debug("Read %s" % filelist[ind])
 
 # Collect scan info
@@ -140,37 +111,90 @@ if myid == 0:
 		for id, dets in zip(read_ids, read_dets):
 			f.write("%s %3d: " % (id, len(dets)) + " ".join([str(d) for d in dets]) + "\n")
 
-if config.get("task_dist") == "size":
-	# Try to get about the same amount of data for each mpi task.
-	mycosts = [s.nsamp*s.ndet for s in myscans]
-	all_costs = comm.allreduce(mycosts)
-	all_inds  = comm.allreduce(myinds)
-	myinds_old = myinds
-	myinds = [all_inds[i] for i in utils.equal_split(all_costs, nproc)[myid]]
-	# And reread the correct files this time. Ideally we would
-	# transfer this with an mpi all-to-all, but then we would
-	# need to serialize and unserialize lots of data, which
-	# would require lots of code.
-	if sorted(myinds_old) != sorted(myinds):
-		L.info("Rereading shuffled scans")
-		myscans = []
-		for ind in myinds:
-			d = data.ACTScan(db[filelist[ind]])[:,::config.get("downsample")]
-			if args.ndet > 0: d = d[:args.ndet]
-			myscans.append(d)
-			L.debug("Read %s" % filelist[ind])
-	else:
-		myinds = myinds_old
+def calc_sky_bbox_scan(scan, osys):
+	icorners = utils.box2corners(scan.box)
+	ocorners = np.array([coordinates.transform(scan.sys,osys,b[1:,None],time=scan.mjd0+b[0,None]/3600/24,site=scan.site)[::-1,0] for b in icorners])
+	# Take care of angle wrapping along the ra direction
+	ocorners[...,1] = utils.rewind(ocorners[...,1], ref="auto")
+	return utils.bounding_box(ocorners)
+
+# Try to get about the same amount of data for each mpi task,
+# all at roughly the same part of the sky.
+mycosts = [s.nsamp*s.ndet for s in myscans]
+myboxes = [calc_sky_bbox_scan(s, mapsys) for s in myscans]
+all_costs = comm.allreduce(mycosts)
+all_boxes = np.array(comm.allreduce(myboxes))
+# Avoid angle wraps.
+all_boxes[...,1] = np.sort(utils.rewind(all_boxes[...,1], ref="auto"),-1)
+all_inds  = comm.allreduce(myinds)
+myinds_old = myinds
+# Split into nearby scans
+mygroups = dmap.split_boxes_rimwise(all_boxes, all_costs, nproc)[myid]
+myinds = [all_inds[i] for group in mygroups for i in group]
+mysubs = [gi for gi, group in enumerate(mygroups) for i in group]
+mybbox = [utils.bounding_box([all_boxes[i] for i in group]) for group in mygroups]
+
+# And reread the correct files this time. Ideally we would
+# transfer this with an mpi all-to-all, but then we would
+# need to serialize and unserialize lots of data, which
+# would require lots of code.
+L.info("Rereading shuffled scans")
+myscans = []
+for ind in myinds:
+	d = data.ACTScan(db[filelist[ind]])[:,::config.get("downsample")]
+	if args.ndet > 0: d = d[:args.ndet]
+	myscans.append(d)
+	L.debug("Read %s" % filelist[ind])
+
+# We now have enough information to set up distributed maps
+area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
+area = dmap.Dmap((args.ncomp,)+area.shape[-2:], area.wcs, area.bbpix, tshape=tshape, comm=comm, dtype=dtype)
+
+# Optinal input map to use in place of signal
+imap = None
+if args.imap:
+	toks = args.imap.split(":")
+	imap_sys, fname = ":".join(toks[:-1]), toks[-1]
+	if args.imap_op == "sim": tmul, mmul = 0, 1
+	elif args.imap_op == "sub": tmul, mmul = 1, -1
+	imap = bunch.Bunch(sys=imap_sys or None, map=dmap.read_map(fname, area.bbpix, tshape=tshape, comm=comm).astype(dtype), tmul=tmul, mmul=mmul)
+
+# Optional point source model to subtract
+isrc = None
+ptsrc_handling = config.get("map_ptsrc_handling")
+if ptsrc_handling != 'none':
+	isrc_sys = config.get("map_ptsrc_eqsys")
+	# Only static point sources supported for now
+	fname = db.static.pointsrcs
+	if ptsrc_handling == "sim": tmul, pmul = 0,1
+	elif ptsrc_handling == "subadd": tmul, pmul = 1,-1
+	else: raise ValueError("Unrecognized map_ptsrc_handling: %s" % src_handling)
+	model = SourceModel(fname)
+	srcmap = area.copy()
+	for tile in srcmap.tiles:
+		tile[:] = model.draw(tile.shape, tile.wcs, window=True, pad=True)
+	isrc = bunch.Bunch(sys=isrc_sys or None, model=model, map=srcmap, tmul=tmul, pmul=pmul)
+
+# Optional azimuth filter
+azfilter = None
+if config.get("gfilter_jon"):
+	azfilter = bunch.Bunch(naz=None, nt=None)
+
+# Optionally solve for azimuth profile
+azmap = None
+if args.azmap:
+	npix, mode, shared = args.azmap.split(":")
+	azmap = bunch.Bunch(npix=int(npix), mode=mode, shared=shared=="shared")
 
 L.info("Building equation system")
-eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc, azmap=azmap, azfilter=azfilter)
+eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc, azmap=azmap, azfilter=azfilter, subinds=mysubs)
 eq.write(root, ext=ext)
 bench.stats.write(benchfile)
 
 L.info("Computing approximate map")
 x  = eq.M(eq.b)
 bmap = eq.dof.unzip(x)[0]
-if myid == 0: enmap.write_map(root + "bin." + ext, bmap)
+dmap.write_map(root + "bin." + ext, bmap)
 
 def solve_cg(eq, nmax=1000, ofmt=None, dump=None, azfmt=None):
 	cg = CG(eq.A, eq.b, M=eq.M, dot=eq.dof.dot)
@@ -186,8 +210,7 @@ def solve_cg(eq, nmax=1000, ofmt=None, dump=None, azfmt=None):
 			# Also finish the azimuth filtering. This is horribly ugly and needs
 			# to be redesigned. I should not have to access things deep down like this.
 			map = eq.mapeq.postprocess(map, eq.precon.div_map)
-			if myid == 0:
-				enmap.write_map(ofmt % cg.i, map)
+			dmap.write_map(ofmt % cg.i, map)
 		if azfmt and azmap and azmap.shared and (cg.i in dump or cg.i % dump[-1] == 0) and myid == 0:
 			az = eq.dof.unzip(cg.x)[-1]
 			np.savetxt(azfmt % cg.i, az[0].T, "%15.7e")

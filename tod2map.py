@@ -111,13 +111,17 @@ if myid == 0:
 		for id, dets in zip(read_ids, read_dets):
 			f.write("%s %3d: " % (id, len(dets)) + " ".join([str(d) for d in dets]) + "\n")
 
+def calc_sky_bbox_scan(scan, osys):
+	icorners = utils.box2corners(scan.box)
+	ocorners = np.array([coordinates.transform(scan.sys,osys,b[1:,None],time=scan.mjd0+b[0,None]/3600/24,site=scan.site)[::-1,0] for b in icorners])
+	# Take care of angle wrapping along the ra direction
+	ocorners[...,1] = utils.rewind(ocorners[...,1], ref="auto")
+	return utils.bounding_box(ocorners)
+
 # Try to get about the same amount of data for each mpi task,
 # all at roughly the same part of the sky.
 mycosts = [s.nsamp*s.ndet for s in myscans]
-myboxes = [
-		utils.bounding_box(utils.rewind([
-			coordinates.transform(s.sys,mapsys,b[1:,None],time=s.mjd0+b[0,None]/3600/24,site=s.site)[::-1,0] for b in utils.box2corners(s.box)
-	],ref="auto")) for s in myscans]
+myboxes = [calc_sky_bbox_scan(s, mapsys) for s in myscans]
 all_costs = comm.allreduce(mycosts)
 all_boxes = np.array(comm.allreduce(myboxes))
 # Avoid angle wraps.
@@ -129,6 +133,7 @@ mygroups = dmap.split_boxes_rimwise(all_boxes, all_costs, nproc)[myid]
 myinds = [all_inds[i] for group in mygroups for i in group]
 mysubs = [gi for gi, group in enumerate(mygroups) for i in group]
 mybbox = [utils.bounding_box([all_boxes[i] for i in group]) for group in mygroups]
+
 # And reread the correct files this time. Ideally we would
 # transfer this with an mpi all-to-all, but then we would
 # need to serialize and unserialize lots of data, which

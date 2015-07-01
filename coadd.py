@@ -1,5 +1,5 @@
 import numpy as np, argparse
-from enlib import enmap, log
+from enlib import enmap, log, array_ops
 parser = argparse.ArgumentParser()
 parser.add_argument("imaps_and_hits", nargs="+")
 parser.add_argument("omap")
@@ -21,7 +21,8 @@ def mul(w,m):
 def solve(w,m):
 	if w.ndim == 2: return m/w[None]
 	elif w.ndim == 3: return m/w
-	elif w.ndim == 4: return enmap.map_mul(enmap.multi_pow(w,-1),m)
+	#elif w.ndim == 4: return enmap.map_mul(enmap.multi_pow(w,-1),m)
+	elif w.ndim == 4: return array_ops.solve_masked(w,m,axes=[0,1])#  enmap.map_mul(enmap.multi_pow(w,-1),m)
 	else: raise NotImplementedError("Only 2d, 3d or 4d weight maps understood")
 def nonan(a):
 	res = a.copy()
@@ -42,7 +43,7 @@ for mif,wif in zip(imaps[1:],ihits[1:]):
 	L.info("Reading %s" % wif)
 	wi = nonan(enmap.read_map(wif))
 	# We may need to reproject maps
-	if mi.shape != m.shape or mi.wcs.to_header() != m.wcs.to_header():
+	if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
 		mi = enmap.project(mi, m.shape, m.wcs, mode="constant")
 		wi = enmap.project(wi, w.shape, w.wcs, mode="constant")
 	w  += wi

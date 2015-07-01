@@ -34,6 +34,7 @@ parser.add_argument("--font-color", type=str, default="000000")
 parser.add_argument("-D", "--driver", type=str, default="pil")
 parser.add_argument("--mpl-dpi", type=float, default=75)
 parser.add_argument("--mpl-pad", type=float, default=1.6)
+parser.add_argument("--rgb", action="store_true")
 args = parser.parse_args()
 
 if args.verbosity >= 3:
@@ -56,6 +57,7 @@ class dprint:
 
 comm = MPI.COMM_WORLD
 ticks = np.full(2,1.0); ticks[:] = [float(w) for w in args.ticks.split(",")]
+ngroup = 3 if args.rgb else 1
 
 for fi in range(comm.rank,len(args.ifiles),comm.size):
 	ifile = args.ifiles[fi]
@@ -120,15 +122,15 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 	if dot < 0: dot = len(ifile)
 
 	# Loop over fields
-	for i in range(ncomp):
+	for i in range(0, ncomp, ngroup):
 		istr = ("%%0%dd/%%d" % ndigit) % (i+1,ncomp)
 		# We want dec to increase upwards (negative pixel diretion)
 		# and ra to increae leftwards (negative pixel direction).
-		mdata = mf[i]
-		if mdata.wcs.wcs.cdelt[1] > 0: mdata = mdata[::-1,:]
-		if mdata.wcs.wcs.cdelt[0] > 0: mdata = mdata[:,::-1]
-		if flip[0]: mdata = mdata[::-1,:]
-		if flip[1]: mdata = mdata[:,::-1]
+		mdata = mf[i:i+ngroup]
+		if mdata.wcs.wcs.cdelt[1] > 0: mdata = mdata[:,::-1,:]
+		if mdata.wcs.wcs.cdelt[0] > 0: mdata = mdata[:,:,::-1]
+		if flip[0]: mdata = mdata[:,::-1,:]
+		if flip[1]: mdata = mdata[:,:,::-1]
 		# Build output file name
 		fields = {"base":ifile[:dot], "iext":ifile[dot+1:], "fi":fi, "fn":len(args.ifiles),
 				"ci":i, "cn":ncomp, "pi":comm.rank, "pn":comm.size, "pre":args.prefix,
@@ -138,9 +140,10 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 		if args.mask is not None:
 			mdata[np.abs(mdata-args.mask)<=args.mask_tol] = np.nan
 		with dprint("%s rescale" % istr):
-			m_scaled = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
+			mdata = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
 		with dprint("%s colorize" % istr):
-			m_color  = colorize.colorize(m_scaled, desc=args.color, method=args.method)
+			if args.rgb: m_color = colorize.colorize(mdata,    desc=args.color, method="direct")
+			else:        m_color = colorize.colorize(mdata[0], desc=args.color, method=args.method)
 		if args.driver.lower() == "pil":
 			import PIL.Image, enlib.cgrid
 			with dprint("%s to image" % istr):

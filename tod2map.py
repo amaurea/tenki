@@ -1,6 +1,6 @@
 import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch
 from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
-from enlib import log, bench, scan, dmap, coordinates
+from enlib import log, bench, dmap, coordinates, scan as enscan, rangelist
 from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import data, nmat_measure, filedb, todinfo
@@ -81,7 +81,7 @@ tmpinds    = np.arange(len(filelist))[myid::nproc]
 myscans, myinds, mysubs  = [], [], []
 for ind in tmpinds:
 	try:
-		d = scan.read_scan(filelist[ind])
+		d = enscan.read_scan(filelist[ind])
 	except IOError:
 		try:
 			d = data.ACTScan(db[filelist[ind]])
@@ -141,10 +141,27 @@ mybbox = [utils.bounding_box([all_boxes[i] for i in group]) for group in mygroup
 L.info("Rereading shuffled scans")
 myscans = []
 for ind in myinds:
-	d = data.ACTScan(db[filelist[ind]])[:,::config.get("downsample")]
+	try:
+		d = enscan.read_scan(filelist[ind])
+	except IOError:
+		try:
+			d = data.ACTScan(db[filelist[ind]])
+		except errors.DataMissing as e:
+			L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
+			continue
+	d = d[:,::config.get("downsample")]
 	if args.ndet > 0: d = d[:args.ndet]
 	myscans.append(d)
 	L.debug("Read %s" % filelist[ind])
+
+## Hack: add extra cut for first scan
+#if len(myscans) > 1:
+#	print "Debug hack: adding extra cut"
+#	s = myscans[1]
+#	print s.boresight[:,1]*180/np.pi
+#	az = s.boresight[:,1]*180/np.pi
+#	mask = (az>-0.5)*(az<-0.3)
+#	s.cut += rangelist.Rangelist(mask)
 
 # We now have enough information to set up distributed maps
 area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)

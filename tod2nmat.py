@@ -103,3 +103,4 @@ for i in myinds:
 		print "%d/%d %25s bad zip" % (i+1,n,id)
 		continue
 	print ("%3d/%d %25s" + " %6.3f"*len(dt)) % tuple([i+1,n,id]+list(dt))
+print "%s done" % comm.rank

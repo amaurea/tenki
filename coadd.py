@@ -46,8 +46,8 @@ for mif,wif in zip(imaps[1:],ihits[1:]):
 	if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
 		mi = enmap.project(mi, m.shape, m.wcs, mode="constant")
 		wi = enmap.project(wi, w.shape, w.wcs, mode="constant")
-	w  += wi
-	wm += mul(wi,mi)
+	w[:len(wi)]  += wi
+	wm[:len(wi)] += mul(wi,mi)
 
 L.info("Solving")
 m = solve(w,wm)

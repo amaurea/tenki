@@ -35,6 +35,8 @@ parser.add_argument("-D", "--driver", type=str, default="pil")
 parser.add_argument("--mpl-dpi", type=float, default=75)
 parser.add_argument("--mpl-pad", type=float, default=1.6)
 parser.add_argument("--rgb", action="store_true")
+parser.add_argument("-a", "--autocrop", action="store_true")
+parser.add_argument("-A", "--autocrop-each", action="store_true")
 args = parser.parse_args()
 
 if args.verbosity >= 3:
@@ -71,6 +73,8 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 			default = [[-90,-180],[90,180]]
 			sub  = np.array([[(default[j][i] if q == '' else float(q))*np.pi/180 for j,q in enumerate(w.split(":"))]for i,w in enumerate(args.sub.split(","))]).T
 			m = m.submap(sub)
+		if args.autocrop:
+			m = enmap.autocrop(m)
 		downgrade = [int(w) for w in args.downgrade.split(",")]
 		m = enmap.downgrade(m, downgrade)
 		m = eval("m"+slice)
@@ -141,6 +145,8 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 				"suf":args.suffix, "comp": "_%0*d" % (ndigit,i) if m.ndim > 2 else "",
 				"ext":args.ext}
 		oname = args.oname.format(**fields)
+		if args.autocrop_each:
+			mdata = enmap.autocrop(mdata)
 		if args.mask is not None:
 			mdata[np.abs(mdata-args.mask)<=args.mask_tol] = np.nan
 		with dprint("%s rescale" % istr):

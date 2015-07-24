@@ -105,6 +105,13 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 		sim_srcs = scansim.rand_srcs(area.box(), nsrc, amp, abs(fwhm)*np.pi/180/60, rand_fwhm=fwhm<0)
 		for i in range(nsim):
 			scans.append(scansim.SimSrcs(sim_bore[i], sim_dets[i], sim_srcs, sim_nmat[i], seed=seed+i, noise_scale=noise_scale))
+	elif toks[0] == "vsrc":
+		# Create a single variable source
+		ra, dec, fwhm = float(toks[1])*np.pi/180, float(toks[2])*np.pi/180, float(toks[3])*np.pi/180/60
+		amps = [float(t) for t in toks[4].split(",")]
+		for i in range(nsim):
+			sim_srcs = bunch.Bunch(pos=np.array([[dec,ra]]),amps=np.array([[amps[i],0,0,0]]), beam=np.array([fwhm/(8*np.log(2)**0.5)]))
+			scans.append(scansim.SimSrcs(sim_bore[i], sim_dets[i], sim_srcs, sim_nmat[i], seed=seed+i, noise_scale=noise_scale, nsigma=20))
 	elif toks[0] == "cmb":
 		np.random.seed(seed)
 		ps = powspec.read_spectrum(toks[1])

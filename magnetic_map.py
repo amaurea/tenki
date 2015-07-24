@@ -1,10 +1,10 @@
 """Instead of mapping pixels on the sky, creates a map in AZ for each detector
 for each scanning pattern. Scanning patterns are identified by mean az, mean el,
 delta az, delta el."""
-import numpy as np, os, mpi4py.MPI, h5py
+import numpy as np, os, mpi4py.MPI, h5py, sys, pipes, shutil
 from enlib import config, errors, utils, log, map_equation, bench
 from enlib.cg import CG
-from enact import data, filedb
+from enact import data, filedb, todinfo
 
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("map_cg_nmax", 1000, "Max number of CG steps to perform in map-making")
@@ -24,8 +24,7 @@ args = parser.parse_args()
 filedb.init()
 
 comm = mpi4py.MPI.COMM_WORLD
-db = filedb.scans[args.sel]
-ids = db.ids
+ids = todinfo.get_tods(args.sel, filedb.scans)
 ndet_max = 33*32
 pos_tol = args.pos_tol*utils.degree
 amp_tol = args.amp_tol*utils.degree
@@ -45,6 +44,21 @@ def mid_dev(a):
 	mi = np.min(a)
 	ma = np.max(a)
 	return (ma+mi)/2, (ma-mi)/2
+
+# Dump our settings
+if comm.rank == 0:
+	config.save(root + "config.txt")
+	with open(root + "args.txt","w") as f:
+		f.write(" ".join([pipes.quote(a) for a in sys.argv[1:]]) + "\n")
+	with open(root + "env.txt","w") as f:
+		for k,v in os.environ.items():
+			f.write("%s: %s\n" %(k,v))
+	with open(root + "ids.txt","w") as f:
+		for id in ids:
+			f.write("%s\n" % id)
+	shutil.copyfile(filedb.cjoin(["root","dataset","filedb"]),  root + "filedb.txt")
+	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), root + "todinfo.txt")
+	except IOError: pass
 
 # Read in my scans
 myinds_ideal  = np.arange(comm.rank, len(ids), comm.size)

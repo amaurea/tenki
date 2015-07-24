@@ -174,7 +174,7 @@ if args.imap:
 	imap_sys, fname = ":".join(toks[:-1]), toks[-1]
 	if args.imap_op == "sim": tmul, mmul = 0, 1
 	elif args.imap_op == "sub": tmul, mmul = 1, -1
-	imap = bunch.Bunch(sys=imap_sys or None, map=dmap.read_map(fname, area.bbpix, tshape=tshape, comm=comm).astype(dtype), tmul=tmul, mmul=mmul)
+	imap = bunch.Bunch(sys=imap_sys or None, map=enmap.read_map(fname).astype(dtype), tmul=tmul, mmul=mmul)
 
 # Optional point source model to subtract
 isrc = None

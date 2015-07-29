@@ -52,7 +52,7 @@ for tfile in args.templates:
 		if len(opos) == 3: psi = -opos[2].copy()
 		del opos
 	L.debug("Projecting")
-	res  = curvedsky.alm2map(alm, pmap)
+	res  = curvedsky.alm2map_pos(alm, pmap)
 	if args.rot and ncomp==3:
 		L.debug("Rotating polarization vectors")
 		res[1:3] = enmap.rotate_pol(res[1:3], psi)

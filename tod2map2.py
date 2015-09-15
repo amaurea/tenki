@@ -1,6 +1,6 @@
 import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch
-from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
-from enlib import log, bench, dmap, coordinates, scan as enscan, rangelist, scanutils
+from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, errors
+from enlib import log, bench, dmap2 as dmap, coordinates, scan as enscan, rangelist, scanutils
 from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import data, nmat_measure, filedb, todinfo, readutils
@@ -130,77 +130,33 @@ myscans, myinds = readutils.read_scans(filelist, myinds, db, ndet=args.ndet)
 
 # We now have enough information to set up distributed maps
 area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
-area = dmap.Dmap((args.ncomp,)+area.shape[-2:], area.wcs, area.bbpix, tshape=tshape, comm=comm, dtype=dtype)
+area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
 
-# Optinal input map to use in place of signal
-imap = None
-if args.imap:
-	toks = args.imap.split(":")
-	imap_sys, fname = ":".join(toks[:-1]), toks[-1]
-	if args.imap_op == "sim": tmul, mmul = 0, 1
-	elif args.imap_op == "sub": tmul, mmul = 1, -1
-	imap = bunch.Bunch(sys=imap_sys or None, map=dmap.read_map(fname, area.bbpix, tshape=tshape, comm=comm).astype(dtype), tmul=tmul, mmul=mmul)
-
-# Optional point source model to subtract
-isrc = None
-ptsrc_handling = config.get("map_ptsrc_handling")
-if ptsrc_handling != 'none':
-	isrc_sys = config.get("map_ptsrc_eqsys")
-	# Only static point sources supported for now
-	fname = db.static.pointsrcs
-	if ptsrc_handling == "sim": tmul, pmul = 0,1
-	elif ptsrc_handling == "subadd": tmul, pmul = 1,-1
-	else: raise ValueError("Unrecognized map_ptsrc_handling: %s" % src_handling)
-	model = SourceModel(fname)
-	srcmap = area.copy()
-	for tile in srcmap.tiles:
-		tile[:] = model.draw(tile.shape, tile.wcs, window=True, pad=True)
-	isrc = bunch.Bunch(sys=isrc_sys or None, model=model, map=srcmap, tmul=tmul, pmul=pmul)
-
-# Optional azimuth filter
-azfilter = None
-if config.get("gfilter_jon"):
-	azfilter = bunch.Bunch(naz=None, nt=None)
-
-# Optionally solve for azimuth profile
-azmap = None
-if args.azmap:
-	npix, mode, shared = args.azmap.split(":")
-	azmap = bunch.Bunch(npix=int(npix), mode=mode, shared=shared=="shared")
-
-L.info("Building equation system")
-eq  = map_equation.LinearSystemMap(myscans, area, precon=precon, imap=imap, isrc=isrc, azmap=azmap, azfilter=azfilter, subinds=mysubs)
-eq.write(root, ext=ext)
-bench.stats.write(benchfile)
-
+L.info("Initializing signals")
+signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
+signal_map = mapmaking.SignalDmap(myscans, mysubs, area, cuts=signal_cut)
+L.info("Initializing preconditioners")
+signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
+signal_map.precon = mapmaking.PreconDmapBinned(signal_map, myscans)
+signals = [signal_cut, signal_map]
+mapmaking.write_precons(signals, root)
+L.info("Initializing equation system")
+eqsys = mapmaking.Eqsys(myscans, signals, dtype, comm)
+eqsys.calc_b()
+eqsys.write(root, "rhs", eqsys.b)
 L.info("Computing approximate map")
-x  = eq.M(eq.b)
-bmap = eq.dof.unzip(x)[0]
-dmap.write_map(root + "bin." + ext, bmap)
+x = eqsys.M(eqsys.b)
+eqsys.write(root, "bin", x)
 
-def solve_cg(eq, nmax=1000, ofmt=None, dump=None, azfmt=None):
-	cg = CG(eq.A, eq.b, M=eq.M, dot=eq.dof.dot)
+if nmax > 0:
+	L.info("Solving")
+	cg = CG(eqsys.A, eqsys.b, M=eqsys.M, dot=eqsys.dof.dot)
+	dump_steps = [int(w) for w in args.dump.split(",")]
 	while cg.i < nmax:
 		with bench.mark("cg_step"):
 			cg.step()
 		dt = bench.stats["cg_step"]["time"].last
-		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
-		if ofmt and (cg.i in dump or cg.i % dump[-1] == 0):
-			map = eq.dof.unzip(cg.x)[0]
-			# Add back sources if necessary. We recompute the map each time because
-			# dumps won't happen that frequently, and storing the map takes space.
-			# Also finish the azimuth filtering. This is horribly ugly and needs
-			# to be redesigned. I should not have to access things deep down like this.
-			map = eq.mapeq.postprocess(map, eq.precon.div_map)
-			dmap.write_map(ofmt % cg.i, map)
-		if azfmt and azmap and azmap.shared and (cg.i in dump or cg.i % dump[-1] == 0) and myid == 0:
-			az = eq.dof.unzip(cg.x)[-1]
-			np.savetxt(azfmt % cg.i, az[0].T, "%15.7e")
-		# Output benchmarking information
+		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans))))
+		if cg.i in dump_steps or cg.i % dump_steps[-1] == 0:
+			eqsys.write(root, "map%04d" % cg.i, cg.x)
 		bench.stats.write(benchfile)
-	return cg.x
-
-if nmax > 0:
-	L.info("Solving equation")
-	dump_steps = [int(w) for w in args.dump.split(",")]
-	x = solve_cg(eq, nmax=nmax, ofmt=root + "map%04d." + ext, dump=dump_steps, azfmt=root + "az%04d." + ext)

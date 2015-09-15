@@ -1,3 +1,4 @@
+# Given two maps, estimate the noise level their average would have.
 import numpy as np, argparse
 from enlib import enmap
 parser = argparse.ArgumentParser()

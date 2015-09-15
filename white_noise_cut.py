@@ -44,7 +44,7 @@ for si in range(comm.rank, ntod, comm.size):
 		d     = data.read(entry, fields=["gain","tconst","cut","tod","boresight"])
 		d     = data.calibrate(d, nofft=True)
 	except (IOError, errors.DataMissing) as e:
-		print "skipping (%s)" % e.message
+		print "skipping (%s)" % (e.message)
 		continue
 	ft    = fft.rfft(d.tod)
 	ps    = np.abs(ft)**2/(d.tod.shape[1]*srate)

@@ -77,41 +77,52 @@ npattern = np.max(pattern_ids)+1
 pboxes = np.array([utils.bounding_box(boxes[pattern_ids==pid]) for pid in xrange(npattern)])
 pscans = [ids[pattern_ids==pid] for pid in xrange(npattern)]
 
+L.info("Found %d scanning patterns" % npattern)
+
+# Build the set of tasks we should go through. This effectively
+# collapses these two loops, avoiding giving rank 0 much more
+# to do than the last ranks.
+tasks = []
+for pid, group in enumerate(pscans):
+	for ind in range(0, len(group)/tods_per_map):
+		tasks.append([pid,group,ind])
+
 # Ok, run through each for real now
 L.info("Building maps")
-for pid, group in enumerate(pscans):
-	for ind in range(comm_group.rank, len(group)/tods_per_map, comm_group.size):
-		scans = []
-		subgroup = group[ind*tods_per_map:(ind+1)*tods_per_map]
-		for id in subgroup:
-			L.info("%3d: %s" % (ind, id))
-			entry = filedb.data[id]
-			try:
-				scans.append(data.ACTScan(entry))
-			except errors.DataMissing as e:
-				L.debug("Skipped %s (%s)" % (id, e.message))
-				continue
-		# Define pixels for this tod
-		az0, az1 = pboxes[pid,:,1]
-		naz = np.ceil((az1-az0)/daz)
-		az1 = az0 + naz*daz
-		shape, wcs = enmap.geometry(pos=[[0,az0],[args.ncol*utils.degree,az1]], shape=(ndet,naz), proj="car")
-		area = enmap.zeros((2,)+shape, wcs, dtype=dtype)
+for pid, group, ind in tasks[comm_group.rank::comm_group.size]:
+	scans = []
+	subgroup = group[ind*tods_per_map:(ind+1)*tods_per_map]
+	for id in subgroup:
+		L.info("%3d: %s" % (ind, id))
+		entry = filedb.data[id]
+		try:
+			scans.append(data.ACTScan(entry))
+		except errors.DataMissing as e:
+			L.debug("Skipped %s (%s)" % (id, e.message))
+			continue
+	# Define pixels for this tod
+	az0, az1 = pboxes[pid,:,1]
+	naz = np.ceil((az1-az0)/daz)
+	az1 = az0 + naz*daz
+	shape, wcs = enmap.geometry(pos=[[0,az0],[args.ncol*utils.degree,az1]], shape=(ndet,naz), proj="car")
+	area = enmap.zeros((2,)+shape, wcs, dtype=dtype)
 
-		prefix = root + "pattern_%02d_el_%d_az_%d_%d_ind_%03d_" % (pid, np.round(np.mean(pboxes[pid,:,0])/utils.degree),
-				np.round(pboxes[pid,0,1]/utils.degree), np.round(pboxes[pid,1,1]/utils.degree), ind)
-		# Record which ids went into this map
-		with open(prefix + "ids.txt", "w") as f:
-			for id in subgroup: f.write("%s\n"%id)
+	prefix = root + "pattern_%02d_el_%d_az_%d_%d_ind_%03d_" % (pid, np.round(np.mean(pboxes[pid,:,0])/utils.degree),
+			np.round(pboxes[pid,0,1]/utils.degree), np.round(pboxes[pid,1,1]/utils.degree), ind)
+	# Record which ids went into this map
+	with open(prefix + "ids.txt", "w") as f:
+		for id in subgroup: f.write("%s\n"%id)
 
-		eq = map_equation.LinearSystemAz(scans, area, ordering=col_major, comm=comm_sub)
-		eq.write(prefix)
-		cg = CG(eq.A, eq.b, M=eq.M, dot=eq.dof.dot)
-		while cg.i < args.nstep:
-			with bench.mark("cg_step"): cg.step()
-			dt = bench.stats["cg_step"]["time"].last
-			if comm_sub.rank == 0:
-				L.debug("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
+	eq = map_equation.LinearSystemAz(scans, area, ordering=col_major, comm=comm_sub)
+	eq.write(prefix)
+	cg = CG(eq.A, eq.b, M=eq.M, dot=eq.dof.dot)
+	while cg.i < args.nstep:
+		with bench.mark("cg_step"): cg.step()
+		dt = bench.stats["cg_step"]["time"].last
 		if comm_sub.rank == 0:
-			map = eq.dof.unzip(cg.x)[0]
-			enmap.write_map(prefix + "map.fits", map)
+			L.debug("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eq.scans))))
+	if comm_sub.rank == 0:
+		map = eq.dof.unzip(cg.x)[0]
+		enmap.write_map(prefix + "map.fits", map)
+
+L.debug("Done")

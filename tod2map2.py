@@ -27,8 +27,9 @@ parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
 parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
 parser.add_argument("--imap-op",    type=str, default='sim', help="What operation to do with imap. Can be 'sim' or 'sub'")
-parser.add_argument("--azmap",      type=str,             help="Solve for azimuth signal in addition to map. Example 300:phase:shared, 100:azimuth:individual")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
+parser.add_argument("--pickup-maps",  action="store_true", help="Whether to solve for pickup maps")
+parser.add_argument("--nohor",       action="store_true", help="Assume that the mean of each horizontal line of the map is zero. This is useful for breaking degeneracies that come from solving for pickup and sky simultaneously."
 args = parser.parse_args()
 
 if args.dump_config:
@@ -43,7 +44,10 @@ nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
 mapsys= config.get("map_eqsys")
+distributed = False
 tshape= (240,240)
+nrow,ncol=33,32
+pickup_res = 2*utils.arcmin
 
 filedb.init()
 db = filedb.data
@@ -98,7 +102,7 @@ def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 
 # Read in all our scans
 L.info("Reading %d scans" % len(filelist))
-myscans, myinds = readutils.read_scans(filelist, np.arange(len(filelist))[myid::nproc], db, ndet=args.ndet)
+myscans, myinds = read_scans(filelist, np.arange(len(filelist))[myid::nproc], db, ndet=args.ndet)
 
 # Collect scan info
 read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]
@@ -126,19 +130,38 @@ myinds, mysubs, mybbox = scanutils.distribute_scans(myinds, mycosts, myboxes, co
 # need to serialize and unserialize lots of data, which
 # would require lots of code.
 L.info("Rereading shuffled scans")
-myscans, myinds = readutils.read_scans(filelist, myinds, db, ndet=args.ndet)
-
-# We now have enough information to set up distributed maps
-area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
-area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
 
 L.info("Initializing signals")
+signals = []
+# Cuts
 signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
-signal_map = mapmaking.SignalDmap(myscans, mysubs, area, cuts=signal_cut)
-L.info("Initializing preconditioners")
 signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
-signal_map.precon = mapmaking.PreconDmapBinned(signal_map, myscans)
-signals = [signal_cut, signal_map]
+signals.append(signal_cut)
+# Main maps
+if distributed:
+	area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
+	area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+	signal_map = mapmaking.SignalDmap(myscans, mysubs, area, cuts=signal_cut)
+	signal_map.precon = mapmaking.PreconDmapBinned(signal_map, myscans)
+	if args.nohor:
+		signal_map.prior  = mapmaking.PriorDmapNohor(signal_map.precon.div[0,0])
+else:
+	area = enmap.read_map(args.area)
+	area = enmap.zeros((3,)+area.shape[-2:], area.wcs, dtype)
+	signal_map = mapmaking.SignalMap(myscans, area, comm, cuts=signal_cut)
+	signal_map.precon = mapmaking.PreconMapBinned(signal_map, myscans)
+	if args.nohor:
+		signal_map.prior  = mapmaking.PriorMapNohor(signal_map.precon.div[0,0])
+signals.append(signal_map)
+# Pickup maps
+if args.pickup_maps:
+	# Classify scanning patterns
+	patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm)
+	signal_pickup = mapmaking.SignalPhase(myscans, mypids, patterns, (nrow,ncol), pickup_res, cuts=signal_cut, dtype=dtype, comm=comm)
+	signal_pickup.precon = mapmaking.PreconPhaseBinned(signal_pickup, myscans)
+	signals.append(signal_pickup)
+
 mapmaking.write_precons(signals, root)
 L.info("Initializing equation system")
 eqsys = mapmaking.Eqsys(myscans, signals, dtype, comm)

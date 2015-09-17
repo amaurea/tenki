@@ -3,7 +3,7 @@ from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, e
 from enlib import log, bench, dmap2 as dmap, coordinates, scan as enscan, rangelist, scanutils
 from enlib.cg import CG
 from enlib.source_model import SourceModel
-from enact import data, nmat_measure, filedb, todinfo, readutils
+from enact import data, nmat_measure, filedb, todinfo
 
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
@@ -29,7 +29,7 @@ parser.add_argument("--imap",       type=str,             help="Reproject this m
 parser.add_argument("--imap-op",    type=str, default='sim', help="What operation to do with imap. Can be 'sim' or 'sub'")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 parser.add_argument("--pickup-maps",  action="store_true", help="Whether to solve for pickup maps")
-parser.add_argument("--nohor",       action="store_true", help="Assume that the mean of each horizontal line of the map is zero. This is useful for breaking degeneracies that come from solving for pickup and sky simultaneously."
+parser.add_argument("--nohor",       action="store_true", help="Assume that the mean of each horizontal line of the map is zero. This is useful for breaking degeneracies that come from solving for pickup and sky simultaneously")
 args = parser.parse_args()
 
 if args.dump_config:
@@ -139,25 +139,27 @@ signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
 signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
 signals.append(signal_cut)
 # Main maps
-if distributed:
-	area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
-	area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-	signal_map = mapmaking.SignalDmap(myscans, mysubs, area, cuts=signal_cut)
-	signal_map.precon = mapmaking.PreconDmapBinned(signal_map, myscans)
-	if args.nohor:
-		signal_map.prior  = mapmaking.PriorDmapNohor(signal_map.precon.div[0,0])
-else:
-	area = enmap.read_map(args.area)
-	area = enmap.zeros((3,)+area.shape[-2:], area.wcs, dtype)
-	signal_map = mapmaking.SignalMap(myscans, area, comm, cuts=signal_cut)
-	signal_map.precon = mapmaking.PreconMapBinned(signal_map, myscans)
-	if args.nohor:
-		signal_map.prior  = mapmaking.PriorMapNohor(signal_map.precon.div[0,0])
-signals.append(signal_map)
+if True:
+	if distributed:
+		area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
+		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+		signal_map = mapmaking.SignalDmap(myscans, mysubs, area, cuts=signal_cut)
+		signal_map.precon = mapmaking.PreconDmapBinned(signal_map, myscans)
+		if args.nohor:
+			signal_map.prior  = mapmaking.PriorDmapNohor(signal_map.precon.div[0,0])
+	else:
+		area = enmap.read_map(args.area)
+		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+		signal_map = mapmaking.SignalMap(myscans, area, comm, cuts=signal_cut)
+		signal_map.precon = mapmaking.PreconMapBinned(signal_map, myscans)
+		if args.nohor:
+			signal_map.prior  = mapmaking.PriorMapNohor(signal_map.precon.div[0,0]*0+1e-4)
+	signals.append(signal_map)
 # Pickup maps
 if args.pickup_maps:
 	# Classify scanning patterns
 	patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm)
+	L.info("Found %d scanning patterns" % len(patterns))
 	signal_pickup = mapmaking.SignalPhase(myscans, mypids, patterns, (nrow,ncol), pickup_res, cuts=signal_cut, dtype=dtype, comm=comm)
 	signal_pickup.precon = mapmaking.PreconPhaseBinned(signal_pickup, myscans)
 	signals.append(signal_pickup)
@@ -165,6 +167,30 @@ if args.pickup_maps:
 mapmaking.write_precons(signals, root)
 L.info("Initializing equation system")
 eqsys = mapmaking.Eqsys(myscans, signals, dtype, comm)
+
+m = enmap.rand_gauss(area.shape, area.wcs, area.dtype)
+miwork = signal_map.prepare(m)
+mowork = signal_map.prepare(signal_map.zeros())
+pwork = signal_pickup.prepare(signal_pickup.zeros())
+for scan in myscans:
+	tod = np.zeros([scan.ndet, scan.nsamp], m.dtype)
+	signal_map.forward(scan, tod, miwork)
+	signal_pickup.backward(scan, tod, pwork)
+	signal_pickup.forward(scan, tod, pwork)
+	signal_map.backward(scan, tod, mowork)
+signal_map.finish(m, mowork)
+
+if comm.rank == 0:
+	enmap.write_map(root + "test.fits", m)
+sys.exit(0)
+1/0
+
+
+#print signal_cut.dof.n
+#i=3371429; inds = np.arange(i-2,i+2)
+#eqsys.check_symmetry(inds)
+#eqsys.check_symmetry(np.arange(eqsys.dof.n)[::eqsys.dof.n/100][::-1])
+
 eqsys.calc_b()
 eqsys.write(root, "rhs", eqsys.b)
 L.info("Computing approximate map")

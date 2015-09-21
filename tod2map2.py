@@ -47,6 +47,8 @@ mapsys= config.get("map_eqsys")
 distributed = False
 tshape= (240,240)
 nrow,ncol=33,32
+#print "FIXME A"
+#nrow,ncol=1,1
 pickup_res = 2*utils.arcmin
 
 filedb.init()
@@ -132,11 +134,17 @@ myinds, mysubs, mybbox = scanutils.distribute_scans(myinds, mycosts, myboxes, co
 L.info("Rereading shuffled scans")
 myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
 
+#print "FIXME B"
+#myscans[0].dets = np.arange(4)
+#myscans[0].cut.clear()
+
 L.info("Initializing signals")
 signals = []
 # Cuts
 signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
 signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
+# Disabling cuts here, but using it in precon, stops convergence
+# (it jumps randomly up and down between 1e-5 and 1e-2)
 signals.append(signal_cut)
 # Main maps
 if True:
@@ -146,14 +154,14 @@ if True:
 		signal_map = mapmaking.SignalDmap(myscans, mysubs, area, cuts=signal_cut)
 		signal_map.precon = mapmaking.PreconDmapBinned(signal_map, myscans)
 		if args.nohor:
-			signal_map.prior  = mapmaking.PriorDmapNohor(signal_map.precon.div[0,0])
+			signal_map.prior = mapmaking.PriorDmapNohor(signal_map.precon.div[0,0])
 	else:
 		area = enmap.read_map(args.area)
 		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 		signal_map = mapmaking.SignalMap(myscans, area, comm, cuts=signal_cut)
 		signal_map.precon = mapmaking.PreconMapBinned(signal_map, myscans)
 		if args.nohor:
-			signal_map.prior  = mapmaking.PriorMapNohor(signal_map.precon.div[0,0]*0+1e-4)
+			signal_map.prior = mapmaking.PriorMapNohor(signal_map.precon.div[0,0])
 	signals.append(signal_map)
 # Pickup maps
 if args.pickup_maps:
@@ -168,28 +176,49 @@ mapmaking.write_precons(signals, root)
 L.info("Initializing equation system")
 eqsys = mapmaking.Eqsys(myscans, signals, dtype, comm)
 
-m = enmap.rand_gauss(area.shape, area.wcs, area.dtype)
-miwork = signal_map.prepare(m)
-mowork = signal_map.prepare(signal_map.zeros())
-pwork = signal_pickup.prepare(signal_pickup.zeros())
-for scan in myscans:
-	tod = np.zeros([scan.ndet, scan.nsamp], m.dtype)
-	signal_map.forward(scan, tod, miwork)
-	signal_pickup.backward(scan, tod, pwork)
-	signal_pickup.forward(scan, tod, pwork)
-	signal_map.backward(scan, tod, mowork)
-signal_map.finish(m, mowork)
-
-if comm.rank == 0:
-	enmap.write_map(root + "test.fits", m)
-sys.exit(0)
-1/0
+#print "FIXME C"
+#print eqsys.dof.n
+#A = eqsys.calc_A()
+#M = eqsys.calc_M()
+#eqsys.calc_b()
+#b = eqsys.b
+#with h5py.File(root + "eqsys.hdf","w") as hfile:
+#	hfile["A"] = A
+#	hfile["M"] = M
+#	hfile["b"] = b
+#sys.exit(0)
 
 
-#print signal_cut.dof.n
-#i=3371429; inds = np.arange(i-2,i+2)
+#m = enmap.rand_gauss(area.shape, area.wcs, area.dtype)
+#miwork = signal_map.prepare(m)
+#mowork = signal_map.prepare(signal_map.zeros())
+#p = signal_pickup.zeros()
+#powork = signal_pickup.prepare(signal_pickup.zeros())
+#for scan in myscans:
+#	tod = np.zeros([scan.ndet, scan.nsamp], m.dtype)
+#	signal_map.forward(scan, tod, miwork)
+#	signal_pickup.backward(scan, tod, powork)
+#signal_pickup.finish(p, powork)
+#signal_pickup.precon(p)
+#piwork = signal_pickup.prepare(p)
+#for scan in myscans:
+#	tod = np.zeros([scan.ndet, scan.nsamp], m.dtype)
+#	signal_pickup.forward(scan, tod, piwork)
+#	signal_map.backward(scan, tod, mowork)
+#signal_map.finish(m, mowork)
+#signal_map.precon(m)
+#
+#if comm.rank == 0:
+#	enmap.write_map(root + "test.fits", m)
+#sys.exit(0)
+
+
+#nnocut = eqsys.dof.n - signal_cut.dof.n
+#print nnocut, signal_map.dof.n, signal_pickup.dof.n
+#inds = np.arange(-nnocut,-1,nnocut/30)
+#inds = np.arange(-5620117-3,-5620117+3)
 #eqsys.check_symmetry(inds)
-#eqsys.check_symmetry(np.arange(eqsys.dof.n)[::eqsys.dof.n/100][::-1])
+#sys.exit(0)
 
 eqsys.calc_b()
 eqsys.write(root, "rhs", eqsys.b)

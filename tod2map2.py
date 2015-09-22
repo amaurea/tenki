@@ -47,9 +47,10 @@ mapsys= config.get("map_eqsys")
 distributed = False
 tshape= (240,240)
 nrow,ncol=33,32
+pickup_res = 2*utils.arcmin
 #print "FIXME A"
 #nrow,ncol=1,1
-pickup_res = 2*utils.arcmin
+#pickup_res = 2*utils.arcmin * 100
 
 filedb.init()
 db = filedb.data
@@ -135,7 +136,7 @@ L.info("Rereading shuffled scans")
 myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
 
 #print "FIXME B"
-#myscans[0].dets = np.arange(4)
+#myscans[0].dets = np.arange(1)
 #myscans[0].cut.clear()
 
 L.info("Initializing signals")
@@ -154,7 +155,7 @@ if True:
 		if args.nohor:
 			prior_weight  = signal_map.precon.div[0,0]
 			prior_weight /= (dmap.sum(prior_weight)/prior_weight.size*prior_weight.shape[-1])**0.5
-			#prior_weight /= 100
+			prior_weight /= 10
 			signal_map.prior = mapmaking.PriorDmapNohor(prior_weight)
 	else:
 		area = enmap.read_map(args.area)
@@ -164,7 +165,7 @@ if True:
 		if args.nohor:
 			prior_weight = signal_map.precon.div[0,0]
 			prior_weight /= (np.mean(prior_weight)*prior_weight.shape[-1])**0.5
-			#prior_weight /= 100
+			prior_weight /= 10
 			signal_map.prior = mapmaking.PriorMapNohor(prior_weight)
 	signals.append(signal_map)
 # Pickup maps

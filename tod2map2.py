@@ -143,8 +143,6 @@ signals = []
 # Cuts
 signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
 signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
-# Disabling cuts here, but using it in precon, stops convergence
-# (it jumps randomly up and down between 1e-5 and 1e-2)
 signals.append(signal_cut)
 # Main maps
 if True:
@@ -154,14 +152,20 @@ if True:
 		signal_map = mapmaking.SignalDmap(myscans, mysubs, area, cuts=signal_cut)
 		signal_map.precon = mapmaking.PreconDmapBinned(signal_map, myscans)
 		if args.nohor:
-			signal_map.prior = mapmaking.PriorDmapNohor(signal_map.precon.div[0,0])
+			prior_weight  = signal_map.precon.div[0,0]
+			prior_weight /= (dmap.sum(prior_weight)/prior_weight.size*prior_weight.shape[-1])**0.5
+			#prior_weight /= 100
+			signal_map.prior = mapmaking.PriorDmapNohor(prior_weight)
 	else:
 		area = enmap.read_map(args.area)
 		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 		signal_map = mapmaking.SignalMap(myscans, area, comm, cuts=signal_cut)
 		signal_map.precon = mapmaking.PreconMapBinned(signal_map, myscans)
 		if args.nohor:
-			signal_map.prior = mapmaking.PriorMapNohor(signal_map.precon.div[0,0])
+			prior_weight = signal_map.precon.div[0,0]
+			prior_weight /= (np.mean(prior_weight)*prior_weight.shape[-1])**0.5
+			#prior_weight /= 100
+			signal_map.prior = mapmaking.PriorMapNohor(prior_weight)
 	signals.append(signal_map)
 # Pickup maps
 if args.pickup_maps:

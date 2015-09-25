@@ -30,6 +30,7 @@ parser.add_argument("--imap-op",    type=str, default='sim', help="What operatio
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 parser.add_argument("--pickup-maps",  action="store_true", help="Whether to solve for pickup maps")
 parser.add_argument("--nohor",       action="store_true", help="Assume that the mean of each horizontal line of the map is zero. This is useful for breaking degeneracies that come from solving for pickup and sky simultaneously")
+parser.add_argument("--filter-pickup", type=int, default=0)
 args = parser.parse_args()
 
 if args.dump_config:
@@ -141,6 +142,7 @@ myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
 
 L.info("Initializing signals")
 signals = []
+filters = []
 # Cuts
 signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
 signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
@@ -157,6 +159,9 @@ if True:
 			prior_weight /= (dmap.sum(prior_weight)/prior_weight.size*prior_weight.shape[-1])**0.5
 			prior_weight /= 10
 			signal_map.prior = mapmaking.PriorDmapNohor(prior_weight)
+		if args.filter_pickup >= 2:
+			prec_ptp = mapmaking.PreconDmapBinned(signal_map, signal_cut, myscans, noise=False, hits=False)
+			signal_map.post.append(mapmaking.PostPickup(myscans, signal_map, signal_cut, prec_ptp))
 	else:
 		area = enmap.read_map(args.area)
 		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
@@ -167,6 +172,9 @@ if True:
 			prior_weight /= (np.mean(prior_weight)*prior_weight.shape[-1])**0.5
 			prior_weight /= 10
 			signal_map.prior = mapmaking.PriorMapNohor(prior_weight)
+		if args.filter_pickup >= 2:
+			prec_ptp = mapmaking.PreconMapBinned(signal_map, signal_cut, myscans, noise=False, hits=False)
+			signal_map.post.append(mapmaking.PostPickup(myscans, signal_map, signal_cut, prec_ptp))
 	signals.append(signal_map)
 # Pickup maps
 if args.pickup_maps:
@@ -176,10 +184,13 @@ if args.pickup_maps:
 	signal_pickup = mapmaking.SignalPhase(myscans, mypids, patterns, (nrow,ncol), pickup_res, dtype=dtype, comm=comm)
 	signal_pickup.precon = mapmaking.PreconPhaseBinned(signal_pickup, signal_cut, myscans)
 	signals.append(signal_pickup)
+if args.filter_pickup >= 1:
+	filters.append(mapmaking.FilterPickup())
 
 mapmaking.write_precons(signals, root)
 L.info("Initializing equation system")
-eqsys = mapmaking.Eqsys(myscans, signals, dtype=dtype, comm=comm)
+eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, dtype=dtype, comm=comm)
+
 
 #print "FIXME C"
 #print eqsys.dof.n
@@ -239,7 +250,8 @@ if nmax > 0:
 		with bench.mark("cg_step"):
 			cg.step()
 		dt = bench.stats["cg_step"]["time"].last
-		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans))))
 		if cg.i in dump_steps or cg.i % dump_steps[-1] == 0:
-			eqsys.write(root, "map%04d" % cg.i, cg.x)
+			x = eqsys.postprocess(cg.x)
+			eqsys.write(root, "map%04d" % cg.i, x)
 		bench.stats.write(benchfile)
+		L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans))))

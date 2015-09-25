@@ -151,15 +151,15 @@ if True:
 	if distributed:
 		area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
 		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-		signal_map = mapmaking.SignalDmap(myscans, mysubs, area, cuts=signal_cut)
-		signal_map.precon = mapmaking.PreconDmapBinned(signal_map, myscans)
+		signal_map = mapmaking.SignalDmap(myscans, mysubs, area)
+		signal_map.precon = mapmaking.PreconDmapBinned(signal_map, signal_cut, myscans)
 		if args.nohor:
 			signal_map.prior = mapmaking.PriorDmapNohor(signal_map.precon.div[0,0])
 	else:
 		area = enmap.read_map(args.area)
 		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-		signal_map = mapmaking.SignalMap(myscans, area, comm, cuts=signal_cut)
-		signal_map.precon = mapmaking.PreconMapBinned(signal_map, myscans)
+		signal_map = mapmaking.SignalMap(myscans, area, comm)
+		signal_map.precon = mapmaking.PreconMapBinned(signal_map, signal_cut, myscans)
 		if args.nohor:
 			signal_map.prior = mapmaking.PriorMapNohor(signal_map.precon.div[0,0])
 	signals.append(signal_map)
@@ -168,8 +168,8 @@ if args.pickup_maps:
 	# Classify scanning patterns
 	patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm)
 	L.info("Found %d scanning patterns" % len(patterns))
-	signal_pickup = mapmaking.SignalPhase(myscans, mypids, patterns, (nrow,ncol), pickup_res, cuts=signal_cut, dtype=dtype, comm=comm)
-	signal_pickup.precon = mapmaking.PreconPhaseBinned(signal_pickup, myscans)
+	signal_pickup = mapmaking.SignalPhase(myscans, mypids, patterns, (nrow,ncol), pickup_res, dtype=dtype, comm=comm)
+	signal_pickup.precon = mapmaking.PreconPhaseBinned(signal_pickup, signal_cut, myscans)
 	signals.append(signal_pickup)
 
 mapmaking.write_precons(signals, root)

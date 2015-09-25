@@ -179,7 +179,7 @@ if args.pickup_maps:
 
 mapmaking.write_precons(signals, root)
 L.info("Initializing equation system")
-eqsys = mapmaking.Eqsys(myscans, signals, dtype, comm)
+eqsys = mapmaking.Eqsys(myscans, signals, dtype=dtype, comm=comm)
 
 #print "FIXME C"
 #print eqsys.dof.n

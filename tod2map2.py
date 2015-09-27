@@ -17,20 +17,26 @@ config.default("map_ptsrc_handling", "subadd", "How to handle point sources in t
 config.default("map_ptsrc_eqsys", "cel", "Equation system the point source positions are specified in. Default is 'cel'")
 config.default("map_format", "fits", "File format to use when writing maps. Can be 'fits', 'fits.gz' or 'hdf'.")
 
+# Default signal parameters
+config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin", "Default parameters for sky map")
+config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin", "Default parameters for ground map")
+config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=hor:Sun,prec=bin", "Default parameters for sun map")
+config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Sun,prec=bin", "Default parameters for moon map")
+config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt='{name}_{rank:03}',output=no,use=yes", "Default parameters for cut (junk) signal")
+config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt='{name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f}',2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
+# Default filter parameters
+config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,sky=yes", "Default parameters for scan/pickup filter")
+
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
-parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("prefix",nargs="?")
 parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,300,400,500,600,800,1000,1200,1500,2000,3000,4000,5000,6000,8000,10000", help="CG map dump steps")
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
-parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
-parser.add_argument("--imap-op",    type=str, default='sim', help="What operation to do with imap. Can be 'sim' or 'sub'")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
-parser.add_argument("--pickup-maps",  action="store_true", help="Whether to solve for pickup maps")
-parser.add_argument("--nohor",       action="store_true", help="Assume that the mean of each horizontal line of the map is zero. This is useful for breaking degeneracies that come from solving for pickup and sky simultaneously")
-parser.add_argument("--filter-pickup", type=int, default=0)
+parser.add_argument("-S", "--signal", action="append",    help="Signals to solve for. For example -S sky:area.fits -S scan would solve for the sky map and scan pickup maps jointly, using area.fits as the map template.")
+parser.add_argument("-F", "--filter", action="append")
 args = parser.parse_args()
 
 if args.dump_config:
@@ -83,6 +89,59 @@ L = log.init(level=log_level, file=logfile, rank=myid)
 utils.mkdir(root + "bench")
 benchfile = root + "bench/bench%03d.txt" % myid
 
+def parse_desc(desc, default={}):
+	res = default.copy()
+	# Parse normally now that the : are out of the way
+	for tok in desc.split(","):
+		subtoks = tok.split("=")
+		if len(subtoks) == 1:
+			res["value"] = subtoks[0]
+		else:
+			key, val = subtoks
+			res[key] = val
+	return res
+def setup_params(prefix, predefined, defparams):
+	params = {}
+	for name in predefined:
+		params[name] = parse_desc(config.get("%s_%s_default" % (prefix, name)))
+	argdict = vars(args)
+	overrides = argdict[prefix]
+	if overrides:
+		for oval in overrides:
+			if ":" in oval:
+				name, rest = oval.split(":")
+				desc = config.get("%s_%s_default" % (prefix,name)) + ",use=yes," + rest
+			elif "," not in oval:
+				desc = config.get("%s_%s_default" % (prefix,oval)) + ",use=yes"
+			else:
+				desc = "use=yes,"+oval
+			param = parse_desc(desc, default=defparams)
+			params[param["name"]] = param
+	# Flatten to listand kill irrelevant ones
+	params = [params[k] for k in params if params[k]["use"] != "no"]
+	return params
+
+######## Signal parmeters ########
+signal_params = setup_params("signal", ["cut","sky","hor","sun","moon","scan"], {"use":"no", "ofmt":"{name}", "output":"yes"})
+# Put the 'cut' signal first because other signals may depend on it
+i = 0
+for s in signal_params:
+	if s["type"] == "cut": break
+	i += 1
+assert i < len(signal_params)
+signal_params = signal_params[i:i+1] + signal_params[:i] + signal_params[i+1:]
+# We only support a single distributed map
+dsys = None
+for sig in signal_params:
+	if sig["type"] == "dmap":
+		if dsys: raise ValueError("Only a single map may be distributed")
+		else: dsys=sig["sys"]
+	if sig["type"] in ["map", "dmap"]:
+		assert "value" in sig and sig["value"] is not None and os.path.isfile(sig["value"]), "Map-type signals need a template map as argument. E.g. -S sky:foo.fits"
+
+######## Filter parmeters ########
+filter_params = setup_params("filter", ["scan"], {"use":"no"})
+
 def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 	"""Given a set of ids/files and a set of indices into that list. Try
 	to read each of these scans. Returns a list of successfully read scans
@@ -123,11 +182,14 @@ if myid == 0:
 		for id, dets in zip(read_ids, read_dets):
 			f.write("%s %3d: " % (id, len(dets)) + " ".join([str(d) for d in dets]) + "\n")
 
-# Try to get about the same amount of data for each mpi task,
-# all at roughly the same part of the sky.
+# Try to get about the same amount of data for each mpi task.
+# If we use distributed maps, we also try to make things as local as possible
 mycosts = [s.nsamp*s.ndet for s in myscans]
-myboxes = [scanutils.calc_sky_bbox_scan(s, mapsys) for s in myscans]
-myinds, mysubs, mybbox = scanutils.distribute_scans(myinds, mycosts, myboxes, comm)
+if dsys: # distributed maps
+	myboxes = [scanutils.calc_sky_bbox_scan(s, dsys) for s in myscans] if dsys else None
+	myinds, mysubs, mybbox = scanutils.distribute_scans(myinds, mycosts, myboxes, comm)
+else:
+	myinds = scanutils.distribute_scans(myinds, mycosts, None, comm)
 
 # And reread the correct files this time. Ideally we would
 # transfer this with an mpi all-to-all, but then we would
@@ -136,61 +198,116 @@ myinds, mysubs, mybbox = scanutils.distribute_scans(myinds, mycosts, myboxes, co
 L.info("Rereading shuffled scans")
 myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
 
-#print "FIXME B"
-#myscans[0].dets = np.arange(1)
-#myscans[0].cut.clear()
-
 L.info("Initializing signals")
 signals = []
-filters = []
-# Cuts
-signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
-signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
-signals.append(signal_cut)
-# Main maps
-if True:
-	if distributed:
-		area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
-		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-		signal_map = mapmaking.SignalDmap(myscans, mysubs, area)
-		signal_map.precon = mapmaking.PreconDmapBinned(signal_map, signal_cut, myscans)
-		if args.nohor:
-			prior_weight  = signal_map.precon.div[0,0]
-			prior_weight /= (dmap.sum(prior_weight)/prior_weight.size*prior_weight.shape[-1])**0.5
-			prior_weight /= 10
-			signal_map.prior = mapmaking.PriorDmapNohor(prior_weight)
-		if args.filter_pickup >= 2:
-			prec_ptp = mapmaking.PreconDmapBinned(signal_map, signal_cut, myscans, noise=False, hits=False)
-			signal_map.post.append(mapmaking.PostPickup(myscans, signal_map, signal_cut, prec_ptp))
-	else:
-		area = enmap.read_map(args.area)
+for param in signal_params:
+	if param["type"] == "cut":
+		signal = mapmaking.SignalCut(myscans, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+		signal.precon = mapmaking.PreconCut(signal, myscans)
+		signal_cut = signal
+	elif param["type"] == "map":
+		area = enmap.read_map(param["value"])
 		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-		signal_map = mapmaking.SignalMap(myscans, area, comm)
-		signal_map.precon = mapmaking.PreconMapBinned(signal_map, signal_cut, myscans)
-		if args.nohor:
-			prior_weight = signal_map.precon.div[0,0]
+		signal = mapmaking.SignalMap(myscans, area, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+		if param["prec"] == "bin":
+			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans)
+		else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
+		if "nohor" in param and param["nohor"] != "no":
+			prior_weight = signal.precon.div[0,0]
 			prior_weight /= (np.mean(prior_weight)*prior_weight.shape[-1])**0.5
-			prior_weight /= 10
-			signal_map.prior = mapmaking.PriorMapNohor(prior_weight)
-		if args.filter_pickup >= 2:
-			prec_ptp = mapmaking.PreconMapBinned(signal_map, signal_cut, myscans, noise=False, hits=False)
-			signal_map.post.append(mapmaking.PostPickup(myscans, signal_map, signal_cut, prec_ptp))
-	signals.append(signal_map)
-# Pickup maps
-if args.pickup_maps:
-	# Classify scanning patterns
-	patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm)
-	L.info("Found %d scanning patterns" % len(patterns))
-	signal_pickup = mapmaking.SignalPhase(myscans, mypids, patterns, (nrow,ncol), pickup_res, dtype=dtype, comm=comm)
-	signal_pickup.precon = mapmaking.PreconPhaseBinned(signal_pickup, signal_cut, myscans)
-	signals.append(signal_pickup)
-if args.filter_pickup >= 1:
-	filters.append(mapmaking.FilterPickup())
+			prior_weight *= float(param["nohor"])
+			signal.prior = mapmaking.PriorMapNohor(prior_weight)
+	elif param["type"] == "dmap":
+		area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
+		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+		signal = mapmaking.SignalDmap(myscans, mysubs, area, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+		if param["prec"] == "bin":
+			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans)
+		else: raise ValueError("Unknown dmap preconditioner '%s'" % param["prec"])
+		if "nohor" in param and param["nohor"] != "no":
+			prior_weight  = signal.precon.div[0,0]
+			prior_weight /= (dmap.sum(prior_weight)/prior_weight.size*prior_weight.shape[-1])**0.5
+			prior_weight *= float(param["nohor"])
+			signal.prior = mapmaking.PriorDmapNohor(prior_weight)
+	elif param["type"] == "scan":
+		res = float(param["res"])/utils.arcmin
+		tol = float(param["tol"])/utils.degree
+		patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm, tol=tol)
+		L.info("Found %d scanning patterns" % len(patterns))
+		signal = mapmaking.SignalPhase(myscans, mypids, patterns, myscans[0].dgrid, res=res, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+		signal.precon = mapmaking.PreconPhaseBinned(signal, signal_cut, myscans)
+	else:
+		raise ValueError("Unrecognized signal type '%s'" % param["type"])
+	signals.append(signal)
+
+# Initialize filters
+filters = []
+for param in filter_params:
+	if param["name"] == "scan":
+		naz, nt, mode = int(param["naz"]), int(param["nt"]), int(param["value"])
+		if mode == 0: continue
+		filter = mapmaking.FilterPickup(naz=naz, nt=nt)
+		if mode >= 2:
+			for sparam, signal in zip(signal_params, signals):
+				sname = sparam["name"]
+				if "name" in param and param["name"] == "yes":
+					if sparam["type"] == "map":
+						prec_ptp = mapmaking.PreconMapBinned(signal, signal_cut, myscans, noise=False, hits=False)
+					elif sparam["type"] == "dmap":
+						prec_ptp = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, noise=False, hits=False)
+					else:
+						raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
+					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt))
+	else:
+		raise ValueError("Unrecognized fitler name '%s'" % param["name"])
+	filters.append(filter)
+
+#signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
+#signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
+#signals.append(signal_cut)
+## Main maps
+#if True:
+#	if distributed:
+#		area = dmap.read_map(args.area, bbox=mybbox, tshape=tshape, comm=comm)
+#		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+#		signal_map = mapmaking.SignalDmap(myscans, mysubs, area)
+#		signal_map.precon = mapmaking.PreconDmapBinned(signal_map, signal_cut, myscans)
+#		if args.nohor:
+#			prior_weight  = signal_map.precon.div[0,0]
+#			prior_weight /= (dmap.sum(prior_weight)/prior_weight.size*prior_weight.shape[-1])**0.5
+#			prior_weight /= 10
+#			signal_map.prior = mapmaking.PriorDmapNohor(prior_weight)
+#		if args.filter_pickup >= 2:
+#			prec_ptp = mapmaking.PreconDmapBinned(signal_map, signal_cut, myscans, noise=False, hits=False)
+#			signal_map.post.append(mapmaking.PostPickup(myscans, signal_map, signal_cut, prec_ptp))
+#	else:
+#		area = enmap.read_map(args.area)
+#		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+#		signal_map = mapmaking.SignalMap(myscans, area, comm)
+#		signal_map.precon = mapmaking.PreconMapBinned(signal_map, signal_cut, myscans)
+#		if args.nohor:
+#			prior_weight = signal_map.precon.div[0,0]
+#			prior_weight /= (np.mean(prior_weight)*prior_weight.shape[-1])**0.5
+#			prior_weight /= 10
+#			signal_map.prior = mapmaking.PriorMapNohor(prior_weight)
+#		if args.filter_pickup >= 2:
+#			prec_ptp = mapmaking.PreconMapBinned(signal_map, signal_cut, myscans, noise=False, hits=False)
+#			signal_map.post.append(mapmaking.PostPickup(myscans, signal_map, signal_cut, prec_ptp))
+#	signals.append(signal_map)
+## Pickup maps
+#if args.pickup_maps:
+#	# Classify scanning patterns
+#	patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm)
+#	L.info("Found %d scanning patterns" % len(patterns))
+#	signal_pickup = mapmaking.SignalPhase(myscans, mypids, patterns, (nrow,ncol), pickup_res, dtype=dtype, comm=comm)
+#	signal_pickup.precon = mapmaking.PreconPhaseBinned(signal_pickup, signal_cut, myscans)
+#	signals.append(signal_pickup)
+#if args.filter_pickup >= 1:
+#	filters.append(mapmaking.FilterPickup())
 
 mapmaking.write_precons(signals, root)
 L.info("Initializing equation system")
 eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, dtype=dtype, comm=comm)
-
 
 #print "FIXME C"
 #print eqsys.dof.n

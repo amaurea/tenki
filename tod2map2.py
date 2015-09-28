@@ -250,7 +250,7 @@ for param in filter_params:
 		if mode >= 2:
 			for sparam, signal in zip(signal_params, signals):
 				sname = sparam["name"]
-				if "name" in param and param["name"] == "yes":
+				if sname in param and param[sname] == "yes":
 					if sparam["type"] == "map":
 						prec_ptp = mapmaking.PreconMapBinned(signal, signal_cut, myscans, noise=False, hits=False)
 					elif sparam["type"] == "dmap":

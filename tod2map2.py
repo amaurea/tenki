@@ -198,17 +198,67 @@ else:
 L.info("Rereading shuffled scans")
 myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
 
+# I would like to be able to do on-the-fly nmat computation.
+# However, preconditioners depend on the noise matrix.
+# Hence, to be able to do this, Eqsys initialization must go like this:#
+# 1. Set up plain signals (no priors or postprocessing)
+# 2. Set up plain filters (no postprocessing)
+# 3. Initialize Eqsys
+# 4. Call eqsys.calc_b, which updates the noise matrices
+# 5. Loop through signals again, this time setting up preconditioenrs and
+#    priors, which can be inserted into the signals inside Eqsys
+# 6. Loop through filters again, setting up any associated signal postprocessing
+# It is a good deal less tidy than what I currently have. And it will break
+# as soon as a filter or signal that depends on the noise matrix appears.
+
+# 1. Initialize filters
 L.info("Initializing signals")
 signals = []
 for param in signal_params:
 	if param["type"] == "cut":
 		signal = mapmaking.SignalCut(myscans, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
-		signal.precon = mapmaking.PreconCut(signal, myscans)
 		signal_cut = signal
 	elif param["type"] == "map":
 		area = enmap.read_map(param["value"])
 		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 		signal = mapmaking.SignalMap(myscans, area, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+	elif param["type"] == "dmap":
+		area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
+		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+		signal = mapmaking.SignalDmap(myscans, mysubs, area, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+	elif param["type"] == "scan":
+		res = float(param["res"])/utils.arcmin
+		tol = float(param["tol"])/utils.degree
+		patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm, tol=tol)
+		L.info("Found %d scanning patterns" % len(patterns))
+		signal = mapmaking.SignalPhase(myscans, mypids, patterns, myscans[0].dgrid, res=res, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+	else:
+		raise ValueError("Unrecognized signal type '%s'" % param["type"])
+	signals.append(signal)
+
+# 2. Initialize filters
+L.info("Initializing filters")
+filters = []
+for param in filter_params:
+	if param["name"] == "scan":
+		naz, nt, mode = int(param["naz"]), int(param["nt"]), int(param["value"])
+		if mode == 0: continue
+		filter = mapmaking.FilterPickup(naz=naz, nt=nt)
+	else:
+		raise ValueError("Unrecognized fitler name '%s'" % param["name"])
+	filters.append(filter)
+
+L.info("Initializing equation system")
+eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, dtype=dtype, comm=comm)
+
+L.info("Initializing RHS")
+eqsys.calc_b()
+
+L.info("Initializing preconditioners")
+for param, signal in zip(signal_params, signals):
+	if param["type"] == "cut":
+		signal.precon = mapmaking.PreconCut(signal, myscans)
+	elif param["type"] == "map":
 		if param["prec"] == "bin":
 			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans)
 		else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
@@ -218,9 +268,6 @@ for param in signal_params:
 			prior_weight *= float(param["nohor"])
 			signal.prior = mapmaking.PriorMapNohor(prior_weight)
 	elif param["type"] == "dmap":
-		area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
-		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-		signal = mapmaking.SignalDmap(myscans, mysubs, area, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
 		if param["prec"] == "bin":
 			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans)
 		else: raise ValueError("Unknown dmap preconditioner '%s'" % param["prec"])
@@ -230,23 +277,14 @@ for param in signal_params:
 			prior_weight *= float(param["nohor"])
 			signal.prior = mapmaking.PriorDmapNohor(prior_weight)
 	elif param["type"] == "scan":
-		res = float(param["res"])/utils.arcmin
-		tol = float(param["tol"])/utils.degree
-		patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm, tol=tol)
-		L.info("Found %d scanning patterns" % len(patterns))
-		signal = mapmaking.SignalPhase(myscans, mypids, patterns, myscans[0].dgrid, res=res, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
 		signal.precon = mapmaking.PreconPhaseBinned(signal, signal_cut, myscans)
 	else:
 		raise ValueError("Unrecognized signal type '%s'" % param["type"])
-	signals.append(signal)
 
-# Initialize filters
-filters = []
+L.info("Initializing postprocessors")
 for param in filter_params:
 	if param["name"] == "scan":
 		naz, nt, mode = int(param["naz"]), int(param["nt"]), int(param["value"])
-		if mode == 0: continue
-		filter = mapmaking.FilterPickup(naz=naz, nt=nt)
 		if mode >= 2:
 			for sparam, signal in zip(signal_params, signals):
 				sname = sparam["name"]
@@ -260,7 +298,72 @@ for param in filter_params:
 					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt))
 	else:
 		raise ValueError("Unrecognized fitler name '%s'" % param["name"])
-	filters.append(filter)
+
+mapmaking.write_precons(signals, root)
+
+#L.info("Initializing signals")
+#signals = []
+#for param in signal_params:
+#	if param["type"] == "cut":
+#		signal = mapmaking.SignalCut(myscans, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+#		signal.precon = mapmaking.PreconCut(signal, myscans)
+#		signal_cut = signal
+#	elif param["type"] == "map":
+#		area = enmap.read_map(param["value"])
+#		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+#		signal = mapmaking.SignalMap(myscans, area, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+#		if param["prec"] == "bin":
+#			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans)
+#		else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
+#		if "nohor" in param and param["nohor"] != "no":
+#			prior_weight = signal.precon.div[0,0]
+#			prior_weight /= (np.mean(prior_weight)*prior_weight.shape[-1])**0.5
+#			prior_weight *= float(param["nohor"])
+#			signal.prior = mapmaking.PriorMapNohor(prior_weight)
+#	elif param["type"] == "dmap":
+#		area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
+#		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+#		signal = mapmaking.SignalDmap(myscans, mysubs, area, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+#		if param["prec"] == "bin":
+#			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans)
+#		else: raise ValueError("Unknown dmap preconditioner '%s'" % param["prec"])
+#		if "nohor" in param and param["nohor"] != "no":
+#			prior_weight  = signal.precon.div[0,0]
+#			prior_weight /= (dmap.sum(prior_weight)/prior_weight.size*prior_weight.shape[-1])**0.5
+#			prior_weight *= float(param["nohor"])
+#			signal.prior = mapmaking.PriorDmapNohor(prior_weight)
+#	elif param["type"] == "scan":
+#		res = float(param["res"])/utils.arcmin
+#		tol = float(param["tol"])/utils.degree
+#		patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm, tol=tol)
+#		L.info("Found %d scanning patterns" % len(patterns))
+#		signal = mapmaking.SignalPhase(myscans, mypids, patterns, myscans[0].dgrid, res=res, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+#		signal.precon = mapmaking.PreconPhaseBinned(signal, signal_cut, myscans)
+#	else:
+#		raise ValueError("Unrecognized signal type '%s'" % param["type"])
+#	signals.append(signal)
+#
+## Initialize filters
+#filters = []
+#for param in filter_params:
+#	if param["name"] == "scan":
+#		naz, nt, mode = int(param["naz"]), int(param["nt"]), int(param["value"])
+#		if mode == 0: continue
+#		filter = mapmaking.FilterPickup(naz=naz, nt=nt)
+#		if mode >= 2:
+#			for sparam, signal in zip(signal_params, signals):
+#				sname = sparam["name"]
+#				if sname in param and param[sname] == "yes":
+#					if sparam["type"] == "map":
+#						prec_ptp = mapmaking.PreconMapBinned(signal, signal_cut, myscans, noise=False, hits=False)
+#					elif sparam["type"] == "dmap":
+#						prec_ptp = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, noise=False, hits=False)
+#					else:
+#						raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
+#					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt))
+#	else:
+#		raise ValueError("Unrecognized fitler name '%s'" % param["name"])
+#	filters.append(filter)
 
 #signal_cut = mapmaking.SignalCut(myscans, dtype, comm)
 #signal_cut.precon = mapmaking.PreconCut(signal_cut, myscans)
@@ -305,9 +408,9 @@ for param in filter_params:
 #if args.filter_pickup >= 1:
 #	filters.append(mapmaking.FilterPickup())
 
-mapmaking.write_precons(signals, root)
-L.info("Initializing equation system")
-eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, dtype=dtype, comm=comm)
+#mapmaking.write_precons(signals, root)
+#L.info("Initializing equation system")
+#eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, dtype=dtype, comm=comm)
 
 #print "FIXME C"
 #print eqsys.dof.n

@@ -11,7 +11,7 @@ config.default("map_precon", "bin", "Preconditioner to use for map-making")
 config.default("map_eqsys",  "equ", "The coordinate system of the maps. Can be eg. 'hor', 'equ' or 'gal'.")
 config.default("map_cg_nmax", 1000, "Max number of CG steps to perform in map-making")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
-config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for myid:n:nproc-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
+config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for comm.rank:n:comm.size-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
 config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
 config.default("map_ptsrc_handling", "subadd", "How to handle point sources in the map. Can be 'none' for no special treatment, 'subadd' to subtract from the TOD and readd in pixel space, and 'sim' to simulate a pointsource-only TOD.")
 config.default("map_ptsrc_eqsys", "cel", "Equation system the point source positions are specified in. Default is 'cel'")
@@ -38,6 +38,7 @@ parser.add_argument("--ndet",       type=int, default=0,  help="Max number of de
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 parser.add_argument("-S", "--signal", action="append",    help="Signals to solve for. For example -S sky:area.fits -S scan would solve for the sky map and scan pickup maps jointly, using area.fits as the map template.")
 parser.add_argument("-F", "--filter", action="append")
+parser.add_argument("--group-tods", action="store_true")
 args = parser.parse_args()
 
 if args.dump_config:
@@ -47,28 +48,22 @@ if args.dump_config:
 precon= config.get("map_precon")
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
 comm  = mpi4py.MPI.COMM_WORLD
-myid  = comm.rank
-nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
 mapsys= config.get("map_eqsys")
-distributed = False
 tshape= (240,240)
-nrow,ncol=33,32
-pickup_res = 2*utils.arcmin
-#print "FIXME A"
-#nrow,ncol=1,1
-#pickup_res = 2*utils.arcmin * 100
 
 filedb.init()
 db = filedb.data
 filelist = todinfo.get_tods(args.filelist, filedb.scans)
+if args.group_tods:
+	filelist = data.group_ids(filelist)
 
 utils.mkdir(args.odir)
 root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
 
 # Dump our settings
-if myid == 0:
+if comm.rank == 0:
 	config.save(root + "config.txt")
 	with open(root + "args.txt","w") as f:
 		f.write(" ".join([pipes.quote(a) for a in sys.argv[1:]]) + "\n")
@@ -77,18 +72,18 @@ if myid == 0:
 			f.write("%s: %s\n" %(k,v))
 	with open(root + "ids.txt","w") as f:
 		for id in filelist:
-			f.write("%s\n" % id)
+			f.write("%s\n" % str(id))
 	shutil.copyfile(filedb.cjoin(["root","dataset","filedb"]),  root + "filedb.txt")
 	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), root + "todinfo.txt")
 	except IOError: pass
 # Set up logging
 utils.mkdir(root + "log")
-logfile   = root + "log/log%03d.txt" % myid
+logfile   = root + "log/log%03d.txt" % comm.rank
 log_level = log.verbosity2level(config.get("verbosity"))
-L = log.init(level=log_level, file=logfile, rank=myid)
+L = log.init(level=log_level, file=logfile, rank=comm.rank)
 # And benchmarking
 utils.mkdir(root + "bench")
-benchfile = root + "bench/bench%03d.txt" % myid
+benchfile = root + "bench/bench%03d.txt" % comm.rank
 
 def parse_desc(desc, default={}):
 	res = default.copy()
@@ -150,23 +145,28 @@ def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 	myscans, myinds  = [], []
 	for ind in tmpinds:
 		try:
+			if isinstance(filelist[ind],list): raise IOError
 			d = enscan.read_scan(filelist[ind])
 		except IOError:
 			try:
-				d = data.ACTScan(db[filelist[ind]])
+				if isinstance(filelist[ind],list):
+					entry = [db[id] for id in filelist[ind]]
+				else:
+					entry = db[filelist[ind]]
+				d = data.ACTScan(entry)
 			except errors.DataMissing as e:
-				if not quiet: L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
+				if not quiet: L.debug("Skipped %s (%s)" % (str(filelist[ind]), e.message))
 				continue
 		d = d[:,::config.get("downsample")]
 		if ndet > 0: d = d[:ndet]
 		myscans.append(d)
 		myinds.append(ind)
-		if not quiet: L.debug("Read %s" % filelist[ind])
+		if not quiet: L.debug("Read %s" % str(filelist[ind]))
 	return myscans, myinds
 
 # Read in all our scans
 L.info("Reading %d scans" % len(filelist))
-myscans, myinds = read_scans(filelist, np.arange(len(filelist))[myid::nproc], db, ndet=args.ndet)
+myscans, myinds = read_scans(filelist, np.arange(len(filelist))[comm.rank::comm.size], db, ndet=args.ndet)
 
 # Collect scan info
 read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]
@@ -178,7 +178,7 @@ if read_ntot == 0:
 read_ndets= utils.allgatherv([len(scan.dets) for scan in myscans], comm)
 read_dets = utils.uncat(utils.allgatherv(np.concatenate([scan.dets for scan in myscans]),comm), read_ndets)
 # Save accept list
-if myid == 0:
+if comm.rank == 0:
 	with open(root + "accept.txt", "w") as f:
 		for id, dets in zip(read_ids, read_dets):
 			f.write("%s %3d: " % (id, len(dets)) + " ".join([str(d) for d in dets]) + "\n")

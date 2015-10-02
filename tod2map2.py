@@ -1,4 +1,4 @@
-import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch
+import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch, re
 from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, errors
 from enlib import log, bench, dmap2 as dmap, coordinates, scan as enscan, rangelist, scanutils
 from enlib.cg import CG
@@ -88,7 +88,7 @@ benchfile = root + "bench/bench%03d.txt" % comm.rank
 def parse_desc(desc, default={}):
 	res = default.copy()
 	# Parse normally now that the : are out of the way
-	for tok in desc.split(","):
+	for tok in utils.split_outside(desc, ",", "[({", "])}"):
 		subtoks = tok.split("=")
 		if len(subtoks) == 1:
 			res["value"] = subtoks[0]
@@ -104,8 +104,9 @@ def setup_params(prefix, predefined, defparams):
 	overrides = argdict[prefix]
 	if overrides:
 		for oval in overrides:
-			if ":" in oval:
-				name, rest = oval.split(":")
+			m = re.match(r'([^,:]+):(.*)', oval)
+			if m:
+				name, rest = m.groups()
 				desc = config.get("%s_%s_default" % (prefix,name)) + ",use=yes," + rest
 			elif "," not in oval:
 				desc = config.get("%s_%s_default" % (prefix,oval)) + ",use=yes"
@@ -133,7 +134,7 @@ for sig in signal_params:
 		if dsys: raise ValueError("Only a single map may be distributed")
 		else: dsys=sig["sys"]
 	if sig["type"] in ["map", "dmap"]:
-		assert "value" in sig and sig["value"] is not None and os.path.isfile(sig["value"]), "Map-type signals need a template map as argument. E.g. -S sky:foo.fits"
+		assert "value" in sig and sig["value"] is not None, "Map-type signals need a template map as argument. E.g. -S sky:foo.fits"
 
 ######## Filter parmeters ########
 filter_params = setup_params("filter", ["scan","sub"], {"use":"no"})
@@ -228,8 +229,8 @@ for param in signal_params:
 		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
 		signal = mapmaking.SignalDmap(myscans, mysubs, area, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
 	elif param["type"] == "scan":
-		res = float(param["res"])/utils.arcmin
-		tol = float(param["tol"])/utils.degree
+		res = float(param["res"])*utils.arcmin
+		tol = float(param["tol"])*utils.degree
 		patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm, tol=tol)
 		L.info("Found %d scanning patterns" % len(patterns))
 		signal = mapmaking.SignalPhase(myscans, mypids, patterns, myscans[0].dgrid, res=res, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")

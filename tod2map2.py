@@ -168,7 +168,7 @@ def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 L.info("Reading %d scans" % len(filelist))
 myscans, myinds = read_scans(filelist, np.arange(len(filelist))[comm.rank::comm.size], db, ndet=args.ndet)
 
-# Collect scan info
+# Collect scan info. This currently fails if any task has empty myinds
 read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]
 read_ntot = len(read_ids)
 L.info("Found %d tods" % read_ntot)

@@ -22,8 +22,8 @@ config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bi
 config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin", "Default parameters for ground map")
 config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=hor:Sun,prec=bin", "Default parameters for sun map")
 config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Sun,prec=bin", "Default parameters for moon map")
-config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt='{name}_{rank:03}',output=no,use=yes", "Default parameters for cut (junk) signal")
-config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt='{name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f}',2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
+config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
+config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,sky=yes", "Default parameters for map subtraction filter")

@@ -25,7 +25,7 @@ config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Sun,pr
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
-config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,sky=yes", "Default parameters for scan/pickup filter")
+config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,weighted=0,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,sky=yes", "Default parameters for map subtraction filter")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
@@ -250,6 +250,7 @@ filters = []
 for param in filter_params:
 	if param["name"] == "scan":
 		naz, nt, mode = int(param["naz"]), int(param["nt"]), int(param["value"])
+		weighted = int(param["weighted"])
 		if mode == 0: continue
 		filter = mapmaking.FilterPickup(naz=naz, nt=nt)
 		if mode >= 2:
@@ -260,7 +261,7 @@ for param in filter_params:
 					prec_ptp = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, noise=False, hits=False)
 				else:
 					raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
-				signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt))
+				signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt, weighted=weighted>0))
 	elif param["name"] == "sub":
 		if "map" not in param: raise ValueError("-F sub needs a map file to subtract. e.g. -F sub:2,map=foo.fits")
 		mode, sys, fname = int(param["value"]), param["sys"], param["map"]

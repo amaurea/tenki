@@ -26,7 +26,7 @@ config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{ra
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,weighted=1,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,sky=yes", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,mul=1,sky=yes", "Default parameters for map subtraction filter")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
@@ -96,27 +96,45 @@ def parse_desc(desc, default={}):
 			key, val = subtoks
 			res[key] = val
 	return res
-def setup_params(prefix, predefined, defparams):
-	params = {}
-	for name in predefined:
-		params[name] = parse_desc(config.get("%s_%s_default" % (prefix, name)))
+def setup_params(category, predefined, defparams):
+	"""Set up parameters of a given category. With the following
+	convention.
+	 1. If a name matches a default's name, unspecified properties use the default's
+	 2. A name can be specified multiple times, e.g. -S sky:foo -S sky:bar. These
+	    do not override each other - each will be used separately.
+	 2. If a name that has a default is not specified manually, then a single
+	    instance of that name is instantiated, with the default parameters."""
+	params  = []
 	argdict = vars(args)
-	overrides = argdict[prefix]
+	overrides  = argdict[category]
+	counts = {}
 	if overrides:
 		for oval in overrides:
 			m = re.match(r'([^,:]+):(.*)', oval)
 			if m:
 				name, rest = m.groups()
-				desc = config.get("%s_%s_default" % (prefix,name)) + ",use=yes," + rest
+				desc = config.get("%s_%s_default" % (category,name)) + ",use=yes," + rest
 			elif "," not in oval:
-				desc = config.get("%s_%s_default" % (prefix,oval)) + ",use=yes"
+				desc = config.get("%s_%s_default" % (category,oval)) + ",use=yes"
 			else:
 				desc = "use=yes,"+oval
 			param = parse_desc(desc, default=defparams)
-			params[param["name"]] = param
-	# Flatten to listand kill irrelevant ones
-	params = [params[k] for k in params if params[k]["use"] != "no"]
+			name = param["name"]
+			if name in counts: counts[name] += 1
+			else: counts[name] = 1
+			param["i"] = counts[name]
+			params.append(param)
+	# For each predefined param, add it only if none of that name already exist
+	defaults = []
+	for p in predefined:
+		if not p in counts:
+			defaults.append(parse_desc(config.get("%s_%s_default" % (category, p))))
+			defaults[-1]["i"] = 0
+	params = defaults + params
+	# Kill irrelevant parameters (those not in use)
+	params = [p for p in params if p["use"] != "no"]
 	return params
+def get_effname(param): return param["name"] + (str(param["i"]) if param["i"] > 1 else "")
 
 ######## Signal parmeters ########
 signal_params = setup_params("signal", ["cut","sky","hor","sun","moon","scan"], {"use":"no", "ofmt":"{name}", "output":"yes"})
@@ -226,23 +244,24 @@ myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
 L.info("Initializing signals")
 signals = []
 for param in signal_params:
+	effname = get_effname(param)
 	if param["type"] == "cut":
-		signal = mapmaking.SignalCut(myscans, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+		signal = mapmaking.SignalCut(myscans, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 		signal_cut = signal
 	elif param["type"] == "map":
 		area = enmap.read_map(param["value"])
 		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-		signal = mapmaking.SignalMap(myscans, area, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
+		signal = mapmaking.SignalMap(myscans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
 	elif param["type"] == "dmap":
 		area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
 		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-		signal = mapmaking.SignalDmap(myscans, mysubs, area, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
+		signal = mapmaking.SignalDmap(myscans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
 	elif param["type"] == "scan":
 		res = float(param["res"])*utils.arcmin
 		tol = float(param["tol"])*utils.degree
 		patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm, tol=tol)
 		L.info("Found %d scanning patterns" % len(patterns))
-		signal = mapmaking.SignalPhase(myscans, mypids, patterns, myscans[0].dgrid, res=res, dtype=dtype, comm=comm, name=param["name"], ofmt=param["ofmt"], output=param["output"]=="yes")
+		signal = mapmaking.SignalPhase(myscans, mypids, patterns, myscans[0].dgrid, res=res, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 	else:
 		raise ValueError("Unrecognized signal type '%s'" % param["type"])
 	signals.append(signal)
@@ -273,7 +292,7 @@ for param in filter_params:
 				signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt, weighted=weighted>0))
 	elif param["name"] == "sub":
 		if "map" not in param: raise ValueError("-F sub needs a map file to subtract. e.g. -F sub:2,map=foo.fits")
-		mode, sys, fname = int(param["value"]), param["sys"], param["map"]
+		mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
 		if mode == 0: continue
 		if param["type"] == "dmap":
 			# Warning: This only works if a dmap has already been initialized, and
@@ -281,15 +300,15 @@ for param in filter_params:
 			# of dmaps - they are so closely tied to a set of scans that they only work
 			# in the coordinate system where the scans are reasonably local.
 			m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
-			filter = mapmaking.FilterAddDmap(myscans, mysubs, m, eqsys=sys, mul=-1)
+			filter = mapmaking.FilterAddDmap(myscans, mysubs, m, eqsys=sys, mul=-mul)
 		else:
 			m = enmap.read_map(fname).astype(dtype)
-			filter = mapmaking.FilterAddMap(myscans, m, eqsys=sys, mul=-1)
+			filter = mapmaking.FilterAddMap(myscans, m, eqsys=sys, mul=-mul)
 		if mode >= 2:
 			for sparam, signal in matching_signals(param, signal_params, signals):
 				assert sparam["sys"] == param["sys"]
 				assert signal.area.shape[-2:] == m.shape[-2:]
-				signal.post.append(mapmaking.PostAddMap(m, mul=1))
+				signal.post.append(mapmaking.PostAddMap(m, mul=mul))
 	else:
 		raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 	filters.append(filter)

@@ -208,8 +208,13 @@ if comm.rank == 0:
 	with open(root + "autocut.txt","w") as ofile:
 		ofile.write(("#%29s" + " %15s"*len(autokeys)+"\n") % (("id",)+tuple(autokeys)))
 		for id, acut in zip(read_ids, autocuts):
-			ofile.write(("%30s" + " %7d %7d"*len(autokeys) + "\n") % ((id,)+tuple(acut.reshape(-1))))
+			ofile.write(("%30s" + " %7.3f %7.3f"*len(autokeys) + "\n") % ((id,)+tuple(1e-6*acut.reshape(-1))))
 		ofile.close()
+# Prune fully autocut scans, now that we have output the autocuts
+mydets  = [len(scan.dets) for scan in myscans]
+myinds  = [ind  for ind, ndet in zip(myinds, mydets) if ndet > 0]
+myscans = [scan for scan,ndet in zip(myscans,mydets) if ndet > 0]
+L.info("Pruned %d fully autocut tods" % np.sum(read_ndets==0))
 
 # Try to get about the same amount of data for each mpi task.
 # If we use distributed maps, we also try to make things as local as possible

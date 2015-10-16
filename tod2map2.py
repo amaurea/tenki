@@ -3,7 +3,7 @@ from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, e
 from enlib import log, bench, dmap2 as dmap, coordinates, scan as enscan, rangelist, scanutils
 from enlib.cg import CG
 from enlib.source_model import SourceModel
-from enact import data, nmat_measure, filedb, todinfo
+from enact import actscan, nmat_measure, filedb, todinfo
 
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
@@ -172,7 +172,7 @@ def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 					entry = [db[id] for id in filelist[ind]]
 				else:
 					entry = db[filelist[ind]]
-				d = data.ACTScan(entry)
+				d = actscan.ACTScan(entry)
 			except errors.DataMissing as e:
 				if not quiet: L.debug("Skipped %s (%s)" % (str(filelist[ind]), e.message))
 				continue

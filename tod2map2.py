@@ -7,9 +7,7 @@ from enact import actscan, nmat_measure, filedb, todinfo
 
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
-config.default("map_precon", "bin", "Preconditioner to use for map-making")
-config.default("map_eqsys",  "equ", "The coordinate system of the maps. Can be eg. 'hor', 'equ' or 'gal'.")
-config.default("map_cg_nmax", 1000, "Max number of CG steps to perform in map-making")
+config.default("map_cg_nmax", 500, "Max number of CG steps to perform in map-making")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for comm.rank:n:comm.size-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
 config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
@@ -45,12 +43,10 @@ if args.dump_config:
 	print config.to_str()
 	sys.exit(0)
 
-precon= config.get("map_precon")
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
 comm  = mpi4py.MPI.COMM_WORLD
 nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
-mapsys= config.get("map_eqsys")
 tshape= (240,240)
 
 filedb.init()
@@ -331,6 +327,8 @@ for param, signal in zip(signal_params, signals):
 	elif param["type"] == "map":
 		if param["prec"] == "bin":
 			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans)
+		elif param["prec"] == "jacobi":
+			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans, noise=False)
 		else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
 		if "nohor" in param and param["nohor"] != "no":
 			prior_weight = signal.precon.div[0,0]
@@ -340,6 +338,8 @@ for param, signal in zip(signal_params, signals):
 	elif param["type"] == "dmap":
 		if param["prec"] == "bin":
 			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans)
+		elif param["prec"] == "jacobi":
+			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, noise=False)
 		else: raise ValueError("Unknown dmap preconditioner '%s'" % param["prec"])
 		if "nohor" in param and param["nohor"] != "no":
 			prior_weight  = signal.precon.div[0,0]

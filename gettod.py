@@ -1,6 +1,6 @@
 import numpy as np, os, h5py
 from enlib import config
-from enact import data, filedb
+from enact import actdata, filedb
 
 parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
 parser.add_argument("query")
@@ -23,8 +23,13 @@ elif args.dets is not None:
 else:
 	subdets = [0]
 
-d = data.read(entry, fields=["gain","tconst","cut","tod","boresight", "noise_cut","polangle","point_offsets","site"], subdets=subdets, absdets=absdets)
-if args.calib: d = data.calibrate(d, nofft=args.nofft)
+d = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight"])
+if absdets: d.restrict(dets=absdets)
+if subdets: d.restrict(dets=d.dets[subdets])
+if args.calib:
+	ops = ["boresight", "tod_real"]
+	if not args.nofft: flags += ["tod_fourier"]
+	d = actdata.calibrate(d, operations=ops)
 
 with h5py.File(args.ofile, "w") as hfile:
 	hfile["tod"] = d.tod

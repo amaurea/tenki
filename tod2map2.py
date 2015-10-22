@@ -23,7 +23,7 @@ config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Sun,pr
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
-config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,weighted=1,sky=yes", "Default parameters for scan/pickup filter")
+config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,mul=1,sky=yes", "Default parameters for map subtraction filter")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
@@ -191,6 +191,7 @@ if read_ntot == 0:
 	L.info("Giving up")
 	sys.exit(1)
 read_ndets= utils.allgatherv([len(scan.dets) for scan in myscans], comm)
+read_nsamp= utils.allgatherv([scan.cut.size-scan.cut.sum() for scan in myscans], comm)
 read_dets = utils.uncat(utils.allgatherv(np.concatenate([scan.dets for scan in myscans]),comm), read_ndets)
 # Save accept list
 if comm.rank == 0:
@@ -205,7 +206,12 @@ if comm.rank == 0:
 		ofile.write(("#%29s" + " %15s"*len(autokeys)+"\n") % (("id",)+tuple(autokeys)))
 		for id, acut in zip(read_ids, autocuts):
 			ofile.write(("%30s" + " %7.3f %7.3f"*len(autokeys) + "\n") % ((id,)+tuple(1e-6*acut.reshape(-1))))
-		ofile.close()
+# Output sample stats
+if comm.rank == 0:
+	with open(root + "samps.txt", "w") as ofile:
+		ofile.write("#%29s %4s %9s\n" % ("id", "ndet", "nsamp"))
+		for id, ndet, nsamp in zip(read_ids, read_ndets, read_nsamp):
+			ofile.write("%30s %4d %9d\n" % (id, ndet, nsamp))
 # Prune fully autocut scans, now that we have output the autocuts
 mydets  = [len(scan.dets) for scan in myscans]
 myinds  = [ind  for ind, ndet in zip(myinds, mydets) if ndet > 0]
@@ -278,10 +284,10 @@ L.info("Initializing filters")
 filters = []
 for param in filter_params:
 	if param["name"] == "scan":
-		naz, nt, mode = int(param["naz"]), int(param["nt"]), int(param["value"])
+		naz, nt, mode, niter = int(param["naz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
 		weighted = int(param["weighted"])
 		if mode == 0: continue
-		filter = mapmaking.FilterPickup(naz=naz, nt=nt)
+		filter = mapmaking.FilterPickup(naz=naz, nt=nt, niter=niter)
 		if mode >= 2:
 			for sparam, signal in matching_signals(param, signal_params, signals):
 				if sparam["type"] == "map":

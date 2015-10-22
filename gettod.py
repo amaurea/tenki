@@ -1,5 +1,5 @@
 import numpy as np, os, h5py
-from enlib import config
+from enlib import config, resample, utils, gapfill
 from enact import actdata, filedb
 
 parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
@@ -8,30 +8,53 @@ parser.add_argument("ofile")
 parser.add_argument("-d", "--dets", type=str, default=None)
 parser.add_argument("-D", "--absdets", type=str, default=None)
 parser.add_argument("-c", "--calib", action="store_true")
+parser.add_argument("-C", "--manual-calib", type=str, default=None)
+parser.add_argument("--bin", type=int, default=1)
 parser.add_argument("--nofft", action="store_true")
+parser.add_argument("--nodeslope", action="store_true")
 args = parser.parse_args()
 
 filedb.init()
-id = filedb.scans[args.query].ids[0]
-entry = filedb.data[id]
-subdets = None
-absdets = None
-if args.absdets is not None:
-	absdets = [int(w) for w in args.absdets.split(",")]
-elif args.dets is not None:
-	subdets = [int(w) for w in args.dets.split(",")]
-else:
-	subdets = [0]
+ids = filedb.scans[args.query].ids
+if len(ids) > 1:
+	# Will process multiple files
+	utils.mkdir(args.ofile)
+for id in ids:
+	print id
+	entry = filedb.data[id]
+	subdets = None
+	absdets = None
+	if args.absdets is not None:
+		absdets = [int(w) for w in args.absdets.split(",")]
+	elif args.dets is not None:
+		subdets = [int(w) for w in args.dets.split(",")]
 
-d = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight"])
-if absdets: d.restrict(dets=absdets)
-if subdets: d.restrict(dets=d.dets[subdets])
-if args.calib:
-	ops = ["boresight", "tod_real"]
-	if not args.nofft: flags += ["tod_fourier"]
-	d = actdata.calibrate(d, operations=ops)
-
-with h5py.File(args.ofile, "w") as hfile:
-	hfile["tod"] = d.tod
-	hfile["az"]  = d.boresight[1]
-	hfile["el"]  = d.boresight[2]
+	d = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight"])
+	if absdets: d.restrict(dets=absdets)
+	if subdets: d.restrict(dets=d.dets[subdets])
+	if args.calib: d = actdata.calibrate(d)
+	elif args.manual_calib:
+		ops = args.manual_calib.split(",")
+		if "safe" in ops: d.boresight[1:] = utils.unwind(d.boresight[1:], period=360)
+		if "rad" in ops: d.boresight[1:] *= np.pi/180
+		if "bgap" in ops:
+			bad = (d.flags!=0)*(d.flags!=0x10)
+			for b in d.boresight: gapfill.gapfill_linear(b, bad, inplace=True)
+		if "gain" in ops: d.tod *= d.gain[:,None]
+		if "tgap" in ops: 
+			gapfiller = {"copy":gapfill.gapfill_copy, "linear":gapfill.gapfill_linear}[config.get("gapfill")]
+			gapfiller(d.tod, d.cut, inplace=True)
+		if "slope" in ops:
+			utils.deslope(d.tod, w=8, inplace=True)
+		if "deconv" in ops:
+			d = actdata.calibrate(d, operations=["tod_fourier"])
+	if args.bin > 1:
+		d.tod = resample.downsample_bin(d.tod, steps=[args.bin])
+		d.boresight = resample.downsample_bin(d.boresight, steps=[args.bin])
+		d.flags = resample.downsample_bin(d.flags, steps=[args.bin])
+	oname = args.ofile
+	if len(ids) > 1: oname = "%s/%s.hdf" % (args.ofile, id)
+	with h5py.File(oname, "w") as hfile:
+		hfile["tod"] = d.tod
+		hfile["az"]  = d.boresight[1]
+		hfile["el"]  = d.boresight[2]

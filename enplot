@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 import numpy as np, argparse, time, sys, warnings
-from enlib import enmap, colorize
-from mpi4py import MPI
+from enlib import enmap, colorize, mpi
 warnings.filterwarnings("ignore")
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
@@ -57,7 +56,7 @@ class dprint:
 		if args.verbosity >= 3:
 			sys.stderr.write("%6.2f %s\n" % (time.time()-self.t1,self.desc))
 
-comm = MPI.COMM_WORLD
+comm = mpi.COMM_WORLD
 ticks = np.full(2,1.0); ticks[:] = [float(w) for w in args.ticks.split(",")]
 ngroup = 3 if args.rgb else 1
 

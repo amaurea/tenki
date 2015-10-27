@@ -58,3 +58,4 @@ for id in ids:
 		hfile["tod"] = d.tod
 		hfile["az"]  = d.boresight[1]
 		hfile["el"]  = d.boresight[2]
+		hfile["dets"] = d.dets

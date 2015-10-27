@@ -9,8 +9,8 @@
 # 3. For each tod in a scanning pattern, read a partially calibrated TOD
 #    and project it onto our map.
 
-import numpy as np, os, mpi4py.MPI, h5py, sys, pipes, shutil, warnings
-from enlib import config, errors, utils, log, bench, enmap, pmat, map_equation
+import numpy as np, os, h5py, sys, pipes, shutil, warnings
+from enlib import config, errors, utils, log, bench, enmap, pmat, map_equation, mpi
 from enlib.cg import CG
 from enact import data, filedb, todinfo
 warnings.filterwarnings("ignore")
@@ -31,9 +31,9 @@ parser.add_argument("-g,", "--group", type=int, default=1)
 args = parser.parse_args()
 filedb.init()
 
-comm_world = mpi4py.MPI.COMM_WORLD
+comm_world = mpi.COMM_WORLD
 comm_group = comm_world
-comm_sub   = mpi4py.MPI.COMM_SELF
+comm_sub   = mpi.COMM_SELF
 ids  = todinfo.get_tods(args.sel, filedb.scans)
 ndet = args.nrow*args.ncol
 tol  = args.tol*utils.degree

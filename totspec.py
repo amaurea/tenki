@@ -1,7 +1,6 @@
 import numpy as np, argparse, h5py, os, sys
-from enlib import fft, utils, enmap, errors, config
+from enlib import fft, utils, enmap, errors, config, mpi
 from enact import filedb, data
-from mpi4py import MPI
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("sel")
 parser.add_argument("ofile")
@@ -9,7 +8,7 @@ parser.add_argument("-N", type=int, default=10000)
 parser.add_argument("-w", "--weight", action="store_true")
 args = parser.parse_args()
 
-comm = MPI.COMM_WORLD
+comm = mpi.COMM_WORLD
 srate = 400.
 fmax  = srate/2
 ndet = 33*32

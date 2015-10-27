@@ -1,6 +1,5 @@
 import numpy as np, argparse, time, os, zipfile, h5py, bunch
-from mpi4py import MPI
-from enlib import utils, fft, nmat, errors, config, bench, array_ops, pmat, enmap
+from enlib import utils, fft, nmat, errors, config, bench, array_ops, pmat, enmap, mpi
 from enact import filedb, todinfo, data, nmat_measure
 
 parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
@@ -13,7 +12,7 @@ parser.add_argument("-C", "--covtest", action="store_true")
 parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
 args = parser.parse_args()
 
-comm = MPI.COMM_WORLD
+comm = mpi.COMM_WORLD
 myid, nproc = comm.rank, comm.size
 model = args.model
 shared = True

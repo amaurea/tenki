@@ -1,5 +1,5 @@
-import numpy as np, mpi4py.MPI, os, sys, zipfile
-from enlib import config, utils, coordinates, errors
+import numpy as np, os, sys, zipfile
+from enlib import config, utils, coordinates, errors, mpi
 from enact import filedb, data
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
@@ -7,7 +7,7 @@ parser.add_argument("query",type=str, default="cmb",      nargs="?")
 parser.add_argument("objs", type=str, default="Sun,Moon", nargs="?")
 args = parser.parse_args()
 
-comm  = mpi4py.MPI.COMM_WORLD
+comm  = mpi.COMM_WORLD
 objs  = args.objs.split(",")
 nobj  = len(objs)
 dstep = 10

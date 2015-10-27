@@ -1,7 +1,6 @@
 import numpy as np, argparse, h5py, os, sys
-from enlib import fft, utils, enmap, errors, config
+from enlib import fft, utils, enmap, errors, config, mpi
 from enact import filedb, data
-from mpi4py import MPI
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("sel")
 parser.add_argument("odir")
@@ -17,7 +16,7 @@ args = parser.parse_args()
 
 yrange = args.yrange or ("1e-8:1e-3" if args.apply_nmat else "1e1:1e6")
 
-comm = MPI.COMM_WORLD
+comm = mpi.COMM_WORLD
 utils.mkdir(args.odir)
 srate = 400
 

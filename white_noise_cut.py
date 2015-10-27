@@ -5,9 +5,8 @@
 # low white noise floors.
 
 import numpy as np, argparse, h5py, os, sys, shutil
-from enlib import fft, utils, enmap, errors, config
+from enlib import fft, utils, enmap, errors, config, mpi
 from enact import filedb, data, filters
-from mpi4py import MPI
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("sel")
 parser.add_argument("odir")
@@ -17,7 +16,7 @@ parser.add_argument("--max-sens", type=float, default=20, help="Reject detectors
 parser.add_argument("--full-stats", action="store_true")
 args = parser.parse_args()
 
-comm  = MPI.COMM_WORLD
+comm  = mpi.COMM_WORLD
 srate = 400.
 fmax  = srate/2
 ndet  = 32*33

@@ -1,9 +1,9 @@
 """Create maps in azimuth phase, in order to investigate magnetic pickup. We assume
 that relative azimuth is all that matters, so time, elevation and azimuth center
 can be ignored."""
-import numpy as np, mpi4py.MPI, sys, os, time, h5py
+import numpy as np, sys, os, time, h5py
 from enact import filedb, data
-from enlib import enmap, config, utils, array_ops, fft, errors, gapfill, rangelist
+from enlib import enmap, config, utils, array_ops, fft, errors, gapfill, rangelist, mpi
 from scipy.interpolate import UnivariateSpline
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
@@ -15,7 +15,7 @@ args = parser.parse_args()
 
 utils.mkdir(args.odir)
 
-comm = mpi4py.MPI.COMM_WORLD
+comm = mpi.COMM_WORLD
 ids  = filedb.scans[args.selector].fields["id"]
 nbin = 1000
 ncol, nrow = 32,33

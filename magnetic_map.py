@@ -1,8 +1,8 @@
 """Instead of mapping pixels on the sky, creates a map in AZ for each detector
 for each scanning pattern. Scanning patterns are identified by mean az, mean el,
 delta az, delta el."""
-import numpy as np, os, mpi4py.MPI, h5py, sys, pipes, shutil
-from enlib import config, errors, utils, log, map_equation, bench
+import numpy as np, os, h5py, sys, pipes, shutil
+from enlib import config, errors, utils, log, map_equation, bench, mpi
 from enlib.cg import CG
 from enact import data, filedb, todinfo
 
@@ -23,7 +23,7 @@ parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,30
 args = parser.parse_args()
 filedb.init()
 
-comm = mpi4py.MPI.COMM_WORLD
+comm = mpi.COMM_WORLD
 ids = todinfo.get_tods(args.sel, filedb.scans)
 ndet_max = 33*32
 pos_tol = args.pos_tol*utils.degree

@@ -1,5 +1,5 @@
-import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch, re
-from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, errors
+import numpy as np, time, h5py, copy, argparse, os, sys, pipes, shutil, bunch, re
+from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, errors, mpi
 from enlib import log, bench, dmap2 as dmap, coordinates, scan as enscan, rangelist, scanutils
 from enlib.cg import CG
 from enlib.source_model import SourceModel
@@ -44,7 +44,7 @@ if args.dump_config:
 	sys.exit(0)
 
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
-comm  = mpi4py.MPI.COMM_WORLD
+comm  = mpi.COMM_WORLD
 nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
 tshape= (240,240)

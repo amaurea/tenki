@@ -1,6 +1,6 @@
-import numpy as np, time, h5py, copy, argparse, os, mpi4py.MPI, sys, pipes, shutil, bunch
+import numpy as np, time, h5py, copy, argparse, os, sys, pipes, shutil, bunch
 from enlib import enmap, utils, pmat, fft, config, array_ops, map_equation, nmat, errors
-from enlib import log, bench, dmap, coordinates, scan as enscan, rangelist, scanutils
+from enlib import log, bench, dmap, coordinates, scan as enscan, rangelist, scanutils, mpi
 from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import data, nmat_measure, filedb, todinfo, readutils
@@ -37,7 +37,7 @@ if args.dump_config:
 
 precon= config.get("map_precon")
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
-comm  = mpi4py.MPI.COMM_WORLD
+comm  = mpi.COMM_WORLD
 myid  = comm.rank
 nproc = comm.size
 nmax  = config.get("map_cg_nmax")

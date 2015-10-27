@@ -1,5 +1,5 @@
-import numpy as np, mpi4py.MPI, os, sys, zipfile
-from enlib import config, utils, coordinates, targets
+import numpy as np, os, sys, zipfile
+from enlib import config, utils, coordinates, targets, mpi
 from enact import filedb, files
 
 config.default("filedb", "filedb.txt", "File describing the location of the TOD and their metadata")
@@ -9,7 +9,7 @@ parser.add_argument("-r", "--focalplane-radius", type=float, default=1.0)
 parser.add_argument("-A", "--all-dists", action="store_true")
 args = parser.parse_args()
 
-comm  = mpi4py.MPI.COMM_WORLD
+comm  = mpi.COMM_WORLD
 
 filedb.init()
 db       = filedb.data

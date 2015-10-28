@@ -1,7 +1,7 @@
-import numpy as np, argparse, os, mpi4py.MPI, sys, pipes, shutil, warnings
-from enlib import utils, pmat, config, errors
+import numpy as np, argparse, os, sys, pipes, shutil, warnings
+from enlib import utils, pmat, config, errors, mpi
 from enlib import log, bench, scan, ptsrc_data
-from enact import data, filedb
+from enact import actscan, filedb, todinfo
 
 warnings.filterwarnings("ignore")
 
@@ -20,16 +20,13 @@ parser.add_argument("-c", action="store_true")
 args = parser.parse_args()
 
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
-comm  = mpi4py.MPI.COMM_WORLD
+comm  = mpi.COMM_WORLD
 myid  = comm.rank
 nproc = comm.size
 
-db       = filedb.ACTFiles(config.get("filedb"))
-# Allow filelist to take the format filename:[slice]
-toks = args.filelist.split(":")
-filelist, fslice = toks[0], ":".join(toks[1:])
-filelist = [line.split()[0] for line in open(filelist,"r") if line[0] != "#"]
-filelist = eval("filelist"+fslice)
+filedb.init()
+db = filedb.data
+filelist = todinfo.get_tods(args.filelist, filedb.scans)
 
 def compress_beam(sigma, phi):
 	c,s=np.cos(phi),np.sin(phi)
@@ -50,7 +47,9 @@ if myid == 0:
 	with open(args.odir + "/ids.txt","w") as f:
 		for id in filelist:
 			f.write("%s\n" % id)
-	shutil.copyfile(config.get("filedb"), args.odir + "/filedb.txt")
+	shutil.copyfile(filedb.cjoin(["root","dataset","filedb"]),  args.odir + "/filedb.txt")
+	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), args.odir + "/todinfo.txt")
+	except IOError: pass
 # Set up logging
 utils.mkdir(args.odir + "/log")
 logfile   = args.odir + "/log/log%03d.txt" % myid
@@ -105,18 +104,19 @@ for ind in myinds:
 		d = scan.read_scan(filelist[ind])
 	except IOError:
 		try:
-			d = data.ACTScan(db[filelist[ind]])
+			d = actscan.ACTScan(db[filelist[ind]])
 		except errors.DataMissing as e:
 			L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
 			continue
 
 	try:
 		# Set up pmat for this scan
+		L.debug("Reading samples")
+		tod   = d.get_samples().astype(dtype)
+		d.noise = d.noise.update(tod, d.srate)
 		L.debug("Pmats")
 		Psrc  = pmat.PmatPtsrc(d, params)
 		Pcut  = pmat.PmatCut(d)
-		L.debug("Reading samples")
-		tod   = d.get_samples().astype(dtype)
 	except errors.DataMissing as e:
 		L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
 		continue

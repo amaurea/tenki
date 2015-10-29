@@ -1,6 +1,6 @@
-import numpy as np, argparse, os, sys, pipes, shutil, warnings
+import numpy as np, argparse, os, sys, pipes, shutil, warnings, bunch
 from enlib import utils, pmat, config, errors, mpi
-from enlib import log, bench, scan, ptsrc_data
+from enlib import log, bench, scan, ptsrc_data, pointsrcs
 from enact import actscan, filedb, todinfo
 
 warnings.filterwarnings("ignore")
@@ -15,7 +15,7 @@ parser.add_argument("srcs")
 parser.add_argument("odir")
 parser.add_argument("--ncomp",      type=int,   default=3)
 parser.add_argument("--ndet",       type=int,   default=0)
-parser.add_argument("--minsigma",   type=float, default=4)
+parser.add_argument("--minamp",     type=float, default=100)
 parser.add_argument("-c", action="store_true")
 args = parser.parse_args()
 
@@ -59,24 +59,15 @@ L = log.init(level=log_level, file=logfile, rank=myid, shared=False)
 utils.mkdir(args.odir + "/bench")
 benchfile = args.odir + "/bench/bench%03d.txt" % myid
 
-# Read our point source list in the format produced by sort_sources
-arcmin = np.pi/180/60
-fwhm   = arcmin/(8*np.log(2))**0.5
-srcs   = np.loadtxt(args.srcs).T
-totsrcs= srcs.shape[1]
-sigma  = np.abs(srcs[2])
-pos    = srcs[[3,5]]*np.pi/180
-amps   = srcs[[7,9,11]][:args.ncomp]
-beam   = srcs[[19,21,23]]
-ibeam  = np.array([compress_beam(b[:2]*fwhm,b[2]*np.pi/180) for b in beam.T]).T
-params = np.vstack([pos,amps,ibeam]).astype(dtype)
+# Read our point source list
+params = pointsrcs.src2param(pointsrcs.read(args.srcs))
+ntot   = len(params)
 # Eliminate insignificant sources
-params = params[:,sigma>args.minsigma]
-srcs   = srcs  [:,sigma>args.minsigma]
+params = params[np.abs(params[:,2])>args.minamp]
 
 if comm.rank == 0:
-	L.info("Got %d sources, keeping %d > %d sigma" % (totsrcs,params.shape[1],args.minsigma))
-	np.savetxt(args.odir + "/srcs.txt", srcs.T, fmt="%12.5f")
+	L.info("Got %d sources, keeping %d > %d uK" % (ntot,len(params),args.minamp))
+	pointsrcs.write(args.odir + "/srcs.txt", pointsrcs.param2src(params))
 
 # Our noise model is slightly different from the main noise model,
 # since we assume it is white and independent between detectors,
@@ -105,18 +96,13 @@ for ind in myinds:
 	except IOError:
 		try:
 			d = actscan.ACTScan(db[filelist[ind]])
+			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("all samples cut")
 		except errors.DataMissing as e:
 			L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
 			continue
-
 	try:
-		# Set up pmat for this scan
 		L.debug("Reading samples")
 		tod   = d.get_samples().astype(dtype)
-		d.noise = d.noise.update(tod, d.srate)
-		L.debug("Pmats")
-		Psrc  = pmat.PmatPtsrc(d, params)
-		Pcut  = pmat.PmatCut(d)
 	except errors.DataMissing as e:
 		L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
 		continue
@@ -124,19 +110,20 @@ for ind in myinds:
 	# Measure noise
 	L.debug("Noise")
 	ivar = 1/np.array([np.median(onlyfinite(get_desloped_var(blockify(t,20)))) for t in tod])
+		# Set up pmat for this scan
+	L.debug("Pmats")
+	d.noise = bunch.Bunch(ivar = ivar)
+	Psrc  = pmat.PmatPtsrc(d, params.T)
+	Pcut  = pmat.PmatCut(d)
+	# Set cut samples to zero
+	junk  = np.zeros(Pcut.njunk,dtype=dtype)
+	Pcut.forward(tod, junk)
+
+	# Get rough S/N
+
 	# Extract point-source relevant TOD properties
 	L.debug("Extract data")
 	srcdata = Psrc.extract(tod)
-	# Kill detectors where the noise measured in the actually kept samples is too
-	# far off from the noise measured overall. This won't work for planets!
-	if False:
-		L.debug("Measure white noise")
-		vars, nvars = ptsrc_data.measure_mwhite(srcdata.tod, srcdata)
-		ivar_src = np.sum(nvars,0)/np.sum(vars,0)
-		#for v,vs in zip(ivar,ivar_src):
-		#	print "%12.2f %12.2f" % (v**-0.5, vs**-0.5)
-		bad = np.log(ivar/ivar_src)**2 > np.log(1.5)**2
-		ivar[bad] *= 0.01
 
 	#srcdata.ivars = d.noise.iD[-1]
 	srcdata.ivars = ivar

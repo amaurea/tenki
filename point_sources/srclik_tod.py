@@ -7,15 +7,16 @@ offset, beam and strong with the weak fixed at fiducial values, and then sample
 strong and weak based on offset and beam."""
 
 import numpy as np, argparse, warnings, mpi4py.MPI, copy, h5py, os
-from enlib import utils, ptsrc_data, log, bench, cg, array_ops, enmap, errors
+from enlib import utils, ptsrc_data, log, bench, cg, array_ops, enmap, errors, pointsrcs
 from enlib.degrees_of_freedom import DOF, Arg
 from scipy.special import erf
+warnings.filterwarnings("ignore")
 
 parser = argparse.ArgumentParser()
 parser.add_argument("filelist")
 parser.add_argument("srcs")
 parser.add_argument("odir")
-parser.add_argument("-v", "--verbosity", type=int, default=0)
+parser.add_argument("-v", "--verbosity", type=int, default=1)
 parser.add_argument("--ncomp", type=int, default=1)
 parser.add_argument("--nsamp", type=int, default=500)
 parser.add_argument("--burnin",type=int, default=100)
@@ -27,6 +28,7 @@ parser.add_argument("-c", action="store_true")
 parser.add_argument("-g", "--grid", type=int, default=0)
 parser.add_argument("--minrange", type=int, default=0x40)
 parser.add_argument("--allow-clusters", action="store_true")
+parser.add_argument("--sample-beam", action="store_true")
 #parser.add_argument("--nchain", type=int, default=3)
 parser.add_argument("-R", "--radius", type=float, default=5.0)
 parser.add_argument("-r", "--resolution", type=float, default=0.25)
@@ -56,8 +58,8 @@ bench.stats.info = [("time","%6.2f","%6.3f",1e-3),("cpu","%6.2f","%6.3f",1e-3),(
 
 filelist = utils.read_lines(args.filelist)
 
-srcs = np.loadtxt(args.srcs)
-posi, beami, ampi = [3,5], [19,21,23], [7,9,11] # columns of srcs array
+srcs = pointsrcs.read(args.srcs)
+posi, ampi, beami = [0,1], [2,3,4], [5,6,7]
 nsrc = len(srcs)
 
 utils.mkdir(args.odir)
@@ -122,8 +124,10 @@ def validate_srcscan(d, srcs):
 	vars, nvars = ptsrc_data.measure_basis(d.tod, d)
 	ivars = np.sum(nvars,0)/np.sum(vars,0)
 	d.ivars = ivars
-	# Discard sources that aren't sufficiently hit
-	srcmask = d.offsets[:,-1]-d.offsets[:,0] > args.minrange
+	# Discard sources that aren't sufficiently hit. This is
+	# a limit on the number of ranges for each source, not the
+	# number of samples!
+	srcmask = np.sum(d.offsets[:,:,1]-d.offsets[:,:,0],1) > args.minrange
 	# Discard clusters, as they aren't point-like
 	if not args.allow_clusters:
 		srcmask *= srcs[:,ampi[0]] > 0
@@ -161,12 +165,15 @@ def independent_groups(d):
 		group = [si]
 		range_hit = np.zeros(d.ranges.shape[0],dtype=bool)
 		# Mark all the ranges the current source hits
-		range_hit[d.rangesets[d.offsets[si,0]:d.offsets[si,-1]]] = True
+		for off in d.offsets[si]:
+			range_hit[d.rangesets[off[0]:off[1]]] = True
 		# For all other sources, check if we overlap or not
 		for si2 in range(si+1,nsrc):
 			if done[si2]: continue
-			if np.any(range_hit[d.rangesets[d.offsets[si2,0]:d.offsets[si2,-1]]]):
-				group.append(si2)
+			overlap = False
+			for off in d.offsets[si2]:
+				if np.any(range_hit[d.rangesets[off[0]:off[1]]]): overlap = True
+			if overlap: group.append(si2)
 		for s in group: done[s] = True
 		groups.append(group)
 	return groups
@@ -201,9 +208,10 @@ def estimate_SN(d, fparams, src_groups):
 				if len(g) <= i: continue
 				si = g[i]
 				my_sn = 0
-				for ri in d.rangesets[d.offsets[si,0]:d.offsets[si,-1]]:
-					r = d.ranges[ri]
-					my_sn += np.sum(ntod[r[0]:r[1]]*mtod[r[0]:r[1]])
+				for off in d.offsets[si]:
+					for ri in d.rangesets[off[0]:off[1]]:
+						r = d.ranges[ri]
+						my_sn += np.sum(ntod[r[0]:r[1]]*mtod[r[0]:r[1]])
 				SN[si,c] = my_sn
 	return SN
 
@@ -371,7 +379,9 @@ def make_maps(tod, data, pos, ncomp, radius, resolution):
 		ptsrc_data.nmat_basis(wtod, data, white=True)
 		ptsrc_data.pmat_thumbs(-1, wtod, div[c], data.point, data.phase, boxes)
 	div = np.rollaxis(div,1)
-	bin = rhs/div[:,0] # Fixme: only works for ncomp == 1
+	mask = div[:,0] != 0
+	bin = rhs.copy()
+	bin[mask] = rhs[mask]/div[:,0][mask] # Fixme: only works for ncomp == 1
 	return bin, rhs, div
 def stack_maps(rhs, div, amps=None):
 	if amps is None: amps = np.zeros(len(rhs))+1
@@ -421,20 +431,27 @@ for ind in range(comm.rank, len(filelist), comm.size):
 	# towards the exposed point sources, and so will only be approximate.
 	mean_point = np.mean(d.point,0)
 
-	pos_fid, amp_fid = my_srcs[:,posi]*d2r, my_srcs[:,ampi[:ncomp]]
-	#beam_fid = np.hstack([my_srcs[:,beami[:2]]*b2r, my_srcs[:,beami[2:]]*d2r])
+	pos_fid, amp_fid = my_srcs[:,posi], my_srcs[:,ampi[:ncomp]]
+	#beam_fid = np.hstack([my_srcs[:,beami[:2]], my_srcs[:,beami[2:]]])
 	beam_fid = np.hstack([np.full((nsrc,2),beam_global),np.zeros((nsrc,1))])
 	params = Parameters(pos_fid, beam_fid, amp_fid)
 	params.groups = independent_groups(d)
 	# Decide which sources are strong enough to include in the full sampling
 	SN = estimate_SN(d, params.flat, params.groups)**0.5
 	params.strong = mask=SN >= args.strong
-	L.info("SN: %.1f, strong: %s" % (np.sum(SN**2)**0.5,",".join(["%.1f"%sn for sn in SN[params.strong]])))
+	desc = "SN: %.1f :" % np.sum(SN**2)**0.5
+	order= np.argsort(np.sum(SN**2,1))[::-1]
+	for i in order:
+		desc += " %s%d:%.2f" % ("s" if np.any(params.strong[i]) else "", i, np.sum(SN[i]**2)**0.5)
+	L.info(desc)
 	for i in np.where(np.any(params.strong,1))[0]:
-		L.info("src %3d: SN %3.1f amp %5.0f pos %7.2f %7.2f" % ((i, np.sum(SN[i]**2)**0.5, params.amp_fid[i,0]) + tuple(params.pos_fid[i]/d2r)))
+		L.debug("src %3d: SN %3.1f amp %5.0f pos %7.2f %7.2f" % ((i, np.sum(SN[i]**2)**0.5, params.amp_fid[i,0]) + tuple(params.pos_fid[i]/d2r)))
 
 	dpos  = np.array([0.1,0.1])*m2r
 	dbeam = np.array([0.1,0.1,20*d2r])
+	# Disable beam sampling
+	if not args.sample_beam:
+		dbeam *= 0
 	def prior(p, adist_strong):
 		if np.sum(p.pos_rel**2)**0.5 > pos_rel_max: return -np.inf
 		if np.any(p.beam_rel[:2] < beam_rel_min): return -np.inf

@@ -22,6 +22,7 @@ parser.add_argument("--nsamp", type=int, default=500)
 parser.add_argument("--burnin",type=int, default=100)
 parser.add_argument("--thin", type=int, default=3)
 parser.add_argument("--nbasis", type=int, default=-30)
+parser.add_argument("--nadapt", type=int, default=10)
 parser.add_argument("--strong", type=float, default=3.0)
 parser.add_argument("-s", "--seed", type=int, default=0)
 parser.add_argument("-c", action="store_true")
@@ -29,10 +30,12 @@ parser.add_argument("-g", "--grid", type=int, default=0)
 parser.add_argument("--minrange", type=int, default=0x40)
 parser.add_argument("--allow-clusters", action="store_true")
 parser.add_argument("--sample-beam", action="store_true")
+parser.add_argument("--no-adaptive", action="store_true")
 #parser.add_argument("--nchain", type=int, default=3)
 parser.add_argument("-R", "--radius", type=float, default=5.0)
 parser.add_argument("-r", "--resolution", type=float, default=0.25)
 parser.add_argument("-m", "--map", action="store_true")
+parser.add_argument("-F", "--fitmap", action="store_true")
 args = parser.parse_args()
 
 if args.seed: np.random.seed(args.seed)
@@ -118,7 +121,10 @@ class AmpDist:
 def validate_srcscan(d, srcs):
 	"""Generate a noise model for d and reduce it to a relevant set of sources and detectors.
 	Returns the new d and source indices."""
-	d.Q = ptsrc_data.build_noise_basis(d,args.nbasis)
+	if not args.no_adaptive:
+		d.Q = ptsrc_data.build_noise_basis_adaptive(d,nmax=args.nadapt)
+	else:
+		d.Q = ptsrc_data.build_noise_basis(d,args.nbasis)
 	# Override noise model - the one from the files
 	# doesn't seem to be reliable enough.
 	vars, nvars = ptsrc_data.measure_basis(d.tod, d)
@@ -151,7 +157,10 @@ def validate_srcscan(d, srcs):
 	hit_dets = np.where(detmask)[0]
 	# Reduce to relevant sources and dets, and update noise model
 	d = d[hit_srcs,hit_dets]
-	d.Q = ptsrc_data.build_noise_basis(d,args.nbasis)
+	if not args.no_adaptive:
+		d.Q = ptsrc_data.build_noise_basis_adaptive(d,nmax=args.nadapt)
+	else:
+		d.Q = ptsrc_data.build_noise_basis(d,args.nbasis)
 	d.tod = d.tod.astype(dtype)
 	return d, hit_srcs
 
@@ -359,6 +368,9 @@ class HybridSampler:
 
 def make_maps(tod, data, pos, ncomp, radius, resolution):
 	tod = tod.copy()
+	pos = np.array(pos)
+	# Handle angle wrapping
+	pos = utils.rewind(pos, data.point[0])
 	nsrc= len(pos)
 	dbox= np.array([[-1,-1],[1,1]])*radius
 	shape, wcs = enmap.geometry(pos=dbox, res=resolution)
@@ -509,6 +521,10 @@ for ind in range(comm.rank, len(filelist), comm.size):
 			pos_rel[i] = p.pos_rel
 			beam_rel[i] = p.beam_rel
 			amp[i] = p.amp_fid + p.amp_rel
+		if args.fitmap:
+			tod = subtract_model(d.tod, d, p.flat)
+			dump_maps(tdir + "/fitmap%05d.hdf" % i, tod, d, pos_fid, amp_fid)
+
 	with h5py.File(tdir + "/params.hdf", "w") as hfile:
 		hfile["pos_rel"] = pos_rel
 		hfile["beam_rel"] = beam_rel

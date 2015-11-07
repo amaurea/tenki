@@ -89,7 +89,9 @@ def onlyfinite(a): return a[np.isfinite(a)]
 myinds = np.arange(len(filelist))[myid::nproc]
 for ind in myinds:
 	ofile = args.odir + "/%s.hdf" % filelist[ind]
-	if args.c and os.path.isfile(ofile): continue
+	if args.c and os.path.isfile(ofile):
+		L.info("Already done %s" % filelist[ind])
+		continue
 	L.info("Processing %s" % filelist[ind])
 	try:
 		d = scan.read_scan(filelist[ind])
@@ -114,16 +116,10 @@ for ind in myinds:
 	L.debug("Pmats")
 	d.noise = bunch.Bunch(ivar = ivar)
 	Psrc  = pmat.PmatPtsrc(d, params.T)
-	Pcut  = pmat.PmatCut(d)
-	# Set cut samples to zero
-	junk  = np.zeros(Pcut.njunk,dtype=dtype)
-	Pcut.forward(tod, junk)
-
-	# Get rough S/N
 
 	# Extract point-source relevant TOD properties
 	L.debug("Extract data")
-	srcdata = Psrc.extract(tod)
+	srcdata = Psrc.extract(tod, cut=d.cut)
 
 	#srcdata.ivars = d.noise.iD[-1]
 	srcdata.ivars = ivar

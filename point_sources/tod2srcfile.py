@@ -16,7 +16,8 @@ parser.add_argument("odir")
 parser.add_argument("--ncomp",      type=int,   default=3)
 parser.add_argument("--ndet",       type=int,   default=0)
 parser.add_argument("--minamp",     type=float, default=100)
-parser.add_argument("-c", action="store_true")
+parser.add_argument("-c",           action="store_true")
+parser.add_argument("--oldformat",  action="store_true")
 args = parser.parse_args()
 
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
@@ -119,7 +120,7 @@ for ind in myinds:
 
 	# Extract point-source relevant TOD properties
 	L.debug("Extract data")
-	srcdata = Psrc.extract(tod, cut=d.cut)
+	srcdata = Psrc.extract(tod, cut=d.cut, raw=not args.oldformat)
 
 	#srcdata.ivars = d.noise.iD[-1]
 	srcdata.ivars = ivar

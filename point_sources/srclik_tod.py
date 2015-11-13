@@ -6,7 +6,7 @@ constrain more than they overfit. The weak ones are the rest. I then sample as b
 offset, beam and strong with the weak fixed at fiducial values, and then sample
 strong and weak based on offset and beam."""
 
-import numpy as np, argparse, warnings, mpi4py.MPI, copy, h5py, os
+import numpy as np, argparse, warnings, mpi4py.MPI, copy, h5py, os, bunch
 from enlib import utils, ptsrc_data, log, bench, cg, array_ops, enmap, errors, pointsrcs
 from enlib.degrees_of_freedom import DOF, Arg
 from scipy.special import erf
@@ -15,6 +15,7 @@ warnings.filterwarnings("ignore")
 parser = argparse.ArgumentParser()
 parser.add_argument("filelist")
 parser.add_argument("srcs")
+parser.add_argument("beam")
 parser.add_argument("odir")
 parser.add_argument("-v", "--verbosity", type=int, default=1)
 parser.add_argument("--ncomp", type=int, default=1)
@@ -36,6 +37,7 @@ parser.add_argument("-R", "--radius", type=float, default=5.0)
 parser.add_argument("-r", "--resolution", type=float, default=0.25)
 parser.add_argument("-m", "--map", action="store_true")
 parser.add_argument("-F", "--fitmap", action="store_true")
+parser.add_argument("--oldformat", action="store_true")
 parser.add_argument("--fitmaps", action="store_true")
 args = parser.parse_args()
 
@@ -48,8 +50,23 @@ d2r   = np.pi/180
 m2r   = np.pi/180/60
 b2r   = np.pi/180/60/(8*np.log(2))**0.5
 
-# prior on beam
-beam_global = 1.4*b2r
+try:
+	# Beam in format [r,val], where r is equispaced starting at 0, in units of arcmin
+	# and val has a max value of 1
+	b = np.loadtxt(args.beam)
+	beam = bunch.Bunch(profile=b[:,1], rmax=b[1,0]*len(b)*utils.arcmin)
+except IOError:
+	# Assume beam is gaussian
+	b = float(args.beam)*utils.arcmin*utils.fwhm
+	r    = np.linspace(0,10,1000)*b
+	beam = bunch.Bunch(profile=np.exp(-0.5*(r/b)**2), rmax=10*b)
+	beam_global = b
+if not args.oldformat:
+	beam_global = 1.0
+	print "Using old model"
+else:
+	print "Using new model"
+# prior on beam deformations
 beam_rel_min = 0.5
 beam_rel_max = 2.0
 beam_ratio_max = 3.0
@@ -68,7 +85,12 @@ nsrc = len(srcs)
 
 utils.mkdir(args.odir)
 
-# Utility functions
+if args.oldformat:
+	def apply_model(tod, pflat, d, dir=1):
+		ptsrc_data.pmat_model(tod, pflat, d, dir=dir)
+else:
+	def apply_model(tod, pflat, d, dir=1):
+		ptsrc_data.pmat_beam_foff(tod, pflat, beam, d, dir=dir)
 
 class Parameters:
 	def __init__(self, pos_fid, beam_fid, amp_fid, pos_rel=None, beam_rel=None, amp_rel=None, strong=None):
@@ -83,13 +105,18 @@ class Parameters:
 		self.nsrc, self.ncomp = self.amp_fid.shape
 	@property
 	def flat(self):
-		params = np.zeros([self.nsrc,2+self.ncomp+3],dtype=dtype)
-		params[:,:2] = self.pos_fid + self.pos_rel
+		if args.oldformat:
+			params = np.zeros([self.nsrc,8],dtype=dtype)
+			params[:,:2] = self.pos_fid + self.pos_rel
+		else:
+			params = np.zeros([self.nsrc,10],dtype=dtype)
+			params[:,:2] = self.pos_fid
+			params[:,8:] = self.pos_rel
 		params[:,2:2+self.ncomp] = self.amp_fid + self.amp_rel
 		for i in range(self.nsrc):
 			bf = utils.compress_beam(self.beam_fid[i,:2],self.beam_fid[i,2])
 			br = utils.compress_beam(self.beam_rel[:2], self.beam_rel[2])
-			params[:,2+self.ncomp:] = utils.combine_beams([bf,br])
+			params[:,5:8] = utils.combine_beams([bf,br])
 		return params
 	@property
 	def area(self):
@@ -210,7 +237,7 @@ def estimate_SN(d, fparams, src_groups):
 				flat[g[i],c+2] = fparams[g[i],c+2]
 			# Do all the compatible sources in parallel
 			mtod = d.tod.copy()
-			ptsrc_data.pmat_model(mtod, flat, d)
+			apply_model(mtod, flat, d)
 			ntod = mtod.copy()
 			ptsrc_data.nmat_basis(ntod, d)
 			# And then extract S/N for each of them
@@ -232,16 +259,16 @@ def calc_amp_dist(tod, d, params, mask=None):
 	tod = tod.astype(dtype, copy=True)
 	pflat = params.flat.copy()
 	ptsrc_data.nmat_basis(tod, d)
-	ptsrc_data.pmat_model(tod, pflat, d, dir=-1)
+	apply_model(tod, pflat, d, dir=-1)
 	rhs    = pflat[:,2:-3].copy()
 	dof    = DOF(Arg(mask=mask))
 	# Set up functional form of icov
 	def icov_fun(x):
 		p = pflat.copy()
 		p[:,2:-3], = dof.unzip(x)
-		ptsrc_data.pmat_model(tod, p, d, dir=+1)
+		apply_model(tod, p, d, dir=+1)
 		ptsrc_data.nmat_basis(tod, d)
-		ptsrc_data.pmat_model(tod, p, d, dir=-1)
+		apply_model(tod, p, d, dir=-1)
 		return dof.zip(p[:,2:-3])
 	# Build A matrix in parallel. When using more than
 	# one component, the ndof will be twice the number of sources, so
@@ -263,7 +290,7 @@ def calc_amp_dist(tod, d, params, mask=None):
 def subtract_model(tod, d, fparams):
 	mtod = tod.astype(dtype,copy=True)
 	p = fparams.copy()
-	ptsrc_data.pmat_model(mtod, p, d)
+	apply_model(mtod, p, d)
 	return tod-mtod
 
 def calc_posterior(tod, d, fparams):
@@ -371,7 +398,7 @@ def make_maps(tod, data, pos, ncomp, radius, resolution):
 	tod = tod.copy()
 	pos = np.array(pos)
 	# Handle angle wrapping
-	pos = utils.rewind(pos, data.point[0])
+	pos = utils.rewind(pos, data.point[0,-2:])
 	nsrc= len(pos)
 	dbox= np.array([[-1,-1],[1,1]])*radius
 	shape, wcs = enmap.geometry(pos=dbox, res=resolution)
@@ -383,14 +410,14 @@ def make_maps(tod, data, pos, ncomp, radius, resolution):
 	div  = enmap.zeros((ncomp,nsrc,ncomp)+shape, wcs, dtype=dtype)
 	# Build rhs
 	ptsrc_data.nmat_basis(tod, data)
-	ptsrc_data.pmat_thumbs(-1, tod, rhs, data.point, data.phase, boxes)
+	ptsrc_data.pmat_thumbs(-1, tod, rhs, data.point[:,-2:], data.phase, boxes)
 	# Build div
 	for c in range(ncomp):
 		idiv = div[0].copy(); idiv[:,c] = 1
 		wtod = data.tod.astype(dtype,copy=True); wtod[...] = 0
-		ptsrc_data.pmat_thumbs( 1, wtod, idiv, data.point, data.phase, boxes)
+		ptsrc_data.pmat_thumbs( 1, wtod, idiv, data.point[:,-2:], data.phase, boxes)
 		ptsrc_data.nmat_basis(wtod, data, white=True)
-		ptsrc_data.pmat_thumbs(-1, wtod, div[c], data.point, data.phase, boxes)
+		ptsrc_data.pmat_thumbs(-1, wtod, div[c], data.point[:,-2:], data.phase, boxes)
 	div = np.rollaxis(div,1)
 	mask = div[:,0] != 0
 	bin = rhs.copy()
@@ -432,6 +459,9 @@ for ind in range(comm.rank, len(filelist), comm.size):
 		continue
 
 	d = ptsrc_data.read_srcscan(fname)
+	if not args.oldformat:
+		assert d.ys is not None, "Source scan in old format, but expected new"
+
 	try:
 		d, hit_srcs = validate_srcscan(d, srcs)
 	except errors.DataError as e:

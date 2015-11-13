@@ -63,9 +63,9 @@ except IOError:
 	beam_global = b
 if not args.oldformat:
 	beam_global = 1.0
-	print "Using old model"
-else:
 	print "Using new model"
+else:
+	print "Using old model"
 # prior on beam deformations
 beam_rel_min = 0.5
 beam_rel_max = 2.0
@@ -226,12 +226,12 @@ def groups_to_dof(groups, dof):
 
 def estimate_SN(d, fparams, src_groups):
 	gmax = max([len(g) for g in src_groups])
-	nsrc, ncomp = fparams[:,2:-3].shape
+	nsrc, ncomp = fparams[:,2:5].shape
 	SN = np.zeros([nsrc,ncomp])
 	for i in range(gmax):
 		for c in range(ncomp):
 			flat = fparams.copy()
-			flat[:,2:-3] = 0
+			flat[:,2:5] = 0
 			for g in src_groups:
 				if len(g) <= i: continue
 				flat[g[i],c+2] = fparams[g[i],c+2]
@@ -260,16 +260,16 @@ def calc_amp_dist(tod, d, params, mask=None):
 	pflat = params.flat.copy()
 	ptsrc_data.nmat_basis(tod, d)
 	apply_model(tod, pflat, d, dir=-1)
-	rhs    = pflat[:,2:-3].copy()
+	rhs    = pflat[:,2:5].copy()
 	dof    = DOF(Arg(mask=mask))
 	# Set up functional form of icov
 	def icov_fun(x):
 		p = pflat.copy()
-		p[:,2:-3], = dof.unzip(x)
+		p[:,2:5], = dof.unzip(x)
 		apply_model(tod, p, d, dir=+1)
 		ptsrc_data.nmat_basis(tod, d)
 		apply_model(tod, p, d, dir=-1)
-		return dof.zip(p[:,2:-3])
+		return dof.zip(p[:,2:5])
 	# Build A matrix in parallel. When using more than
 	# one component, the ndof will be twice the number of sources, so
 	# groups must be modified
@@ -302,7 +302,7 @@ def calc_posterior(tod, d, fparams):
 def calc_marginal_amps_strong(d, p):
 	# The marginal probability -2 log P(pos|beam,aw) = (d-Pw aw)'N"(d-Pw aw) - as' As" as
 	# where as = (Ps'N"Ps)"Ps'N"(d-Pw aw). First compute as and As.
-	p_weak = p.flat; p_weak[:,2:-3][p.strong] = 0
+	p_weak = p.flat; p_weak[:,2:5][p.strong] = 0
 	tod_rest = subtract_model(d.tod, d, p_weak)
 	# calc_amp_dist only uses strong dof by default
 	adist_strong = calc_amp_dist(tod_rest, d, p)

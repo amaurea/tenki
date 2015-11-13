@@ -36,6 +36,7 @@ parser.add_argument("-R", "--radius", type=float, default=5.0)
 parser.add_argument("-r", "--resolution", type=float, default=0.25)
 parser.add_argument("-m", "--map", action="store_true")
 parser.add_argument("-F", "--fitmap", action="store_true")
+parser.add_argument("--fitmaps", action="store_true")
 args = parser.parse_args()
 
 if args.seed: np.random.seed(args.seed)
@@ -407,7 +408,7 @@ def dump_maps(ofile, tod, data, pos, amp, rad=args.radius*m2r, res=args.resoluti
 	dstack = stack_maps(drhs, ddiv, amp[:,0])
 	dmaps = np.concatenate((dmaps,[dstack]),0)
 	dmaps = enmap.samewcs(dmaps, ddiv)
-	enmap.write_map(ofile, dmaps)
+	enmap.write_map(ofile, dmaps[::-1])
 	#with h5py.File(ofile, "w") as hfile:
 	#	hfile["data"] = dmaps
 	#	hfile["rhs"]  = drhs
@@ -521,9 +522,12 @@ for ind in range(comm.rank, len(filelist), comm.size):
 			pos_rel[i] = p.pos_rel
 			beam_rel[i] = p.beam_rel
 			amp[i] = p.amp_fid + p.amp_rel
-		if args.fitmap:
+		if args.fitmaps:
 			tod = subtract_model(d.tod, d, p.flat)
 			dump_maps(tdir + "/fitmap%05d.hdf" % i, tod, d, pos_fid, amp_fid)
+	if args.fitmap:
+		tod = subtract_model(d.tod, d, p.flat)
+		dump_maps(tdir + "/fitmap.hdf", tod, d, pos_fid, amp_fid)
 
 	with h5py.File(tdir + "/params.hdf", "w") as hfile:
 		hfile["pos_rel"] = pos_rel

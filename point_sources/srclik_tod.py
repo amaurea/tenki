@@ -51,10 +51,10 @@ m2r   = np.pi/180/60
 b2r   = np.pi/180/60/(8*np.log(2))**0.5
 
 try:
-	# Beam in format [r,val], where r is equispaced starting at 0, in units of arcmin
+	# Beam in format [r,val], where r is equispaced starting at 0, in units of degrees
 	# and val has a max value of 1
 	b = np.loadtxt(args.beam)
-	beam = bunch.Bunch(profile=b[:,1], rmax=b[1,0]*len(b)*utils.arcmin)
+	beam = bunch.Bunch(profile=b[:,1], rmax=b[1,0]*len(b)*utils.degree)
 except IOError:
 	# Assume beam is gaussian
 	b = float(args.beam)*utils.arcmin*utils.fwhm
@@ -88,9 +88,13 @@ utils.mkdir(args.odir)
 if args.oldformat:
 	def apply_model(tod, pflat, d, dir=1):
 		ptsrc_data.pmat_model(tod, pflat, d, dir=dir)
+	def pmat_thumbs(dir, tod, rhs, boxes, d):
+		ptsrc_data.pmat_thumbs(dir, tod, rhs, d.point, d.phase, boxes)
 else:
 	def apply_model(tod, pflat, d, dir=1):
 		ptsrc_data.pmat_beam_foff(tod, pflat, beam, d, dir=dir)
+	def pmat_thumbs(dir, tod, rhs, boxes, d):
+		ptsrc_data.pmat_thumbs_hor(dir, tod, rhs, d.point, d.phase, boxes, d.rbox, d.nbox, d.ys)
 
 class Parameters:
 	def __init__(self, pos_fid, beam_fid, amp_fid, pos_rel=None, beam_rel=None, amp_rel=None, strong=None):
@@ -398,7 +402,7 @@ def make_maps(tod, data, pos, ncomp, radius, resolution):
 	tod = tod.copy()
 	pos = np.array(pos)
 	# Handle angle wrapping
-	pos = utils.rewind(pos, data.point[0,-2:])
+	pos = utils.rewind(pos, data.ref)
 	nsrc= len(pos)
 	dbox= np.array([[-1,-1],[1,1]])*radius
 	shape, wcs = enmap.geometry(pos=dbox, res=resolution)
@@ -410,14 +414,14 @@ def make_maps(tod, data, pos, ncomp, radius, resolution):
 	div  = enmap.zeros((ncomp,nsrc,ncomp)+shape, wcs, dtype=dtype)
 	# Build rhs
 	ptsrc_data.nmat_basis(tod, data)
-	ptsrc_data.pmat_thumbs(-1, tod, rhs, data.point[:,-2:], data.phase, boxes)
+	pmat_thumbs(-1, tod, rhs, boxes, data)
 	# Build div
 	for c in range(ncomp):
 		idiv = div[0].copy(); idiv[:,c] = 1
 		wtod = data.tod.astype(dtype,copy=True); wtod[...] = 0
-		ptsrc_data.pmat_thumbs( 1, wtod, idiv, data.point[:,-2:], data.phase, boxes)
+		pmat_thumbs( 1, wtod, idiv, boxes, data)
 		ptsrc_data.nmat_basis(wtod, data, white=True)
-		ptsrc_data.pmat_thumbs(-1, wtod, div[c], data.point[:,-2:], data.phase, boxes)
+		pmat_thumbs(-1, wtod, div[c], boxes, data)
 	div = np.rollaxis(div,1)
 	mask = div[:,0] != 0
 	bin = rhs.copy()
@@ -473,6 +477,7 @@ for ind in range(comm.rank, len(filelist), comm.size):
 	# Extract the mean dec,ra of this observation. This will be weighted
 	# towards the exposed point sources, and so will only be approximate.
 	mean_point = np.mean(d.point,0)
+	d.ref = my_srcs[0,:2]
 
 	pos_fid, amp_fid = my_srcs[:,posi], my_srcs[:,ampi[:ncomp]]
 	#beam_fid = np.hstack([my_srcs[:,beami[:2]], my_srcs[:,beami[2:]]])

@@ -1,6 +1,7 @@
 import numpy as np, time, h5py, copy, argparse, os, sys, pipes, shutil, bunch, re
 from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, errors, mpi
 from enlib import log, bench, dmap2 as dmap, coordinates, scan as enscan, rangelist, scanutils
+from enlib import pointsrcs
 from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import actscan, nmat_measure, filedb, todinfo
@@ -25,6 +26,7 @@ config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,mul=1,sky=yes", "Default parameters for map subtraction filter")
+config.default("filter_src_default",   "use=no,name=src,value=0,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
@@ -316,6 +318,16 @@ for param in filter_params:
 				assert sparam["sys"] == param["sys"]
 				assert signal.area.shape[-2:] == m.shape[-2:]
 				signal.post.append(mapmaking.PostAddMap(m, mul=mul))
+	elif param["name"] == "src":
+		if param["value"] == 0: continue
+		if "params" not in param: params = myscans[0].pointsrcs
+		else: params = pointsrcs.read(param["params"])
+		params = pointsrcs.src2param(params)
+		params = params.astype(dtype)
+		print "FIXME: how to handle per-source beams? Forcing to relative for now"
+		params[:,5:7] = 1
+		params[:,7]   = 0
+		filter = mapmaking.FilterAddSrcs(myscans, params, eqsys=param["sys"], mul=-float(param["mul"]))
 	else:
 		raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 	filters.append(filter)

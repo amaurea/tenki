@@ -6,7 +6,7 @@ constrain more than they overfit. The weak ones are the rest. I then sample as b
 offset, beam and strong with the weak fixed at fiducial values, and then sample
 strong and weak based on offset and beam."""
 
-import numpy as np, argparse, warnings, mpi4py.MPI, copy, h5py, os, bunch
+import numpy as np, argparse, warnings, mpi4py.MPI, copy, h5py, os, bunch, sys
 from enlib import utils, ptsrc_data, log, bench, cg, array_ops, enmap, errors, pointsrcs
 from enlib.degrees_of_freedom import DOF, Arg
 from scipy.special import erf
@@ -18,7 +18,7 @@ parser.add_argument("srcs")
 parser.add_argument("beam")
 parser.add_argument("odir")
 parser.add_argument("-v", "--verbosity", type=int, default=1)
-parser.add_argument("--ncomp", type=int, default=1)
+parser.add_argument("--ncomp", type=int, default=3)
 parser.add_argument("--nsamp", type=int, default=500)
 parser.add_argument("--burnin",type=int, default=100)
 parser.add_argument("--thin", type=int, default=3)
@@ -240,7 +240,7 @@ def estimate_SN(d, fparams, src_groups):
 				if len(g) <= i: continue
 				flat[g[i],c+2] = fparams[g[i],c+2]
 			# Do all the compatible sources in parallel
-			mtod = d.tod.copy()
+			mtod = d.tod*0
 			apply_model(mtod, flat, d)
 			ntod = mtod.copy()
 			ptsrc_data.nmat_basis(ntod, d)
@@ -270,6 +270,7 @@ def calc_amp_dist(tod, d, params, mask=None):
 	def icov_fun(x):
 		p = pflat.copy()
 		p[:,2:5], = dof.unzip(x)
+		tod[:] = 0
 		apply_model(tod, p, d, dir=+1)
 		ptsrc_data.nmat_basis(tod, d)
 		apply_model(tod, p, d, dir=-1)
@@ -292,7 +293,7 @@ def calc_amp_dist(tod, d, params, mask=None):
 	return AmpDist(icov, dof.zip(rhs), dof)
 
 def subtract_model(tod, d, fparams):
-	mtod = tod.astype(dtype,copy=True)
+	mtod = tod*0
 	p = fparams.copy()
 	apply_model(mtod, p, d)
 	return tod-mtod

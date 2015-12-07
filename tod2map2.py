@@ -25,8 +25,10 @@ config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{ra
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,mul=1,sky=yes", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=0,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
+
+config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
@@ -302,6 +304,7 @@ for param in filter_params:
 	elif param["name"] == "sub":
 		if "map" not in param: raise ValueError("-F sub needs a map file to subtract. e.g. -F sub:2,map=foo.fits")
 		mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
+		tmul = float(param["tmul"])
 		if mode == 0: continue
 		if param["type"] == "dmap":
 			# Warning: This only works if a dmap has already been initialized, and
@@ -309,10 +312,10 @@ for param in filter_params:
 			# of dmaps - they are so closely tied to a set of scans that they only work
 			# in the coordinate system where the scans are reasonably local.
 			m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
-			filter = mapmaking.FilterAddDmap(myscans, mysubs, m, eqsys=sys, mul=-mul)
+			filter = mapmaking.FilterAddDmap(myscans, mysubs, m, eqsys=sys, mul=-mul, tmul=tmul)
 		else:
 			m = enmap.read_map(fname).astype(dtype)
-			filter = mapmaking.FilterAddMap(myscans, m, eqsys=sys, mul=-mul)
+			filter = mapmaking.FilterAddMap(myscans, m, eqsys=sys, mul=-mul, tmul=tmul)
 		if mode >= 2:
 			for sparam, signal in matching_signals(param, signal_params, signals):
 				assert sparam["sys"] == param["sys"]
@@ -332,11 +335,25 @@ for param in filter_params:
 		raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 	filters.append(filter)
 
+# Initialize weights. Done in a hacky manner for now. This and the above needs
+# to be reworked.
+weights = []
+if config.get("tod_window"):
+	weights.append(mapmaking.FilterWindow(config.get("tod_window")))
+
 L.info("Initializing equation system")
-eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, dtype=dtype, comm=comm)
+eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, weights=weights, dtype=dtype, comm=comm)
 
 L.info("Initializing RHS")
 eqsys.calc_b()
+
+#for si, scan in enumerate(myscans):
+#	tod = np.zeros([scan.ndet, scan.nsamp], dtype)
+#	imaps  = eqsys.dof.unzip(eqsys.b)
+#	iwork = [signal.prepare(map) for signal, map in zip(eqsys.signals, imaps)]
+#	for signal, work in zip(eqsys.signals, iwork)[::-1]:
+#		signal.forward(scan, tod, work)
+#	np.savetxt("test_enki1/tod_Pb%d.txt" % si, tod[0])
 
 L.info("Initializing preconditioners")
 for param, signal in zip(signal_params, signals):
@@ -344,9 +361,9 @@ for param, signal in zip(signal_params, signals):
 		signal.precon = mapmaking.PreconCut(signal, myscans)
 	elif param["type"] == "map":
 		if param["prec"] == "bin":
-			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans)
+			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights)
 		elif param["prec"] == "jacobi":
-			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans, noise=False)
+			signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights, noise=False)
 		else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
 		if "nohor" in param and param["nohor"] != "no":
 			prior_weight = signal.precon.div[0,0]
@@ -355,9 +372,9 @@ for param, signal in zip(signal_params, signals):
 			signal.prior = mapmaking.PriorMapNohor(prior_weight)
 	elif param["type"] == "dmap":
 		if param["prec"] == "bin":
-			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans)
+			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights)
 		elif param["prec"] == "jacobi":
-			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, noise=False)
+			signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights, noise=False)
 		else: raise ValueError("Unknown dmap preconditioner '%s'" % param["prec"])
 		if "nohor" in param and param["nohor"] != "no":
 			prior_weight  = signal.precon.div[0,0]
@@ -365,7 +382,7 @@ for param, signal in zip(signal_params, signals):
 			prior_weight *= float(param["nohor"])
 			signal.prior = mapmaking.PriorDmapNohor(prior_weight)
 	elif param["type"] == "scan":
-		signal.precon = mapmaking.PreconPhaseBinned(signal, signal_cut, myscans)
+		signal.precon = mapmaking.PreconPhaseBinned(signal, signal_cut, myscans, weights)
 	else:
 		raise ValueError("Unrecognized signal type '%s'" % param["type"])
 

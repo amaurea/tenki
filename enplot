@@ -11,7 +11,7 @@ parser.add_argument("--min", type=str)
 parser.add_argument("--max", type=str)
 parser.add_argument("-q", "--quantile", type=float, default=0.01)
 parser.add_argument("-v", dest="verbosity", action="count")
-parser.add_argument("-s", "-u", "--scale", "--upgrade", type=int, default=1)
+parser.add_argument("-s", "-u", "--scale", "--upgrade", type=str, default="1")
 parser.add_argument("--verbosity", dest="verbosity", type=int)
 parser.add_argument("--method", default="fast")
 parser.add_argument("--slice", type=str)
@@ -86,8 +86,9 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 		m = eval(args.op, {"m":m},np.__dict__)
 
 	# Scale if requested
-	if args.scale > 1:
-		m = enmap.upgrade(m, args.scale)
+	scale = [int(w) for w in args.scale.split(",")]
+	if np.any(np.array(scale)>1):
+		m = enmap.upgrade(m, scale)
 
 	# Flatten pre-dimensions
 	mf = m.reshape((-1,)+m.shape[-2:])

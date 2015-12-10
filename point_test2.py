@@ -12,6 +12,7 @@ parser.add_argument("--wt",  type=float, default=15)
 parser.add_argument("--waz", type=float, default=20)
 parser.add_argument("--wel", type=float, default=2)
 parser.add_argument("--ntest", type=int, default=1000)
+parser.add_argument("--interpolator", type=str, default="grad")
 args = parser.parse_args()
 
 # Hardcode an arbitrary site
@@ -35,7 +36,7 @@ naz = int(np.rint((args.az2-args.az1)/args.daz))+1
 def hor2cel(hor):
 	shape = hor.shape[1:]
 	hor = hor.reshape(hor.shape[0],-1)
-	tmp = coordinates.transform("hor", "cel", hor[1:], time=hor[0], site=site, pol=True)
+	tmp = coordinates.transform("hor", "cel", hor[1:], time=hor[0]+t_mid, site=site, pol=True)
 	res = np.zeros((4,)+tmp.shape[1:])
 	res[0] = utils.rewind(tmp[0], tmp[0,0])
 	res[1] = tmp[1]
@@ -60,6 +61,20 @@ def eval_ipol(ipol, hor):
 		rbox.T, nbox, ys.T)
 	return np.concatenate([pix[0].T,phase[0,:,1:].T],0)
 
+# Which interpolator to use. The one we actually support in
+# fortran is grad. But as this program shows, grad is much
+# worse than bilinear. With a grid max size of 1e5, grad
+# barely reaches 1" accuracy here, taking 1-2 seconds.
+# With the same settings, bilinear reaches that accuracy in
+# about 0.05 seconds, and has a limiting accuracy of about
+# 0.01". Going to 1e6 extends this to about 0.002" for bilinear
+# under normal circumstances, while grad just about reaches 0.1".
+# So overall bilinear is 100 times better for similar settings.
+interpolator = {
+	"grad": interpol.ip_grad,
+	"bilinear": interpol.ip_linear,
+	}[args.interpolator]
+
 for iaz in range(naz):
 	for iel in range(nel):
 		az_mid = (args.az1 + args.daz*iaz)*utils.degree
@@ -67,24 +82,24 @@ for iaz in range(naz):
 		t_mid  = args.t
 		# Bounds
 		box = np.array([
-			[t_mid -args.wt/2./60/24,  t_mid +args.wt/2./60/24],
+			[-args.wt/2./60/24, args.wt/2./60/24],
 			[az_mid-utils.degree*args.waz/2, az_mid+utils.degree*args.waz/2],
 			[el_mid-utils.degree*args.wel/2, el_mid+utils.degree*args.wel/2]]).T
 		# Build an interpolator
 		wbox = utils.widen_box(box)
 		errlim = np.array([utils.arcsec, utils.arcsec, utils.arcmin, utils.arcmin])*acc
 		t1 = time.time()
-		ipol, obox, ok, err = interpol.build(hor2cel, interpol.ip_grad, wbox, errlim,
+		ipol, obox, ok, err = interpol.build(hor2cel, interpolator, wbox, errlim,
 			maxsize=max_size, maxtime=max_time, return_obox=True, return_status=True)
 		t2 = time.time()
 		# Choose some points to evaluate the model at
 		hor_test = box[0,:,None] + np.random.uniform(0,1,size=(3,args.ntest))*(box[1]-box[0])[:,None]
 		cel_exact = hor2cel(hor_test)
 		cel_interpol = ipol(hor_test)
-		cel_interpol2 = eval_ipol(ipol, hor_test)
+		#cel_interpol2 = eval_ipol(ipol, hor_test)
 
 		diff = np.max(np.abs(cel_interpol-cel_exact),1)
-		print (" %9.4f"*(2+4+1)) % (
+		print (" %9.4f"*(2+4+1) + " %d") % (
 				(az_mid/utils.degree,el_mid/utils.degree) +
-				tuple(diff/errlim) + (t2-t1,))
+				tuple(diff/errlim) + (t2-t1,ok))
 		sys.stdout.flush()

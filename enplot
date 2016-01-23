@@ -26,6 +26,7 @@ parser.add_argument("--mask-tol", type=float, default=1e-14)
 parser.add_argument("-g", "--grid", action="count", default=1)
 parser.add_argument("--grid-color", type=str, default="00000020")
 parser.add_argument("-t", "--ticks", type=str, default="1")
+parser.add_argument("--nstep", type=int, default=200)
 parser.add_argument("--subticks", type=float, default=0)
 parser.add_argument("--font", type=str, default="arial.ttf")
 parser.add_argument("--font-size", type=int, default=20)
@@ -148,7 +149,8 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 		if args.autocrop_each:
 			mdata = enmap.autocrop(mdata)
 		if args.mask is not None:
-			mdata[np.abs(mdata-args.mask)<=args.mask_tol] = np.nan
+			if not np.isfinite(args.mask): mdata[mdata==args.mask] = np.nan
+			else: mdata[np.abs(mdata-args.mask)<=args.mask_tol] = np.nan
 		with dprint("%s rescale" % istr):
 			mdata = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
 		with dprint("%s colorize" % istr):
@@ -160,12 +162,15 @@ for fi in range(comm.rank,len(args.ifiles),comm.size):
 				m_img = PIL.Image.fromarray(m_color).convert('RGBA')
 			if args.grid % 2:
 				with dprint("draw grid"):
-					ginfo = enlib.cgrid.calc_gridinfo(mdata.shape, mdata.wcs, steps=ticks)
+					ginfo = enlib.cgrid.calc_gridinfo(mdata.shape, mdata.wcs, steps=ticks, nstep=args.nstep)
 					m_img = enlib.cgrid.draw_grid(m_img, ginfo, color=args.grid_color)
 					linfo = []
 					for gi in [ginfo.lat, ginfo.lon]:
 						linfo += enlib.cgrid.calc_label_pos(gi, m_img.size)
-					m_img = enlib.cgrid.draw_labels(m_img, linfo, fname=args.font, fsize=args.font_size, color=args.font_color)
+					m_img, bounds = enlib.cgrid.draw_labels(m_img, linfo, fname=args.font, fsize=args.font_size, color=args.font_color, return_bounds=True)
+					padding = np.array([-bounds[0,::-1],bounds[1,::-1]-mdata.shape[-2:]],dtype=int)
+				with dprint("padded by %d %d %d %d" % tuple(padding.reshape(-1))):
+					pass
 			with dprint("%s write to %s" % (istr,oname)):
 				m_img.save(oname)
 		elif args.driver.lower() in ["matplotlib","mpl"]:

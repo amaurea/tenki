@@ -22,7 +22,7 @@ def read_map(fname):
 	m = nonan(enmap.read_map(fname))
 	return m.reshape(-1, m.shape[-2], m.shape[-1])
 def read_div(fname, padlen):
-	m = nonan(enmap.read_map(fname))
+	m = nonan(enmap.read_map(fname))*1.0
 	if m.ndim == 2:
 		res = enmap.zeros((padlen,padlen)+m.shape[-2:], m.wcs, m.dtype)
 		for i in range(padlen):

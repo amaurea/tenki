@@ -50,6 +50,7 @@ parser.add_argument("--res", type=float, default=0.5,   help="arcmin")
 parser.add_argument("--nsamp", type=int, default=100000)
 parser.add_argument("--ndet",  type=int, default=100)
 parser.add_argument("--ntime", type=int, default=3)
+parser.add_argument("-T", action="store_true")
 parser.add_argument("-i", "--interpolator", type=str, default="grad")
 parser.add_argument("-s", "--seed", type=int, default=0)
 args = parser.parse_args()
@@ -73,6 +74,7 @@ acc      = config.get("pmat_accuracy")
 max_size = config.get("pmat_interpol_max_size")
 max_time = config.get("pmat_interpol_max_time")
 dtype    = np.float64 if bits > 32 else np.float32
+ptype    = np.float64
 core     = pmat.get_core(dtype)
 np.random.seed(args.seed)
 
@@ -119,9 +121,10 @@ wobox    = utils.widen_box(obox)
 shape, wcs = enmap.geometry(pos=wobox[:,::-1], res=args.res*utils.arcmin, proj="cea")
 map = enmap.rand_gauss((ncomp,)+shape, wcs).astype(dtype)
 pbox = np.array([[0,0],shape],dtype=int)
+print "shape", shape
 # define a test tod
-bore = (ibox[None,0] + np.random.uniform(0,1,size=(nsamp,3))*(ibox[1]-ibox[0])[None,:]).astype(dtype)
-det_pos = np.zeros((ndet,3),dtype=dtype)
+bore = (ibox[None,0] + np.random.uniform(0,1,size=(nsamp,3))*(ibox[1]-ibox[0])[None,:]).astype(ptype)
+det_pos = np.zeros((ndet,3),dtype=ptype)
 det_comps = np.full((ndet,3),1,dtype=dtype)
 tod = np.zeros((ndet,nsamp),dtype=dtype)
 
@@ -146,22 +149,24 @@ err  = np.max(np.abs(pos_exact-pos_inter)/errlim[:,None])*acc
 err2 = np.max(np.std(pos_exact-pos_inter,1)/errlim)*acc
 # evaluate speed
 if args.interpolator == "ograd":
-	rbox, nbox, yvals = pmat.extract_interpol_params_old(ipol, dtype)
+	rbox, nbox, yvals = pmat.extract_interpol_params_old(ipol, ptype)
 else:
-	rbox, nbox, yvals = pmat.extract_interpol_params(ipol, dtype)
+	rbox, nbox, yvals = pmat.extract_interpol_params(ipol, ptype)
 t1 = time.time()
+
+dir = -1 if args.T else 1
 for i in range(args.ntime):
 	if args.interpolator == "grad":
-		core.pmat_nearest(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+		core.pmat_nearest_grad_precomp_internal(dir, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
 			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
 	elif args.interpolator == "igrad":
-		core.pmat_nearest_implicit(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+		core.pmat_nearest_grad_implicit(dir, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
 			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
 	elif args.interpolator == "ograd":
-		core.pmat_nearest_old(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+		core.pmat_nearest_grad_precomp(dir, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
 			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
 	elif args.interpolator == "bilin":
-		core.pmat_nearest_bilinear(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+		core.pmat_nearest_bilinear(dir, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
 			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
 t2 = time.time()
 tuse = (t2-t1)/args.ntime

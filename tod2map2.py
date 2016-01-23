@@ -19,8 +19,8 @@ config.default("map_format", "fits", "File format to use when writing maps. Can 
 # Default signal parameters
 config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin", "Default parameters for sky map")
 config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin", "Default parameters for ground map")
-config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=hor:Sun,prec=bin", "Default parameters for sun map")
-config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Sun,prec=bin", "Default parameters for moon map")
+config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=hor:Sun,prec=bin,lim_Sun_min_el=0", "Default parameters for sun map")
+config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Moon,prec=bin,lim_Moon_min_el=0", "Default parameters for moon map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
@@ -157,6 +157,9 @@ for sig in signal_params:
 ######## Filter parmeters ########
 filter_params = setup_params("filter", ["scan","sub"], {"use":"no"})
 
+# This should be factored out to enlib. For example
+# read_scans(filelist, inds, reader=actscan.ACTScan, db=db)
+# That way the function doesn't actually need to depen on act stuff.
 def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 	"""Given a set of ids/files and a set of indices into that list. Try
 	to read each of these scans. Returns a list of successfully read scans
@@ -173,6 +176,8 @@ def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 				else:
 					entry = db[filelist[ind]]
 				d = actscan.ACTScan(entry)
+				if d.ndet == 0 or d.nsamp == 0:
+					raise errors.DataMissing("Tod contains no valid data")
 			except errors.DataMissing as e:
 				if not quiet: L.debug("Skipped %s (%s)" % (str(filelist[ind]), e.message))
 				continue
@@ -251,28 +256,68 @@ myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
 # It is a good deal less tidy than what I currently have. And it will break
 # as soon as a filter or signal that depends on the noise matrix appears.
 
+def apply_scan_limits(scans, params):
+	"""Return subset of scans which matches the limits
+	defined via lim_ keys in params."""
+	# We support either telescope coordinates or object coordinates for now.
+	# In both cases, the function returns az, el, ra, dec
+	def tele_pos(scan):
+		t, az, el = np.mean(scan.boresight[::10],0)
+		t = uscan.mjd0 + t / (24.*60*60)
+		ra, dec = coordinates.transform("hor","cel",[[az],[el]], time=[t], site=scan.site)[:,0]
+		return az, el, ra, dec
+	def obj_pos(scan, obj):
+		ra, dec = coordinates.ephem_pos(obj, scan.mjd0)
+		az, el  = coordinates.transform("cel","hor",[[ra],[dec]],time=[scan.mjd0], site=scan.site)[:,0]
+		return az, el, ra, dec
+	# Parse a filter description and build a corresponding matcher function
+	def build_filter(objname, fun, cname, limval):
+		def f(scan):
+			cdict = {"az":0,"el":1,"ra":2,"dec":3}
+			if objname == "Tele": coords = tele_pos(scan)
+			else: coords = obj_pos(scan, objname)
+			cval =coords[cdict[cname]]
+			if fun == "min": return cval >= limval
+			elif fun == "max": return cval <= limval
+			raise ValueError("Unknown scan filter criterion: " + fun)
+		return f
+	# Set up all the matchers
+	filters = []
+	for key in params:
+		if not key.startswith("lim_"): continue
+		_, objname, fun, coord = key.split("_")
+		filters.append(build_filter(objname, fun, coord, float(params[key])))
+	# Evaluate each scan, accepting only those that match all our matchers
+	res = []
+	for scan in scans:
+		accept = [filter(scan) for filter in filters]
+		if np.all(accept):
+			res.append(scan)
+	return res
+
 # 1. Initialize filters
 L.info("Initializing signals")
 signals = []
 for param in signal_params:
 	effname = get_effname(param)
+	active_scans = apply_scan_limits(myscans, param)
 	if param["type"] == "cut":
-		signal = mapmaking.SignalCut(myscans, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
+		signal = mapmaking.SignalCut(active_scans, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 		signal_cut = signal
 	elif param["type"] == "map":
 		area = enmap.read_map(param["value"])
 		area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-		signal = mapmaking.SignalMap(myscans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
+		signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
 	elif param["type"] == "dmap":
 		area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
 		area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-		signal = mapmaking.SignalDmap(myscans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
+		signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
 	elif param["type"] == "scan":
 		res = float(param["res"])*utils.arcmin
 		tol = float(param["tol"])*utils.degree
-		patterns, mypids = scanutils.classify_scanning_patterns(myscans, comm=comm, tol=tol)
+		patterns, mypids = scanutils.classify_scanning_patterns(active_scans, comm=comm, tol=tol)
 		L.info("Found %d scanning patterns" % len(patterns))
-		signal = mapmaking.SignalPhase(myscans, mypids, patterns, myscans[0].dgrid, res=res, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
+		signal = mapmaking.SignalPhase(active_scans, mypids, patterns, active_scans[0].dgrid, res=res, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 	else:
 		raise ValueError("Unrecognized signal type '%s'" % param["type"])
 	signals.append(signal)

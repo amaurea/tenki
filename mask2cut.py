@@ -30,7 +30,7 @@ for ind in myinds:
 	entry = filedb.data[id]
 	# We only need pointing to build this cut
 	d = actdata.read(entry, ["point_offsets","boresight","site","layout"])
-	d = actdata.calibrate(d, ["point_offset","boresight"])
+	d = actdata.calibrate(d, exclude=["autocut"])
 	# Build a projector between samples and mask. This
 	# requires us to massage d into scan form. It's getting
 	# annoying that scan and data objects aren't compatible.
@@ -42,6 +42,8 @@ for ind in myinds:
 		comps = np.concatenate([np.ones(d.ndet)[:,None],np.zeros((d.ndet,3))],1),
 		mjd0 = utils.ctime2mjd(d.boresight[0,0]),
 		sys = "hor", site = d.site)
+	bore_box = np.array([np.min(d.boresight,1),np.max(d.boresight,1)])
+	bore_corners = utils.box2corners(bore_box)
 	scan.entry = d.entry
 	# Is the source above the horizon? If not, it doesn't matter how close
 	# it is.

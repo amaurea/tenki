@@ -7,6 +7,7 @@ parser.add_argument("omap")
 parser.add_argument("ohit")
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-a", "--apod",    type=str, default=None)
+parser.add_argument("-e", "--edge",    type=int, default=0)
 parser.add_argument("-t", "--trim",    type=int, default=1, help="Amount to trim maps that need to be interplated by, in pixels on each side.")
 args = parser.parse_args()
 
@@ -52,7 +53,9 @@ def nonan(a):
 def apply_apod(div):
 	if apod_params is None: return div
 	weight = div[0,0]
-	maxval = np.max(enmap.downgrade(weight,100))
+	moo = enmap.downgrade(weight,50)
+	print np.mean(moo), np.median(moo), np.max(moo)
+	maxval = np.max(enmap.downgrade(weight,50))
 	apod   = np.minimum(1,weight/maxval/apod_params[0])**apod_params[1]
 	return div*apod[None,None]
 def apply_trim(div):
@@ -69,20 +72,28 @@ def apply_trim(div):
 	#	print "A"
 	#	cdiv[mask] *= apod
 	return div
+def apply_edge(div):
+	if args.edge == 0: return div
+	w = div[0,0]*0+1
+	w[[0,-1],:] = 0
+	w[:,[0,-1]] = 0
+	dists = ndimage.distance_transform_edt(w)
+	apod = np.minimum(1,dists/float(args.edge))
+	return div*apod[None,None]
 
 # The first map will be used as a reference. All subsequent maps
 # must fit in its boundaries.
 L.info("Reading %s" % imaps[0])
 m = read_map(imaps[0])
 L.info("Reading %s" % ihits[0])
-w = apply_apod(apply_trim(read_div(ihits[0], len(m))))
+w = apply_edge(apply_apod(apply_trim(read_div(ihits[0], len(m)))))
 wm = mul(w,m)
 
 for mif,wif in zip(imaps[1:],ihits[1:]):
 	L.info("Reading %s" % mif)
 	mi = read_map(mif)
 	L.info("Reading %s" % wif)
-	wi = apply_trim(apply_apod(read_div(wif, len(mi))))
+	wi = apply_edge(apply_apod(apply_trim(read_div(wif, len(mi)))))
 	# We may need to reproject maps
 	if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
 		mi = enmap.project(mi, m.shape, m.wcs, mode="constant")

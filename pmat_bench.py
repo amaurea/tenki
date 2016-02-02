@@ -27,6 +27,13 @@
 #  bilin   0.1   0.25   0.291  0.072  0.01 0.462 0.435
 #  bilin   0.1   0.10   0.127  0.026  0.03 0.492 0.461
 #  bilin   1.0   0.01   0.007  0.002  0.97 0.894 0.820
+
+# On scinet:
+#  grad    0.1   1.00 0.373 0.391 0.321 0.305 0.312 0.204
+#  grad   10.0   0.25
+#  bilin   0.1   1.00 0.208 0.176
+#  bilin   1.0   0.01 0.444 0.387
+
 #
 # So for the same grid size, bilinear is about 50% slower than gradient,
 # but is 100 times more accurate.

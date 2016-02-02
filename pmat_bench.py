@@ -27,6 +27,13 @@
 #  bilin   0.1   0.25   0.291  0.072  0.01 0.462 0.435
 #  bilin   0.1   0.10   0.127  0.026  0.03 0.492 0.461
 #  bilin   1.0   0.01   0.007  0.002  0.97 0.894 0.820
+
+# On scinet:
+#  grad    0.1   1.00 0.373 0.391 0.321 0.305 0.312 0.204
+#  grad   10.0   0.25
+#  bilin   0.1   1.00 0.208 0.176
+#  bilin   1.0   0.01 0.444 0.387
+
 #
 # So for the same grid size, bilinear is about 50% slower than gradient,
 # but is 100 times more accurate.
@@ -152,13 +159,13 @@ else:
 t1 = time.time()
 for i in range(args.ntime):
 	if args.interpolator == "grad":
-		core.pmat_nearest(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+		core.pmat_nearest_grad_precomp_internal(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
 			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
 	elif args.interpolator == "igrad":
-		core.pmat_nearest_implicit(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+		core.pmat_nearest_grad_implicit(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
 			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
 	elif args.interpolator == "ograd":
-		core.pmat_nearest_old(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+		core.pmat_nearest_grad_precomp(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
 			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
 	elif args.interpolator == "bilin":
 		core.pmat_nearest_bilinear(1, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,

@@ -75,7 +75,7 @@ def apply_trim(div):
 L.info("Reading %s" % imaps[0])
 m = read_map(imaps[0])
 L.info("Reading %s" % ihits[0])
-w = apply_trim(apply_apod(read_div(ihits[0], len(m))))
+w = apply_apod(apply_trim(read_div(ihits[0], len(m))))
 wm = mul(w,m)
 
 for mif,wif in zip(imaps[1:],ihits[1:]):

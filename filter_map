@@ -8,6 +8,8 @@ parser.add_argument("imap")
 parser.add_argument("hitmap", nargs="?", default=None)
 parser.add_argument("omap")
 parser.add_argument("-F", "--filter", action="append", help="Filter specification. Can be specified multiple times. Formats: g:lcut = gaussian filter, lowpass for positive lcut, highpass for negative. b:lcut:alpha = butterworth filter. Lowpass for positive alpha, highpass for negative.")
+parser.add_argument("-m", "--mode", type=str, default="a")
+parser.add_argument("-v", action="count")
 args = parser.parse_args()
 
 filter_specs = args.filter or ["b:200:-5"]
@@ -37,26 +39,32 @@ def filter_butter(l, lknee, alpha):
 	return 1.0/(1+(l/lknee)**alpha)
 
 # Set up filter
-l = np.sum(wm.lmap()**2,0)**0.5
-filters = enmap.zeros(wm.shape, wm.wcs, dtype=wm.dtype)
-for i, fspec in enumerate(filter_specs):
-	filter = l*0+1
-	for fstr in fspec.split(","):
-		toks = fstr.split(":")
-		if toks[0] in ["g","gauss"]:
-			lsigma = float(toks[1])
-			filter *= filter_gauss(l, lsigma)
-		elif toks[0] in ["b", "butter", "butterworth"]:
-			lknee = float(toks[1])
-			alpha = float(toks[2])
-			filter *= filter_butter(l, lknee, alpha)
-		else: raise ValueError("Unknown filter type: " + toks[0])
-	filters[i] = filter
-for j in range(i+1,len(filters)):
-	filters[j] = filters[i]
+for mode in args.mode:
+	l = wm.lmap()
+	if args.v > 0: print mode
+	if   mode == "v": l = np.abs(l[1])
+	elif mode == "h": l = np.abs(l[0])
+	elif mode == "a": l = np.sum(l**2,0)**0.5
+	else: raise ValueError("Unrecognized mode " + mode)
 
-# Apply filter
-wm = enmap.harm2map(enmap.map2harm(wm)*filters)
+	filters = enmap.zeros(wm.shape, wm.wcs, dtype=wm.dtype)
+	for i, fspec in enumerate(filter_specs):
+		filter = l*0+1
+		for fstr in fspec.split(","):
+			toks = fstr.split(":")
+			if toks[0] in ["g","gauss"]:
+				lsigma = float(toks[1])
+				filter *= filter_gauss(l, lsigma)
+			elif toks[0] in ["b", "butter", "butterworth"]:
+				lknee = float(toks[1])
+				alpha = float(toks[2])
+				filter *= filter_butter(l, lknee, alpha)
+			else: raise ValueError("Unknown filter type: " + toks[0])
+		filters[i] = filter
+	for j in range(i+1,len(filters)):
+		filters[j] = filters[i]
+	# Apply filter
+	wm = enmap.harm2map(enmap.map2harm(wm)*filters)
 
 # And recover filtered map
 m   = wm/w

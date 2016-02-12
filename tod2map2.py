@@ -371,7 +371,7 @@ for param in filter_params:
 		if "params" not in param: params = myscans[0].pointsrcs
 		else: params = pointsrcs.read(param["params"])
 		params = pointsrcs.src2param(params)
-		params = params.astype(dtype)
+		params = params.astype(np.float64)
 		print "FIXME: how to handle per-source beams? Forcing to relative for now"
 		params[:,5:7] = 1
 		params[:,7]   = 0

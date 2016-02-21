@@ -17,6 +17,7 @@ parser.add_argument("--masklim", type=float, default=6)
 parser.add_argument("--mindist", type=int, default=2)
 parser.add_argument("--nmax", type=int, default=350)
 parser.add_argument("--noise-max", type=float, default=1e5)
+parser.add_argument("--nocrop", action="store_true")
 args = parser.parse_args()
 
 log_level = log.verbosity2level(args.verbose+1)
@@ -37,12 +38,13 @@ shape_orig = map.shape[-2:]
 L.info("Masking")
 mask = inoise[0,0] < args.noise_max**-2
 map[:,mask] = np.nan
-L.info("Cropping")
-map, info = enmap.autocrop(map, method="fft", return_info=True)
-inoise = enmap.padcrop(inoise, info)
+if not args.nocrop:
+	L.info("Cropping")
+	map, info = enmap.autocrop(map, method="fft", return_info=True)
+	inoise = enmap.padcrop(inoise, info)
+	shape_crop = map.shape[-2:]
+	L.info("Cropped from %s to %s" % (str(shape_orig),str(shape_crop)))
 map[np.isnan(map)] = 0
-shape_crop = map.shape[-2:]
-L.info("Cropped from %s to %s" % (str(shape_orig),str(shape_crop)))
 
 ## Truncate to fft-friendly areas
 #h = fft.fft_len(map.shape[-2],[2,3,5])

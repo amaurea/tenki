@@ -35,7 +35,7 @@ hits = enmap.zeros((3,)+area.shape[-2:], area.wcs, dtype=dtype)
 myinds = np.arange(comm.rank, len(ids), comm.size)
 for ind in myinds:
 	id = ids[ind]
-	entry = filedb.data[id]
+	entry = filedb.data.query(id,multi=True)
 	try:
 		scan = actscan.ACTScan(entry)
 		if scan.ndet == 0 or scan.nsamp == 0:

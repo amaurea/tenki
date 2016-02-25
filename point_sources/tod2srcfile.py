@@ -1,5 +1,5 @@
-import numpy as np, argparse, os, sys, pipes, shutil, warnings, bunch
-from enlib import utils, pmat, config, errors, mpi
+import numpy as np, argparse, os, sys, pipes, shutil, warnings
+from enlib import utils, pmat, config, errors, mpi, bunch
 from enlib import log, bench, scan, ptsrc_data, pointsrcs
 from enact import actscan, filedb, todinfo
 

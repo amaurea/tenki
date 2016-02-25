@@ -1,5 +1,5 @@
-import numpy as np, argparse, enlib.scan, os, bunch
-from enlib import enmap, utils, config, scansim, log, powspec, fft
+import numpy as np, argparse, enlib.scan, os
+from enlib import enmap, utils, config, scansim, log, powspec, fft, bunch
 from enact import data, filedb, nmat_measure
 
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")

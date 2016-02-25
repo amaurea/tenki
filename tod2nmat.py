@@ -1,5 +1,5 @@
-import numpy as np, argparse, time, os, zipfile, h5py, bunch
-from enlib import utils, fft, nmat, errors, config, bench, array_ops, pmat, enmap, mpi
+import numpy as np, argparse, time, os, zipfile, h5py
+from enlib import utils, fft, nmat, errors, config, bench, array_ops, pmat, enmap, mpi, bunch
 from enact import filedb, todinfo, data, nmat_measure
 
 parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")

@@ -6,8 +6,8 @@ constrain more than they overfit. The weak ones are the rest. I then sample as b
 offset, beam and strong with the weak fixed at fiducial values, and then sample
 strong and weak based on offset and beam."""
 
-import numpy as np, argparse, warnings, mpi4py.MPI, copy, h5py, os, bunch, sys
-from enlib import utils, ptsrc_data, log, bench, cg, array_ops, enmap, errors, pointsrcs
+import numpy as np, argparse, warnings, mpi4py.MPI, copy, h5py, os, sys
+from enlib import utils, ptsrc_data, log, bench, cg, array_ops, enmap, errors, pointsrcs, bunch
 from enlib.degrees_of_freedom import DOF, Arg
 from scipy.special import erf
 warnings.filterwarnings("ignore")

@@ -58,7 +58,8 @@ parser.add_argument("--nsamp", type=int, default=100000)
 parser.add_argument("--ndet",  type=int, default=100)
 parser.add_argument("--ntime", type=int, default=3)
 parser.add_argument("-T", action="store_true")
-parser.add_argument("-i", "--interpolator", type=str, default="grad")
+parser.add_argument("-H", "--hwp", action="store_true")
+parser.add_argument("-i", "--interpolator", type=str, default="all")
 parser.add_argument("-s", "--seed", type=int, default=0)
 args = parser.parse_args()
 
@@ -126,56 +127,82 @@ wobox    = utils.widen_box(obox)
 
 # define a pixelization
 shape, wcs = enmap.geometry(pos=wobox[:,::-1], res=args.res*utils.arcmin, proj="cea")
-map = enmap.rand_gauss((ncomp,)+shape, wcs).astype(dtype)
+nphi = int(2*np.pi/(args.res*utils.arcmin))
+map_orig = enmap.rand_gauss((ncomp,)+shape, wcs).astype(dtype)
 pbox = np.array([[0,0],shape],dtype=int)
-print "shape", shape
 # define a test tod
 bore = (ibox[None,0] + np.random.uniform(0,1,size=(nsamp,3))*(ibox[1]-ibox[0])[None,:]).astype(ptype)
 det_pos = np.zeros((ndet,3),dtype=ptype)
 det_comps = np.full((ndet,3),1,dtype=dtype)
 tod = np.zeros((ndet,nsamp),dtype=dtype)
+psi = np.arange(nsamp)*2*np.pi/100
+hwp = np.zeros([nsamp,2])
+hwp[:,0] = np.cos(psi)
+hwp[:,1] = np.sin(psi)
+if not args.hwp: hwp[0] = 0
 
 transfun = hor2pix(shape, wcs, t0)
 errlim   = np.array([0.01, 0.01, utils.arcmin, utils.arcmin])*acc
 # build our interpolator
-ipfun = {
+ipfuns = {
 		"grad":  interpol.ip_grad,
 		"igrad": interpol.ip_grad,
 		"ograd": interpol.ip_grad,
 		"bilin": interpol.ip_ndimage,
-	}[args.interpolator]
-t1 = time.time()
-ipol, obox, ok, err = interpol.build(transfun, ipfun, wibox, errlim,
-		maxsize=max_size, maxtime=max_time, return_obox=True, return_status=True, order=1)
-t2 = time.time()
-tbuild = t2-t1
-# evaluate accuracy
-pos_exact = transfun(bore.T)
-pos_inter = ipol(bore.T)
-err  = np.max(np.abs(pos_exact-pos_inter)/errlim[:,None])*acc
-err2 = np.max(np.std(pos_exact-pos_inter,1)/errlim)*acc
-# evaluate speed
-if args.interpolator == "ograd":
-	rbox, nbox, yvals = pmat.extract_interpol_params_old(ipol, ptype)
+		"test":  interpol.ip_ndimage,
+		"test2": interpol.ip_grad,
+	}
+if args.interpolator == "all":
+	ipnames = sorted(ipfuns.keys())
 else:
-	rbox, nbox, yvals = pmat.extract_interpol_params(ipol, ptype)
-t1 = time.time()
+	ipnames = args.interpolator.split(",")
 
-dir = -1 if args.T else 1
-for i in range(args.ntime):
-	if args.interpolator == "grad":
-		core.pmat_nearest_grad_precomp_internal(dir, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
-			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
-	elif args.interpolator == "igrad":
-		core.pmat_nearest_grad_implicit(dir, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
-			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
-	elif args.interpolator == "ograd":
-		core.pmat_nearest_grad_precomp(dir, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
-			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
-	elif args.interpolator == "bilin":
-		core.pmat_nearest_bilinear(dir, 0, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
-			np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
-t2 = time.time()
-tuse = (t2-t1)/args.ntime
-print "ip: %s b: %5.3f o: %d s: %5.3f M a: %5.3f %5.3f u: %5.3f v: %10.4e" % (
-		args.interpolator, tbuild, ok, np.product(nbox)*1e-6, err, err2, tuse, np.sum(tod**2))
+for ipname in ipnames:
+	ipfun = ipfuns[ipname]
+	t1 = time.time()
+	ipol, obox, ok, err = interpol.build(transfun, ipfun, wibox, errlim,
+			maxsize=max_size, maxtime=max_time, return_obox=True, return_status=True, order=1)
+	t2 = time.time()
+	tbuild = t2-t1
+	# evaluate accuracy
+	pos_exact = transfun(bore.T)
+	pos_inter = ipol(bore.T)
+	err  = np.max(np.abs(pos_exact-pos_inter)/errlim[:,None])*acc
+	err2 = np.max(np.std(pos_exact-pos_inter,1)/errlim)*acc
+	# evaluate speed
+	if ipname == "ograd":
+		rbox, nbox, yvals = pmat.extract_interpol_params_old(ipol, ptype)
+	else:
+		rbox, nbox, yvals = pmat.extract_interpol_params(ipol, ptype)
+	map = map_orig.copy()
+	tod = np.arange(tod.size,dtype=dtype).reshape(tod.shape)*1e-8
+	t1 = time.time()
+
+	dir = -1 if args.T else 1
+	for i in range(args.ntime):
+		if ipname == "grad":
+			core.pmat_nearest_grad_precomp_internal(dir, 1, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+				np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
+		elif ipname == "igrad":
+			core.pmat_nearest_grad_implicit(dir, 1, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+				np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
+		elif ipname == "ograd":
+			core.pmat_nearest_grad_precomp(dir, 1, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+				np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
+		elif ipname == "bilin":
+			core.pmat_nearest_bilinear(dir, 1, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
+				np.zeros(1), rbox.T, nbox, yvals.T, pbox.T, nphi)
+		elif ipname == "test":
+			core.pmat_map(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
+				rbox.T, nbox, yvals.T, pbox.T, nphi)
+		elif ipname == "test2":
+			core.pmat_map(dir, 2, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
+				rbox.T, nbox, yvals.T, pbox.T, nphi)
+	t2 = time.time()
+	tuse = (t2-t1)/args.ntime
+	if dir > 0:
+		val = np.sum(tod**2)
+	else:
+		val = np.sum(map**2)
+	print "ip: %-6s b: %6.4f o: %d s: %5.3f M a: %5.3f %5.3f u: %6.4f v: %18.12e" % (
+			ipname, tbuild, ok, np.product(nbox)*1e-6, err, err2, tuse, val)

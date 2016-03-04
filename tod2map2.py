@@ -24,7 +24,7 @@ config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Moon,p
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
-config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
+config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=0,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 
@@ -334,9 +334,10 @@ filters = []
 for param in filter_params:
 	if param["name"] == "scan":
 		naz, nt, mode, niter = int(param["naz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
+		nhwp = int(param["nhwp"])
 		weighted = int(param["weighted"])
 		if mode == 0: continue
-		filter = mapmaking.FilterPickup(naz=naz, nt=nt, niter=niter)
+		filter = mapmaking.FilterPickup(naz=naz, nt=nt, nhwp=nhwp, niter=niter)
 		if mode >= 2:
 			for sparam, signal in matching_signals(param, signal_params, signals):
 				if sparam["type"] == "map":

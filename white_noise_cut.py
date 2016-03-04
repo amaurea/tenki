@@ -6,7 +6,7 @@
 
 import numpy as np, argparse, h5py, os, sys, shutil
 from enlib import fft, utils, enmap, errors, config, mpi
-from enact import filedb, data, filters
+from enact import filedb, actdata, filters
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("sel")
 parser.add_argument("odir")
@@ -40,8 +40,8 @@ for si in range(comm.rank, ntod, comm.size):
 	ofile = "%s/%s.txt" % (args.odir, id)
 	print "reading %s" % id
 	try:
-		d     = data.read(entry, fields=["gain","tconst","cut","tod","boresight"])
-		d     = data.calibrate(d, nofft=True)
+		d     = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight"])
+		d     = actdata.calibrate(d, exclude=["tod_fourier"])
 	except (IOError, errors.DataMissing) as e:
 		print "skipping (%s)" % (e.message)
 		continue

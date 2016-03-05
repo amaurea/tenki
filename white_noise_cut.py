@@ -42,6 +42,7 @@ for si in range(comm.rank, ntod, comm.size):
 	try:
 		d     = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight"])
 		d     = actdata.calibrate(d, exclude=["tod_fourier"])
+		if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
 	except (IOError, errors.DataMissing) as e:
 		print "skipping (%s)" % (e.message)
 		continue

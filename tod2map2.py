@@ -36,7 +36,7 @@ parser.add_argument("odir")
 parser.add_argument("prefix",nargs="?")
 parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,300,400,500,600,800,1000,1200,1500,2000,3000,4000,5000,6000,8000,10000", help="CG map dump steps")
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
-parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
+parser.add_argument("--dets",       type=str, default=0,  help="Detector slice")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 parser.add_argument("-S", "--signal", action="append",    help="Signals to solve for. For example -S sky:area.fits -S scan would solve for the sky map and scan pickup maps jointly, using area.fits as the map template.")
 parser.add_argument("-F", "--filter", action="append")
@@ -160,7 +160,7 @@ filter_params = setup_params("filter", ["scan","sub"], {"use":"no"})
 # This should be factored out to enlib. For example
 # read_scans(filelist, inds, reader=actscan.ACTScan, db=db)
 # That way the function doesn't actually need to depen on act stuff.
-def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
+def read_scans(filelist, tmpinds, db=None, dets=None, quiet=False):
 	"""Given a set of ids/files and a set of indices into that list. Try
 	to read each of these scans. Returns a list of successfully read scans
 	and a list of their indices."""
@@ -182,7 +182,8 @@ def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 				if not quiet: L.debug("Skipped %s (%s)" % (str(filelist[ind]), e.message))
 				continue
 		d = d[:,::config.get("downsample")]
-		if ndet > 0: d = d[:ndet]
+		if dets:
+			d = eval("d[%s]" % dets)
 		myscans.append(d)
 		myinds.append(ind)
 		if not quiet: L.debug("Read %s" % str(filelist[ind]))
@@ -190,7 +191,7 @@ def read_scans(filelist, tmpinds, db=None, ndet=0, quiet=False):
 
 # Read in all our scans
 L.info("Reading %d scans" % len(filelist))
-myscans, myinds = read_scans(filelist, np.arange(len(filelist))[comm.rank::comm.size], db, ndet=args.ndet)
+myscans, myinds = read_scans(filelist, np.arange(len(filelist))[comm.rank::comm.size], db, dets=args.dets)
 
 # Collect scan info. This currently fails if any task has empty myinds
 read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]
@@ -241,7 +242,7 @@ else:
 # need to serialize and unserialize lots of data, which
 # would require lots of code.
 L.info("Rereading shuffled scans")
-myscans, myinds = read_scans(filelist, myinds, db, ndet=args.ndet)
+myscans, myinds = read_scans(filelist, myinds, db, dets=args.dets)
 
 # I would like to be able to do on-the-fly nmat computation.
 # However, preconditioners depend on the noise matrix.

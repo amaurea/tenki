@@ -5,8 +5,9 @@
 # low white noise floors.
 
 import numpy as np, argparse, h5py, os, sys, shutil
-from enlib import fft, utils, enmap, errors, config, mpi
+from enlib import fft, utils, enmap, errors, config, mpi, todfilter
 from enact import filedb, actdata, filters
+config.default("gfilter_jon_nhwp", 200, "The number of hwp modes to fit/subtract in Jon's polynomial ground filter.")
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("sel")
 parser.add_argument("odir")
@@ -35,50 +36,60 @@ cuts  = np.zeros([ntod,ndet],dtype=np.uint8)
 stats = None
 if args.full_stats: stats = np.zeros([ntod,ndet,4])
 for si in range(comm.rank, ntod, comm.size):
-	id    = ids[si]
-	entry = filedb.data[id]
-	ofile = "%s/%s.txt" % (args.odir, id)
-	print "reading %s" % id
 	try:
-		d     = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight"])
-		d     = actdata.calibrate(d, exclude=["tod_fourier"])
-		if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
-	except (IOError, errors.DataMissing) as e:
-		print "skipping (%s)" % (e.message)
-		continue
-	ft    = fft.rfft(d.tod)
-	ps    = np.abs(ft)**2/(d.tod.shape[1]*srate)
-	inds  = bins*ps.shape[1]/fmax
-	bfreqs= np.mean(bins,1)
+		id    = ids[si]
+		entry = filedb.data[id]
+		ofile = "%s/%s.txt" % (args.odir, id)
+		try:
+			d     = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight","hwp"])
+			d     = actdata.calibrate(d, exclude=["tod_fourier","autocut"])
+			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
+		except (IOError, errors.DataMissing) as e:
+			print "Skipped (%s)" % (e.message)
+			continue
+		print "Read %s" % id
+		# Filter the HWP signal
+		d.tod = todfilter.filter_poly_jon(d.tod, d.boresight[1], hwp=d.hwp)
 
-	rms_raw = np.array([np.mean(ps[:,b[0]:b[1]],1) for b in inds]).T**0.5
-	# Compute amount of deconvolution
-	freqs  = np.linspace(0, d.srate/2, ft.shape[-1])
-	butter = filters.butterworth_filter(freqs)
-	for di, det in enumerate(d.dets):
-		tconst = filters.tconst_filter(freqs, d.tau[di])
-		ft[di] /= tconst*butter
-	ps = np.abs(ft)**2/(d.tod.shape[1]*srate)
-	rms_dec = np.array([np.mean(ps[:,b[0]:b[1]],1) for b in inds]).T**0.5
+		ft    = fft.rfft(d.tod)
+		ps    = np.abs(ft)**2/(d.tod.shape[1]*srate)
+		inds  = bins*ps.shape[1]/fmax
+		bfreqs= np.mean(bins,1)
 
-	if args.full_stats:
-		stats[si,d.dets][:,:2] = rms_raw
-		stats[si,d.dets][:,2:] = rms_dec
-	ratio = rms_dec[:,1]/rms_dec[:,0]
-	sens  = rms_dec**-2
-	med_sens = np.median(sens, 0)
-	cuts[si,d.dets] = ((ratio>rate[0])&(ratio<rate[1])&(np.all(sens<med_sens[None,:]*args.max_sens,1)))+1
+		rms_raw = np.array([np.mean(ps[:,b[0]:b[1]],1) for b in inds]).T**0.5
+		# Compute amount of deconvolution
+		freqs  = np.linspace(0, d.srate/2, ft.shape[-1])
+		butter = filters.butterworth_filter(freqs)
+		for di, det in enumerate(d.dets):
+			tconst = filters.tconst_filter(freqs, d.tau[di])
+			ft[di] /= tconst*butter
+		ps = np.abs(ft)**2/(d.tod.shape[1]*srate)
+		rms_dec = np.array([np.mean(ps[:,b[0]:b[1]],1) for b in inds]).T**0.5
 
+		if args.full_stats:
+			for i in range(2):
+				stats[si,d.dets,i+0] = rms_raw[:,i]
+				stats[si,d.dets,i+2] = rms_dec[:,i]
+		ratio = rms_dec[:,1]/rms_dec[:,0]
+		sens  = rms_dec**-2
+		med_sens = np.median(sens, 0)
+		cuts[si,d.dets] = ((ratio>rate[0])&(ratio<rate[1])&(np.all(sens<med_sens[None,:]*args.max_sens,1)))+1
+	except Exception as e:
+		print "Unexpected error " + id + " " + e.message + " skipping"
+
+print "Reducing"
 # Reduce everything
-def reduce(a):
-	a2 = a.copy()
-	comm.Allreduce(a,a2)
-	return a2
-
-cuts = reduce(cuts)
-if args.full_stats: stats = reduce(stats)
+cuts = utils.allreduce(cuts, comm)
+if args.full_stats:
+	stats = utils.allreduce(stats, comm)
+print "Reduced"
 
 if comm.rank == 0:
+	if args.full_stats:
+		# Output full stats
+		with h5py.File(args.odir + "/stats.hdf", "w") as ofile:
+			ofile["stats"] = stats
+			ofile["ids"]   = ids
 	# Output cuts as accept file
 	with open(args.odir + "/accept.txt", "w") as ofile:
 		for id, icut in zip(ids, cuts):
@@ -94,8 +105,3 @@ if comm.rank == 0:
 				if dcut == 1:
 					ofile.write(" %d" % det)
 			ofile.write("\n")
-	if args.full_stats:
-		# Output full stats
-		with h5py.File(args.odir + "/stats.hdf", "w") as ofile:
-			ofile["stats"] = stats
-			ofile["ids"]   = ids

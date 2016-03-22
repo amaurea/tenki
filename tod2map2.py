@@ -342,9 +342,9 @@ for param in filter_params:
 		if mode >= 2:
 			for sparam, signal in matching_signals(param, signal_params, signals):
 				if sparam["type"] == "map":
-					prec_ptp = mapmaking.PreconMapBinned(signal, signal_cut, myscans, noise=False, hits=False)
+					prec_ptp = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
 				elif sparam["type"] == "dmap":
-					prec_ptp = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, noise=False, hits=False)
+					prec_ptp = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
 				else:
 					raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
 				signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt, weighted=weighted>0))

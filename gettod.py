@@ -12,6 +12,7 @@ parser.add_argument("-C", "--manual-calib", type=str, default=None)
 parser.add_argument("--bin", type=int, default=1)
 parser.add_argument("--nofft", action="store_true")
 parser.add_argument("--nodeslope", action="store_true")
+parser.add_argument("-F", "--fields", type=str, default=None)
 args = parser.parse_args()
 
 filedb.init()
@@ -29,10 +30,12 @@ for id in ids:
 	elif args.dets is not None:
 		subdets = [int(w) for w in args.dets.split(",")]
 
-	d = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight"])
+	fields = ["gain","tconst","cut","tod","boresight"]
+	if args.fields: fields = args.fields.split(",")
+	d = actdata.read(entry, fields=fields)
 	if absdets: d.restrict(dets=absdets)
 	if subdets: d.restrict(dets=d.dets[subdets])
-	if args.calib: d = actdata.calibrate(d)
+	if args.calib: d = actdata.calibrate(d, exclude=["autocut"])
 	elif args.manual_calib:
 		ops = args.manual_calib.split(",")
 		if "safe" in ops: d.boresight[1:] = utils.unwind(d.boresight[1:], period=360)
@@ -59,3 +62,6 @@ for id in ids:
 		hfile["az"]  = d.boresight[1]
 		hfile["el"]  = d.boresight[2]
 		hfile["dets"] = d.dets
+		try:
+			hfile["mask"] = d.cut.to_mask().astype(np.int16)
+		except AttributeError: pass

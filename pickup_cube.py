@@ -31,6 +31,7 @@ parser.add_argument("--nstep",type=int,   default=20)
 parser.add_argument("--i0", type=int, default=None)
 parser.add_argument("--i1", type=int, default=None)
 parser.add_argument("-g,", "--group", type=int, default=1)
+parser.add_argument("-D", "--dedark", action="store_true")
 args = parser.parse_args()
 filedb.init()
 
@@ -93,7 +94,7 @@ for pid, gind, group in tasks[comm_group.rank::comm_group.size]:
 		L.info("%3d: %s" % (gind, id))
 		entry = filedb.data[id]
 		try:
-			scan = actscan.ACTScan(entry)
+			scan = actscan.ACTScan(entry, dark=True)
 			scan = scan[:,args.i0:args.i1]
 			scan = scan[:,::config.get("downsample")]
 			scans.append(scan)
@@ -115,19 +116,12 @@ for pid, gind, group in tasks[comm_group.rank::comm_group.size]:
 			array_shape=(args.nrow,args.ncol), res=daz, dtype=dtype, comm=comm_sub, cuts=signal_cut, ofmt="phase")
 	signal_cut.precon   = mapmaking.PreconCut(signal_cut, scans)
 	signal_phase.precon = mapmaking.PreconPhaseBinned(signal_phase, signal_cut, scans, weights)
+	filters = []
+	if args.dedark:
+		filters.append(mapmaking.FilterDedark())
 
-	## Filter
-	#class PickupFilter:
-	#	def __init__(self, scans, pids, layout, templates):
-	#		self.layout = layout
-	#		self.templates = templates
-	#	def __call__(self, scan, tod):
-
-	def test_filter(scan, tod):
-		return todfilter.filter_common_board(tod, scan.dets, scan.layout, name=scan.entry.id)
-
-	eq = mapmaking.Eqsys(scans, [signal_cut, signal_phase], weights=weights, filters=[test_filter],
-			dtype=dtype, comm=comm_sub)
+	eq = mapmaking.Eqsys(scans, [signal_cut, signal_phase], weights=weights,
+			filters=filters, dtype=dtype, comm=comm_sub)
 
 	# Write precon
 	signal_phase.precon.write(proot)

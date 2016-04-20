@@ -49,14 +49,24 @@ for si in range(comm.rank, ntod, comm.size):
 			continue
 		print "Read %s" % id
 		# Filter the HWP signal
-		d.tod = todfilter.filter_poly_jon(d.tod, d.boresight[1], hwp=d.hwp)
+		print "no hwp filter"
+		#d.tod = todfilter.filter_poly_jon(d.tod, d.boresight[1], hwp=d.hwp)
 
 		ft    = fft.rfft(d.tod)
 		ps    = np.abs(ft)**2/(d.tod.shape[1]*srate)
 		inds  = bins*ps.shape[1]/fmax
 		bfreqs= np.mean(bins,1)
 
+		#tod_moo = fft.irfft(ft, normalize=True)
+		#ind = np.where(d.dets==640)[0]
+		#with h5py.File("foo.hdf", "w") as hfile:
+		#	hfile["moo"] = tod_moo[ind]
+		#	hfile["ps"] = ps[ind]
+		#	hfile["tod"] = d.tod[ind]
+
 		rms_raw = np.array([np.mean(ps[:,b[0]:b[1]],1) for b in inds]).T**0.5
+		#print rms_raw[ind]
+
 		# Compute amount of deconvolution
 		freqs  = np.linspace(0, d.srate/2, ft.shape[-1])
 		butter = filters.butterworth_filter(freqs)

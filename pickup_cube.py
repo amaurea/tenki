@@ -31,7 +31,9 @@ parser.add_argument("--nstep",type=int,   default=20)
 parser.add_argument("--i0", type=int, default=None)
 parser.add_argument("--i1", type=int, default=None)
 parser.add_argument("-g,", "--group", type=int, default=1)
-parser.add_argument("-D", "--dedark", action="store_true")
+parser.add_argument("--dedark", action="store_true")
+parser.add_argument("--demode", action="store_true")
+parser.add_argument("--decommon", action="store_true")
 args = parser.parse_args()
 filedb.init()
 
@@ -67,6 +69,9 @@ boxes = utils.allreduce(boxes, comm_world)
 
 # Prune null boxes
 usable = np.all(boxes!=0,(1,2))
+moo = ids[usable]
+cow = boxes[usable]
+
 ids, boxes = ids[usable], boxes[usable]
 
 pattern_ids = utils.label_unique(boxes, axes=(1,2), atol=tol)
@@ -119,6 +124,10 @@ for pid, gind, group in tasks[comm_group.rank::comm_group.size]:
 	filters = []
 	if args.dedark:
 		filters.append(mapmaking.FilterDedark())
+	if args.demode:
+		filters.append(mapmaking.FilterPhaseBlockwise(daz=4*utils.arcmin, niter=10))
+	if args.decommon:
+		filters.append(mapmaking.FilterCommonBlockwise())
 
 	eq = mapmaking.Eqsys(scans, [signal_cut, signal_phase], weights=weights,
 			filters=filters, dtype=dtype, comm=comm_sub)

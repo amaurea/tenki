@@ -21,12 +21,14 @@ config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bi
 config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin", "Default parameters for ground map")
 config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=hor:Sun,prec=bin,lim_Sun_min_el=0", "Default parameters for sun map")
 config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Moon,prec=bin,lim_Moon_min_el=0", "Default parameters for moon map")
+config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=hor:Jupiter,prec=bin,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
-config.default("filter_scan_default",  "use=no,name=scan,value=0,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_sub_default",   "use=no,name=sub,value=0,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
-config.default("filter_src_default",   "use=no,name=src,value=0,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
+config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
+config.default("filter_sub_default",   "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
+config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
+config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
 
 config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
 
@@ -348,6 +350,10 @@ for param in filter_params:
 				else:
 					raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
 				signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt, weighted=weighted>0))
+	elif param["name"] == "common":
+		mode = int(param["value"])
+		if mode == 0: continue
+		filter = mapmaking.FilterCommonBlockwise()
 	elif param["name"] == "sub":
 		if "map" not in param: raise ValueError("-F sub needs a map file to subtract. e.g. -F sub:2,map=foo.fits")
 		mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
@@ -381,6 +387,10 @@ for param in filter_params:
 	else:
 		raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 	filters.append(filter)
+# If any filters were added, append a gapfilling operation, since the filters may have
+# put large values in the gaps, and these may not be representable by our cut model
+if len(filters) > 0:
+	filters.append(mapmaking.FilterGapfill())
 
 # Initialize weights. Done in a hacky manner for now. This and the above needs
 # to be reworked.

@@ -22,6 +22,8 @@ config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bi
 config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=hor:Sun,prec=bin,lim_Sun_min_el=0", "Default parameters for sun map")
 config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Moon,prec=bin,lim_Moon_min_el=0", "Default parameters for moon map")
 config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=hor:Jupiter,prec=bin,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
+config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=hor:Saturn,prec=bin,lim_Saturn_min_el=0", "Default parameters for saturn map")
+config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=hor:Uranus,prec=bin,lim_Uranus_min_el=0", "Default parameters for uranus map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters

@@ -3,7 +3,7 @@ from enlib import sharp, utils, enmap, curvedsky, log, coordinates
 parser = argparse.ArgumentParser()
 parser.add_argument("ihealmap")
 parser.add_argument("templates", nargs="+")
-parser.add_argument("odir")
+parser.add_argument("ofile")
 parser.add_argument("-n", "--ncomp", type=int, default=1)
 parser.add_argument("-i", "--first", type=int, default=0)
 parser.add_argument("-v", "--verbosity", type=int, default=2)
@@ -14,7 +14,10 @@ args = parser.parse_args()
 log_level = log.verbosity2level(args.verbosity)
 L = log.init(level=log_level)
 
-utils.mkdir(args.odir)
+# If multiple templates are specified, the output file is
+# interpreted as an output directory.
+if len(args.templates) > 1:
+	utils.mkdir(args.ofile)
 ncomp = args.ncomp
 
 assert ncomp == 1 or ncomp == 3, "Only 1 or 3 components supported"
@@ -56,5 +59,9 @@ for tfile in args.templates:
 	if args.rot and ncomp==3:
 		L.debug("Rotating polarization vectors")
 		res[1:3] = enmap.rotate_pol(res[1:3], psi)
-	L.info("Writing " + args.odir + "/" + os.path.basename(tfile))
-	enmap.write_map(args.odir + "/" + os.path.basename(tfile), res)
+	if len(args.templates) > 1:
+		oname = args.odir + "/" + os.path.basename(tfile)
+	else:
+		oname = args.ofile
+	L.info("Writing " + oname)
+	enmap.write_map(oname, res)

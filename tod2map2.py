@@ -80,7 +80,7 @@ if comm.rank == 0:
 		for id in filelist:
 			f.write("%s\n" % str(id))
 	shutil.copyfile(filedb.cjoin(["root","dataset","filedb"]),  root + "filedb.txt")
-	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), root + "todinfo.txt")
+	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), root + "todinfo.hdf")
 	except IOError: pass
 # Set up logging
 utils.mkdir(root + "log")

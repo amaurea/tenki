@@ -1,0 +1,31 @@
+#!/bin/bash
+odir="$1"
+fields="radiometer temperature pressure windspeed winddirection"
+y1=2013
+y2=$(date +%Y)
+now=$(date +%s)
+urlbase="http://www.apex-telescope.org/weather/Historical_weather"
+
+for field in $fields; do
+	echo $field
+	(
+		mkdir -p "$odir/$field"
+		cd "$odir/$field"
+		rm -f urls.txt
+		exec 3<> urls.txt
+		for ((y=y1;y<=y2;y++)); do
+			y=$(printf "%04d" $y)
+			for m in {01..12}; do
+				for d in {01..31}; do
+					if ! ctime=$(date -d ${y}-${m}-${d} +%s 2>/dev/null); then continue; fi
+					if ((ctime > now)); then continue; fi
+					fname="${y}-${m}-${d}_$field.log.gz"
+					if [[ -f "$fname" ]]; then continue; fi
+					echo "$urlbase/$field/$fname" >&3
+				done
+			done
+		done
+		exec 3>&-
+		cat urls.txt | xargs -n 10 -P 8 wget -c -nv
+	)
+done

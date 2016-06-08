@@ -16,13 +16,13 @@ ids     = scan_db.ids
 stats = []
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
-	entry = file_db[id]
+	entry = file_db.query(id,multi=True)
 	try:
 		stats.append(todinfo.build_tod_stats(entry))
 	except errors.DataMissing as e:
 		print "Skipping %s (%s)" % (id, e.message)
 		continue
-	print id
+	print "%3d %4d/%d %5.1f%% %s" % (comm.rank, ind+1, len(ids), (ind+1)/float(len(ids))*100, id)
 stats = todinfo.merge_tod_stats(stats)
 
 if comm.rank == 0: print "Reducing"

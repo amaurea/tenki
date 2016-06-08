@@ -19,5 +19,5 @@ else:
 			for val in vals:
 				print "  " + val
 		else:
-			print name + "  " + vals[0]
+			print name + "  " + str(vals[0])
 	#print filedb.data.query(ids[0], multi=True)

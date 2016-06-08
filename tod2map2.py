@@ -178,9 +178,9 @@ def read_scans(filelist, tmpinds, db=None, dets=None, quiet=False):
 		except IOError:
 			try:
 				if isinstance(filelist[ind],list):
-					entry = [db[id] for id in filelist[ind]]
+					entry = [db.query(id,multi=True) for id in filelist[ind]]
 				else:
-					entry = db[filelist[ind]]
+					entry = db.query(filelist[ind],multi=True)
 				d = actscan.ACTScan(entry)
 				if d.ndet == 0 or d.nsamp == 0:
 					raise errors.DataMissing("Tod contains no valid data")
@@ -314,7 +314,7 @@ for out_ind in range(nouter):
 		myscans = myscans_tot[out_ind:out_ind+1]
 		root = root_tot + myscans[0].entry.id + "_"
 
-	# 1. Initialize filters
+	# 1. Initialize signals
 	L.info("Initializing signals")
 	signals = []
 	for param in signal_params:
@@ -331,6 +331,10 @@ for out_ind in range(nouter):
 			area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
 			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
+		elif param["type"] == "bmap":
+			area = enmap.read_map(param["value"])
+			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+			signal = mapmaking.SignalMapBuddies(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
 		elif param["type"] == "scan":
 			res = float(param["res"])*utils.arcmin
 			tol = float(param["tol"])*utils.degree
@@ -442,9 +446,13 @@ for out_ind in range(nouter):
 
 	L.info("Initializing preconditioners")
 	for param, signal in zip(signal_params, signals):
+		# Null-preconditioner common for all types
+		if "prec" in param and param["prec"] == "null":
+			signal.precon = mapmaking.PreconNull()
+			continue
 		if param["type"] == "cut":
 			signal.precon = mapmaking.PreconCut(signal, myscans)
-		elif param["type"] == "map":
+		elif param["type"] == "map" or param["type"] == "bmap":
 			if param["prec"] == "bin":
 				signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights)
 			elif param["prec"] == "jacobi":

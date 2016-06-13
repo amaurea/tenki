@@ -189,7 +189,12 @@ def read_scans(filelist, tmpinds, db=None, dets=None, quiet=False):
 				continue
 		d = d[:,::config.get("downsample")]
 		if dets:
-			d = eval("d[%s]" % dets)
+			if dets.startswith("@"):
+				uids = [int(w) for w in open(dets[1:],"r")]
+				_,det_inds = utils.common_inds([uids,d.dets])
+				d = d[det_inds]
+			else:
+				d = eval("d[%s]" % dets)
 		myscans.append(d)
 		myinds.append(ind)
 		if not quiet: L.debug("Read %s" % str(filelist[ind]))

@@ -8,13 +8,13 @@ from enact import data, nmat_measure, filedb, todinfo, readutils
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("map_precon", "bin", "Preconditioner to use for map-making")
-config.default("map_eqsys",  "equ", "The coordinate system of the maps. Can be eg. 'hor', 'equ' or 'gal'.")
+config.default("map_sys",  "equ", "The coordinate system of the maps. Can be eg. 'hor', 'equ' or 'gal'.")
 config.default("map_cg_nmax", 1000, "Max number of CG steps to perform in map-making")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for myid:n:nproc-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
 config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
 config.default("map_ptsrc_handling", "subadd", "How to handle point sources in the map. Can be 'none' for no special treatment, 'subadd' to subtract from the TOD and readd in pixel space, and 'sim' to simulate a pointsource-only TOD.")
-config.default("map_ptsrc_eqsys", "cel", "Equation system the point source positions are specified in. Default is 'cel'")
+config.default("map_ptsrc_sys", "cel", "Equation system the point source positions are specified in. Default is 'cel'")
 config.default("map_format", "fits", "File format to use when writing maps. Can be 'fits', 'fits.gz' or 'hdf'.")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
@@ -25,7 +25,7 @@ parser.add_argument("prefix",nargs="?")
 parser.add_argument("-d", "--dump", type=str, default="1,2,5,10,20,50,100,200,300,400,500,600,800,1000,1200,1500,2000,3000,4000,5000,6000,8000,10000", help="CG map dump steps")
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
 parser.add_argument("--ndet",       type=int, default=0,  help="Max number of detectors")
-parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format eqsys:filename")
+parser.add_argument("--imap",       type=str,             help="Reproject this map instead of using the real TOD data. Format sys:filename")
 parser.add_argument("--imap-op",    type=str, default='sim', help="What operation to do with imap. Can be 'sim' or 'sub'")
 parser.add_argument("--azmap",      type=str,             help="Solve for azimuth signal in addition to map. Example 300:phase:shared, 100:azimuth:individual")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
@@ -42,7 +42,7 @@ myid  = comm.rank
 nproc = comm.size
 nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
-mapsys= config.get("map_eqsys")
+mapsys= config.get("map_sys")
 tshape= (240,240)
 
 filedb.init()
@@ -145,7 +145,7 @@ if args.imap:
 isrc = None
 ptsrc_handling = config.get("map_ptsrc_handling")
 if ptsrc_handling != 'none':
-	isrc_sys = config.get("map_ptsrc_eqsys")
+	isrc_sys = config.get("map_ptsrc_sys")
 	# Only static point sources supported for now
 	fname = db.static.pointsrcs
 	if ptsrc_handling == "sim": tmul, pmul = 0,1

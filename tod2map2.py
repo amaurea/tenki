@@ -13,7 +13,7 @@ config.default("verbosity", 1, "Verbosity for output. Higher means more verbose.
 config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for comm.rank:n:comm.size-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
 config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
 config.default("map_ptsrc_handling", "subadd", "How to handle point sources in the map. Can be 'none' for no special treatment, 'subadd' to subtract from the TOD and readd in pixel space, and 'sim' to simulate a pointsource-only TOD.")
-config.default("map_ptsrc_eqsys", "cel", "Equation system the point source positions are specified in. Default is 'cel'")
+config.default("map_ptsrc_sys", "cel", "Coordinate system the point source positions are specified in. Default is 'cel'")
 config.default("map_format", "fits", "File format to use when writing maps. Can be 'fits', 'fits.gz' or 'hdf'.")
 
 # Default signal parameters
@@ -30,7 +30,7 @@ config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{
 config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",   "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
-config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes", "Default parameters for map subtraction filter")
+config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=1,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
 
 config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
@@ -163,46 +163,11 @@ for sig in signal_params:
 ######## Filter parmeters ########
 filter_params = setup_params("filter", ["scan","sub"], {"use":"no"})
 
-# This should be factored out to enlib. For example
-# read_scans(filelist, inds, reader=actscan.ACTScan, db=db)
-# That way the function doesn't actually need to depen on act stuff.
-def read_scans(filelist, tmpinds, db=None, dets=None, quiet=False):
-	"""Given a set of ids/files and a set of indices into that list. Try
-	to read each of these scans. Returns a list of successfully read scans
-	and a list of their indices."""
-	myscans, myinds  = [], []
-	for ind in tmpinds:
-		try:
-			if isinstance(filelist[ind],list): raise IOError
-			d = enscan.read_scan(filelist[ind])
-		except IOError:
-			try:
-				if isinstance(filelist[ind],list):
-					entry = [db.query(id,multi=True) for id in filelist[ind]]
-				else:
-					entry = db.query(filelist[ind],multi=True)
-				d = actscan.ACTScan(entry)
-				if d.ndet == 0 or d.nsamp == 0:
-					raise errors.DataMissing("Tod contains no valid data")
-			except errors.DataMissing as e:
-				if not quiet: L.debug("Skipped %s (%s)" % (str(filelist[ind]), e.message))
-				continue
-		d = d[:,::config.get("downsample")]
-		if dets:
-			if dets.startswith("@"):
-				uids = [int(w) for w in open(dets[1:],"r")]
-				_,det_inds = utils.common_inds([uids,d.dets])
-				d = d[det_inds]
-			else:
-				d = eval("d[%s]" % dets)
-		myscans.append(d)
-		myinds.append(ind)
-		if not quiet: L.debug("Read %s" % str(filelist[ind]))
-	return myscans, myinds
-
 # Read in all our scans
 L.info("Reading %d scans" % len(filelist))
-myscans, myinds = read_scans(filelist, np.arange(len(filelist))[comm.rank::comm.size], db, dets=args.dets)
+myinds = np.arange(len(filelist))[comm.rank::comm.size]
+myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
+		db, dets=args.dets, downsample=config.get("downsample"))
 
 # Collect scan info. This currently fails if any task has empty myinds
 read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]
@@ -253,7 +218,8 @@ else:
 # need to serialize and unserialize lots of data, which
 # would require lots of code.
 L.info("Rereading shuffled scans")
-myscans, myinds = read_scans(filelist, myinds, db, dets=args.dets)
+myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
+		db, dets=args.dets, downsample=config.get("downsample"))
 
 # I would like to be able to do on-the-fly nmat computation.
 # However, preconditioners depend on the noise matrix.
@@ -331,15 +297,15 @@ for out_ind in range(nouter):
 		elif param["type"] == "map":
 			area = enmap.read_map(param["value"])
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
+			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
 		elif param["type"] == "dmap":
 			area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
+			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
 		elif param["type"] == "bmap":
 			area = enmap.read_map(param["value"])
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-			signal = mapmaking.SignalMapBuddies(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", eqsys=param["sys"])
+			signal = mapmaking.SignalMapBuddies(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
 		elif param["type"] == "scan":
 			res = float(param["res"])*utils.arcmin
 			tol = float(param["tol"])*utils.degree
@@ -368,7 +334,7 @@ for out_ind in range(nouter):
 			filter = mapmaking.FilterPickup(naz=naz, nt=nt, nhwp=nhwp, niter=niter)
 			if mode >= 2:
 				for sparam, signal in matching_signals(param, signal_params, signals):
-					if sparam["type"] == "map":
+					if sparam["type"] == "map" or sparam["type"] == "bmap":
 						prec_ptp = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
 					elif sparam["type"] == "dmap":
 						prec_ptp = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
@@ -390,10 +356,10 @@ for out_ind in range(nouter):
 				# of dmaps - they are so closely tied to a set of scans that they only work
 				# in the coordinate system where the scans are reasonably local.
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
-				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, eqsys=sys, mul=-mul, tmul=tmul)
+				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=-mul, tmul=tmul)
 			else:
 				m = enmap.read_map(fname).astype(dtype)
-				filter = mapmaking.FilterAddMap(myscans, m, eqsys=sys, mul=-mul, tmul=tmul)
+				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=-mul, tmul=tmul)
 			if mode >= 2:
 				for sparam, signal in matching_signals(param, signal_params, signals):
 					assert sparam["sys"] == param["sys"]
@@ -401,16 +367,33 @@ for out_ind in range(nouter):
 					signal.post.append(mapmaking.PostAddMap(m, mul=mul))
 		elif param["name"] == "buddy":
 			if "map" not in param: raise ValueError("-F buddy needs a map file to subtract. e.g. -F buddy:map=foo.fits")
-			mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
-			tmul = float(param["tmul"])
+			mode  = int(param["value"])
+			sys   = param["sys"]
+			fname = param["map"]
+			mul   = float(param["mul"])
+			tmul  = float(param["tmul"])
+			pertod= int(param["pertod"])
+			nstep = int(param["nstep"])
+			prec  = param["prec"]
 			if mode == 0: continue
-			if param["type"] == "dmap":
+			# Two types of buddy subtraction: The one based on an input map,
+			# and the one where a map is computed internally per tod. Both need
+			# an input map, but for the pertod buddy, this just indicates the
+			# pixelization to use for the internally generated buddy map.
+			if param["type"] != "dmap":
+				m = enmap.read_map(fname).astype(dtype)
+				if not pertod:
+					filter = mapmaking.FilterBuddy(myscans, m, sys=sys, mul=-mul, tmul=tmul)
+				else:
+					m = enmap.zeros((args.ncomp,)+m.shape[-2:], m.wcs, dtype)
+					filter = mapmaking.FilterBuddyPertod(m, sys=sys, mul=-mul, tmul=tmul, nstep=nstep, prec=prec)
+			else:
 				# Warning: This only works if a dmap has already been initialized etc.
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
-				filter = mapmaking.FilterBuddyDmap(myscans, mysubs, m, eqsys=sys, mul=-mul, tmul=tmul)
-			else:
-				m = enmap.read_map(fname).astype(dtype)
-				filter = mapmaking.FilterBuddy(myscans, m, eqsys=sys, mul=-mul, tmul=tmul)
+				if not pertod:
+					filter = mapmaking.FilterBuddyDmap(myscans, mysubs, m, sys=sys, mul=-mul, tmul=tmul)
+				else:
+					raise NotImplementedError("FIXME: Implement per tod buddy subtraction with dmaps")
 		elif param["name"] == "src":
 			if param["value"] == 0: continue
 			if "params" not in param: params = myscans[0].pointsrcs
@@ -420,7 +403,7 @@ for out_ind in range(nouter):
 			print "FIXME: how to handle per-source beams? Forcing to relative for now"
 			params[:,5:7] = 1
 			params[:,7]   = 0
-			filter = mapmaking.FilterAddSrcs(myscans, params, eqsys=param["sys"], mul=-float(param["mul"]))
+			filter = mapmaking.FilterAddSrcs(myscans, params, sys=param["sys"], mul=-float(param["mul"]))
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 		filters.append(filter)
@@ -458,10 +441,13 @@ for out_ind in range(nouter):
 		if param["type"] == "cut":
 			signal.precon = mapmaking.PreconCut(signal, myscans)
 		elif param["type"] == "map" or param["type"] == "bmap":
+			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
 			if param["prec"] == "bin":
-				signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights)
+				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights)
 			elif param["prec"] == "jacobi":
-				signal.precon = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights, noise=False)
+				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights, noise=False)
+			elif param["prec"] == "hit":
+				signal.precon = mapmaking.PreconMapHitcount(prec_signal, signal_cut, myscans)
 			else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
 			if "nohor" in param and param["nohor"] != "no":
 				prior_weight = signal.precon.div[0,0]
@@ -473,6 +459,8 @@ for out_ind in range(nouter):
 				signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights)
 			elif param["prec"] == "jacobi":
 				signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights, noise=False)
+			elif param["prec"] == "hit":
+				signal.precon = mapmaking.PreconDmapHitcount(signal, signal_cut, myscans)
 			else: raise ValueError("Unknown dmap preconditioner '%s'" % param["prec"])
 			if "nohor" in param and param["nohor"] != "no":
 				prior_weight  = signal.precon.div[0,0]

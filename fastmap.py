@@ -1,4 +1,4 @@
-# We want to be able to run this incrementally on new data.
+# We want to be able to run This incrementally on new data.
 # A simple way to do this is to identify scanning patterns using
 # their actual properties rather than some global id. That way
 # no awkward renumbering or communication is needed as new patterns
@@ -9,12 +9,65 @@
 # We need to bin. There is then some risk that the jitter will
 # cross bin boundaries. I'll assume scanning patterns are usually
 # defined near integer values, and so use bins centered on integers.
+
+##### How to incorporate detector correlations ######
 #
-# This approach may use too much memory. Our maps are getting pretty big, and
-# take about half a GB per pattern for deep56, much more for boss or other
-# really big patches. For deep56 alone there are 12 scanning patterns.
-# That's a lot of memory. Could avoid the problem by scanning through,
-# grouping by scanning pattern and then processing each by itself.
+# Correlations show up as two patterns in the maps: stripes in the scanning
+# direction, and hexagon patterns (from detectors) These aren't really
+# separable, but we may be able to approximate them that way anyway. So our
+# inverse noise matrix would be a symmetrized version of HS. Each of these
+# would be diagonal in 2d fourier space, so the order should not matter.
+#
+# Our normal noise model has frequency-dependent correlations. We can't support
+# that, as that breaks the convolution property of the pattern: Each pattern
+# covers all frequencies already, because it is the 2d fft of a 2d shape.
+#
+# Since we can only measure the correlation at a single frequency, we need to
+# decide on that frequency. The simplest choice is to choose low frequencies,
+# where the common mode dominates. Then this simplifies to a less-biased
+# version of common mode subtraction. The common mode dominates below 0.3 Hz or
+# so, I think, # which corresponds to l<300-500 or so. Above that more
+# complicated correlations dominate. I think going for the common mode is
+# safest.
+#
+# Should I try to model the actual focalplane shape (i.e. lots of small delta
+# functions with various offsets), or should I just assume it's a disk with an
+# average radial correlation function? The disk model won't capture the hexagon
+# stuff, but the CMB modes that are affected by the common mode change on large
+# scales anyway, and so should not be able to resolve the hexagon pattern.
+#
+# If I did go for the full pattern, I would have to care about the focalplane
+# orientation on the sky. Our unskew operation means that az is always up.
+# Normally el is orthogonal to az, but is that the case after unskew? Consider
+# a detector that is at +el from the boresight. Since we scan diagonally on the
+# sky, it will be diagonally offset from the boresight on the sky, for example
+# to down-left. When we unskew (at least using fast unskew), we move each point
+# on the sky left or right only, such that az goes up.  But no amount of
+# left-right shifting can move a point with a down-left offset to a position
+# with only a left offset. So after unshifting, the focalplane will be sheared,
+# and el will be in a diagonal direction.
+# 
+# The same thing happens with a simple disk model. A circle gets skewed into
+# a diagonal ellipse.
+#
+# So what I need in both cases are unit az and el vectors. Given those, I can
+# apply skew a focalplane shape appropriately:
+#  C_unskew = B C_fplane B'
+# Where B has columns [x,y]_az [y,x]_el.
+#
+# So basically:
+#  1. Start with an empty map in unskewed relative coordiantes
+#  2. For each position in the map, apply the average skew transform (U.T)
+#     to the position vector.
+#  3. Then compute focalplane offsets using B = vstack([e_el,e_az]):
+#     p_fp = (B.T B)"B.T p_sky
+#  4. Read off the focalplane correlation function at that position.
+#
+# No matter which approach I chosse, the simplest thing to do for the
+# build-up program is to store
+#  1. Offsets for all relevant detectors.
+#  2. Covariance for all those detectors relative to center.
+#     this will just a constant vector for common mode subtraction.
 
 import numpy as np, os, h5py
 from enlib import config, utils, mapmaking, scanutils, mpi, log, pmat, enmap, bench, fft
@@ -35,6 +88,7 @@ parser.add_argument("prefix", nargs="?")
 parser.add_argument("-b", "--bsize",     type=float, default=1)
 parser.add_argument("-v", "--verbosity", type=int,   default=1)
 parser.add_argument("-d", "--dets",      type=str,   default=None)
+parser.add_argument("-C", "--common",    type=int,   default=1)
 args = parser.parse_args()
 
 comm  = mpi.COMM_WORLD
@@ -103,6 +157,7 @@ for i, pat in enumerate(pats):
 	speed  = 0
 	site   = {}
 	inspec = np.zeros(nbin)
+	incov  = np.zeros(nbin)
 	offset = np.zeros(2)
 	for ind, d in scanutils.scan_iterator(pids, myinds, actscan.ACTScan, filedb.data,
 			dets=args.dets, downsample=config.get("downsample")):
@@ -118,9 +173,13 @@ for i, pat in enumerate(pats):
 			tod  = tod.astype(dtype)
 			junk = np.zeros(pcut.njunk, dtype=dtype)
 		with bench.mark("nmat"):
-			# Build noise model
+			# Build noise model, possibly with common mode subtraction
 			ft = fft.rfft(tod) * tod.shape[1]**-0.5
-			nmat = nmat_measure.detvecs_simple(ft, d.srate)
+			if args.common:
+				vecs = np.full([d.ndet,1],d.ndet**-0.5)
+				eigs = 1e8
+			else: vecs, eigs = None, None
+			nmat = nmat_measure.detvecs_simple(ft, d.srate, vecs=vecs, eigs=eigs)
 			del ft
 		with bench.mark("rhs"):
 			# Calc rhs, accumulating into pattern total
@@ -136,9 +195,14 @@ for i, pat in enumerate(pats):
 			myhits = myhits[0]
 			hits  += myhits
 		del tod
-		# Get the mean noise power spectrum
+		# Get the mean noise power spectrum. We model this is an
+		# uncorrelated part (inspec, the inverse noise spectrum),
+		# and a correlated part (incov, the inverse common mode
+		# amplitude).
 		myspec = np.mean(nmat.iD,1)
+		mycov  = nmat.iE[0] * d.ndet # d.net to get power per det
 		inspec+= myspec * np.sum(myhits) # weight in total avg
+		incov += mycov  * np.sum(myhits)
 		bins   = nmat.bins
 		srate  = d.srate
 		site   = dict(d.site)
@@ -151,13 +215,23 @@ for i, pat in enumerate(pats):
 	# result.
 	rhs    = utils.allreduce(rhs,    comm)
 	hits   = utils.allreduce(hits,   comm)
-	inspec = utils.allreduce(inspec, comm)
-	inspec/= np.sum(hits)
+	inspec = utils.allreduce(inspec, comm)/np.sum(hits)
+	incov  = comm.allreduce(incov)/np.sum(hits)
 	srate  = comm.allreduce(srate, op=mpi.MAX)
 	speed  = comm.allreduce(speed, op=mpi.MAX)
 	site   = [w for w in comm.allgather(site) if len(w) > 0][0]
 	nscan  = comm.allreduce(nscan)
 	offset = utils.allreduce(offset, comm)/nscan
+
+	# FIXME: continue on the correlation stuff
+	# We want the covariance in a more general output format
+	# to be future-proof. We assume a stationary covariance,
+	# which means that everything is a function of the offset
+	# in the focalplane. So we just need to specify the offset
+	# of each detector and the corresponding covariance. For our
+	# common mode case, the latter is uniform.
+	if args.common: incov = np.full(ndet, incov[0])
+	else:           incov = np.full(ndet, 0.0)
 
 	# And output
 	if comm.rank == 0:
@@ -167,10 +241,12 @@ for i, pat in enumerate(pats):
 		enmap.write_map(proot + "_hits.fits", hits)
 		with h5py.File(proot + "_info.hdf","w") as hfile:
 			hfile["inspec"] = inspec
+			hfile["incov"]  = incov
 			hfile["srate"]  = srate
 			hfile["ids"]    = np.array(pids)
 			hfile["hits"]   = hits
 			hfile["pattern"]= pat
+			hfile["speed"]  = speed
 			hfile["offset"] = offset/utils.degree # el,az offset in deg
 			for k,v in site.items():
 				hfile["site/"+k] = v

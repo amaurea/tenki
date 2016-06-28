@@ -6,7 +6,8 @@ parser.add_argument("infos", nargs="+")
 parser.add_argument("odir")
 parser.add_argument("--nmax",            type=int, default=0)
 parser.add_argument("-d", "--downgrade", type=int, default=1)
-parser.add_argument("-O", "--order",     type=int, default=3)
+parser.add_argument("-O", "--order",     type=int, default=0)
+parser.add_argument("-U", "--unskew",    type=str, default="shift")
 args = parser.parse_args()
 
 fft.engine = "fftw"
@@ -30,6 +31,7 @@ def calc_az_sweep(pattern, offset, site, pad=2.0, subsample=1.0):
 	az2 = pattern[2] + offset[1] + pad
 	daz = rhs.wcs.wcs.cdelt[1]/np.cos(el1*utils.degree)/subsample
 	naz  = int(np.ceil((az2-az1)/daz))
+	naz  = fft.fft_len(naz, "above", [2,3,5,7])
 	# Simulate a single sweep at arbitrary time
 	sweep_az = np.arange(naz)*daz + az1
 	sweep_el = np.full(naz,el1)
@@ -40,7 +42,7 @@ def calc_az_sweep(pattern, offset, site, pad=2.0, subsample=1.0):
 	return sweep_cel, naz, daz
 
 class UnskewCurved:
-	def __init__(self, shape, wcs, pattern, offset, site, pad=2.0, order=3, subsample=2.0):
+	def __init__(self, shape, wcs, pattern, offset, site, pad=2.0, order=0, subsample=2.0):
 		# Find the unskew transformation for this pattern.
 		# We basically want dec->az and ra->ra0, with az spacing
 		# similar to el spacing.
@@ -193,7 +195,7 @@ class Amat:
 			t4 = time.time()
 			work *= info.H
 			t5 = time.time()
-			#print "t %4.2f %4.2f %4.2f %4.2f %4.2f" % (t1-t0, t2-t1, t3-t2, t4-t3, t5-t4), info.U.naz, info.U.daz
+			print "t %4.2f %4.2f %4.2f %4.2f %4.2f" % (t1-t0, t2-t1, t3-t2, t4-t3, t5-t4), info.U.naz, info.U.daz
 			res  += work
 		res = utils.allreduce(res,comm)
 		return self.dof.zip(res)
@@ -224,8 +226,12 @@ for infofile in ifiles[comm.rank::comm.size]:
 		site   = bunch.Bunch(**{k:hfile["site"][k].value for k in hfile["site"]})
 		pattern= hfile["pattern"].value
 	hits = prepare(hits)
-	#U = UnskewCurved(rhs.shape, rhs.wcs, pattern, offset, site, order=args.order)
-	U = UnskewShift(rhs.shape, rhs.wcs, pattern, offset, site)
+	if args.unskew == "curved":
+		U = UnskewCurved(rhs.shape, rhs.wcs, pattern, offset, site, order=args.order)
+	elif args.unskew == "shift":
+		U = UnskewShift(rhs.shape, rhs.wcs, pattern, offset, site)
+	else:
+		raise ValueError(args.unskew)
 	scale = calc_scale(inspec.size, srate, speed, U.daz)
 	#foo = enmap.samewcs(U.apply(rhs), rhs)
 	#enmap.write_map("foo.fits", foo)
@@ -244,10 +250,10 @@ A   = Amat(dof, infos, comm)
 cg  = enlib.cg.CG(A, dof.zip(rhs))
 
 utils.mkdir(args.odir)
-for i in range(1000):
+for i in range(200):
 	cg.step()
 	if comm.rank == 0:
-		print np.std(cg.x[cg.x!=0])
+		#print np.std(cg.x[cg.x!=0])
 		if cg.i % 10 == 0:
 			map = dof.unzip(cg.x)
 			enmap.write_map(args.odir + "/map%03d.fits" % cg.i, map)

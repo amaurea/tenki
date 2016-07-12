@@ -110,6 +110,7 @@ L.info("Scanning tods")
 mypatids = {}
 ids      = filedb.scans[args.sel].ids
 myinds   = range(comm.rank, len(ids), comm.size)
+ndet_array = 0
 for ind, d in scanutils.scan_iterator(ids, myinds, actscan.ACTScan, filedb.data):
 	id = ids[ind]
 	# Determine which scanning pattern we have
@@ -117,10 +118,12 @@ for ind, d in scanutils.scan_iterator(ids, myinds, actscan.ACTScan, filedb.data)
 	az1, az2 = utils.minmax(d.boresight[:,1])
 	pat = np.array([el,az1,az2])/utils.degree
 	pat = tuple(np.round(pat/args.bsize)*args.bsize)
+	ndet_array = d.layout.ndet
 	# And record it
 	if pat not in mypatids:
 		mypatids[pat] = []
 	mypatids[pat].append(id)
+ndet_array = comm.allreduce(ndet_array, mpi.MAX)
 
 # Get list of all patterns
 L.info("Gathering pattern lists")
@@ -158,7 +161,8 @@ for i, pat in enumerate(pats):
 	site   = {}
 	inspec = np.zeros(nbin)
 	incov  = np.zeros(nbin)
-	offset = np.zeros(2)
+	offsets = np.zeros([ndet_array,2])
+	det_hit = np.zeros([ndet_array],dtype=int)
 	for ind, d in scanutils.scan_iterator(pids, myinds, actscan.ACTScan, filedb.data,
 			dets=args.dets, downsample=config.get("downsample")):
 		id = pids[ind]
@@ -176,8 +180,10 @@ for i, pat in enumerate(pats):
 			# Build noise model, possibly with common mode subtraction
 			ft = fft.rfft(tod) * tod.shape[1]**-0.5
 			if args.common:
+				# Add common mode to set of eigenmodes, and
+				# set its variance to infinity to fully ignore common mode.
 				vecs = np.full([d.ndet,1],d.ndet**-0.5)
-				eigs = 1e8
+				eigs = np.inf
 			else: vecs, eigs = None, None
 			nmat = nmat_measure.detvecs_simple(ft, d.srate, vecs=vecs, eigs=eigs)
 			del ft
@@ -202,12 +208,12 @@ for i, pat in enumerate(pats):
 		myspec = np.mean(nmat.iD,1)
 		mycov  = nmat.iE[0] * d.ndet # d.net to get power per det
 		inspec+= myspec * np.sum(myhits) # weight in total avg
-		incov += mycov  * np.sum(myhits)
 		bins   = nmat.bins
 		srate  = d.srate
 		site   = dict(d.site)
 		speed  = np.median(np.abs(d.boresight[1:,1]-d.boresight[:-1,1])[::10])/utils.degree*d.srate
-		offset+= np.mean(d.offsets,0)[2:0:-1]
+		offsets[d.dets] += d.offsets[:,2:0:-1]
+		det_hit[d.dets] += 1
 		nscan += 1
 		del myhits, d
 	
@@ -216,22 +222,19 @@ for i, pat in enumerate(pats):
 	rhs    = utils.allreduce(rhs,    comm)
 	hits   = utils.allreduce(hits,   comm)
 	inspec = utils.allreduce(inspec, comm)/np.sum(hits)
-	incov  = comm.allreduce(incov)/np.sum(hits)
 	srate  = comm.allreduce(srate, op=mpi.MAX)
 	speed  = comm.allreduce(speed, op=mpi.MAX)
 	site   = [w for w in comm.allgather(site) if len(w) > 0][0]
 	nscan  = comm.allreduce(nscan)
-	offset = utils.allreduce(offset, comm)/nscan
+	det_hit= utils.allreduce(det_hit, comm)
+	offsets= utils.allreduce(offsets, comm)
+	offsets[det_hit>0] /= det_hit[det_hit>0][:,None]
 
-	# FIXME: continue on the correlation stuff
-	# We want the covariance in a more general output format
-	# to be future-proof. We assume a stationary covariance,
-	# which means that everything is a function of the offset
-	# in the focalplane. So we just need to specify the offset
-	# of each detector and the corresponding covariance. For our
-	# common mode case, the latter is uniform.
-	if args.common: incov = np.full(ndet, incov[0])
-	else:           incov = np.full(ndet, 0.0)
+	# Reduce to our actual set of detectors
+	dets = np.where(det_hit>0)[0]
+	offsets = offsets[dets]
+	det_hit = det_hit[dets]
+	ndet    = len(dets)
 
 	# And output
 	if comm.rank == 0:
@@ -247,7 +250,8 @@ for i, pat in enumerate(pats):
 			hfile["hits"]   = hits
 			hfile["pattern"]= pat
 			hfile["speed"]  = speed
-			hfile["offset"] = offset/utils.degree # el,az offset in deg
+			hfile["offsets"]= offsets/utils.degree # [det,{el,az}] in deg
+			hfile["cmode_filter"] = args.common
 			for k,v in site.items():
 				hfile["site/"+k] = v
 			for k,v in hits.wcs.to_header().items():

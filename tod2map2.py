@@ -30,7 +30,7 @@ config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{
 config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",   "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
-config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=1,nstep=200,prec=bin", "Default parameters for map subtraction filter")
+config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
 
 config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
@@ -369,7 +369,7 @@ for out_ind in range(nouter):
 			if "map" not in param: raise ValueError("-F buddy needs a map file to subtract. e.g. -F buddy:map=foo.fits")
 			mode  = int(param["value"])
 			sys   = param["sys"]
-			fname = param["map"]
+			fname = param["map"].format(id=myscans[0].entry.id)
 			mul   = float(param["mul"])
 			tmul  = float(param["tmul"])
 			pertod= int(param["pertod"])

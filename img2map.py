@@ -4,6 +4,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("image")
 parser.add_argument("template")
 parser.add_argument("ofile")
+parser.add_argument("-m", "--mask", action="store_true")
 args = parser.parse_args()
 
 # Read image into [{r,g,b},ny,nx]
@@ -14,5 +15,6 @@ assert img.shape[-2:] == template.shape[-2:], "Image and template shapes do not 
 res = enmap.zeros(img.shape, template.wcs, dtype=np.int16)
 # Copy over data, taking into account y ordering
 res[:] = img[:,::-1,:]
+if args.mask: res = np.any(res,0).astype(np.int16)
 # And write
 enmap.write_map(args.ofile, res)

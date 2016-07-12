@@ -42,6 +42,7 @@ for ind in myinds:
 		comps = np.concatenate([np.ones(d.ndet)[:,None],np.zeros((d.ndet,3))],1),
 		mjd0 = utils.ctime2mjd(d.boresight[0,0]),
 		sys = "hor", site = d.site)
+	scan.hwp_phase = np.zeros([len(bore),2])
 	bore_box = np.array([np.min(d.boresight,1),np.max(d.boresight,1)])
 	bore_corners = utils.box2corners(bore_box)
 	scan.entry = d.entry

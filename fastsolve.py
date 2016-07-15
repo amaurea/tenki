@@ -1,14 +1,36 @@
+# -*- coding: utf-8 -*-
+# In uncorrelated mode, solves the model
+#  HU'N"UH m = sum r
+# In correlated mode solves
+#  HU'N°WN°UH m = U'WU r
+# Here H is the hitcount per pattern,
+# r is the rhs per pattern, U is the unskew matrix
+# and N is the per detector noise spectrum,
+# with ' meaning tranpose, " meaning inverse, and
+# ° meaning **-0.5.
+#
+# W is a 2d-fourier-diagonal per-pattern weighting matrix
+# representing the detector correlations. In common-mode
+# dominated regions, its job is to reduce the weight of
+# the atmosphere from 1 mode per det to 1 mode per array.
+# Hence, in its central region it will look like 1/ndet,
+# and then gradually increase towards 1 as one moves outwards.
+#
+#  W = 1/(1+A*cov_common)
+#
+# where A = (ndet-1)/max(cov_common)
+
 import numpy as np, argparse, h5py, enlib.cg, scipy.interpolate, time
+import astropy.io.fits
 from enlib import enmap, fft, coordinates, utils, bunch, interpol, bench, zipper, mpi, log
 parser = argparse.ArgumentParser()
-parser.add_argument("rhs")
 parser.add_argument("infos", nargs="+")
 parser.add_argument("odir")
 parser.add_argument("--nmax",            type=int, default=0)
 parser.add_argument("-d", "--downgrade", type=int, default=1)
 parser.add_argument("-O", "--order",     type=int, default=0)
 parser.add_argument("-U", "--unskew",    type=str, default="shift")
-parser.add_argument("-C", "--cmode",     type=int, default=-1)
+parser.add_argument("-C", "--cmode",     type=int, default=0)
 args = parser.parse_args()
 
 fft.engine = "fftw"
@@ -24,13 +46,20 @@ def prepare(map, hitmap=False):
 	"""Prepare a map for input by cutting off one pixel along each edge,
 	as out-of-bounds data accumulates there, and downgrading to the
 	target resolution."""
+	# Get rid of polarization for now. Remove this later.
 	if map.ndim == 3: map = map[:1]
+	# Cut off edge pixels
 	map[...,:1,:]  = 0
 	map[...,-1:,:] = 0
 	map[...,:,:1]  = 0
 	map[...,:,-1:] = 0
+	# Downsample
 	map = enmap.downgrade(map, args.downgrade)
 	if hitmap: map *= args.downgrade**2
+	# Pad to fourier-friendly size. Because no cropping
+	# is used, this will result in the same padding for
+	# all maps.
+	map = map.autocrop(method="fft", value="none")
 	return map
 
 def calc_scale(nbin, samprate, speed, pixsize):
@@ -199,7 +228,7 @@ class UnskewShift:
 		spline  = scipy.interpolate.UnivariateSpline(sweep_dec, sweep_ra)
 		ra      = spline(dec)
 		dra     = ra - ra[len(ra)/2]
-		y, x    = enmap.sky2pix(shape, wcs, [dec,ra])
+		y, x    = np.round(enmap.sky2pix(shape, wcs, [dec,ra]))
 		dx      = x-x[len(x)/2]
 		# It's also useful to be able to go from normal map index to
 		# position in y and dx
@@ -298,6 +327,29 @@ class NmatCmode:
 		arr  = carr.real
 		return arr
 
+class NmatUncorr2:
+	"""Noise matrix representing noise that is independent between
+	detectors, and hence only extends in the vertical direction after
+	unskewing."""
+	def __init__(self, shape, inspec, scale):
+		freqs = np.abs(fft.fftfreq(shape[-2]) * scale)
+		self.spec_full = utils.interpol(inspec, freqs[None])
+		self.scale = scale
+	def apply(self, ft, inplace=False, exp=1):
+		if not inplace: ft = np.array(ft)
+		ft *= self.spec_full[:,None]**exp
+		return ft
+
+class WeightMat:
+	def __init__(self, shape, corrfun, ndet):
+		ps  = fft.fft(corrfun+0j,axes=[-2,-1]).real
+		ps *= (ndet-1)/np.max(ps)
+		self.weight = 1/(1+ps)
+	def apply(self, ft, inplace=False):
+		if not inplace: ft = np.array(ft)
+		ft *= self.weight
+		return ft
+
 class Amat:
 	"""Matrix representing the operaion A = HU'N"UH"""
 	def __init__(self, dof, infos, comm):
@@ -308,18 +360,28 @@ class Amat:
 		xmap = self.dof.unzip(x)
 		res  = xmap*0
 		for info in self.infos:
-			t0 = time.time()
+			t  = [time.time()]
 			work  = xmap*info.H
-			t1 = time.time()
-			flat  = info.U.apply(work)
-			t2 = time.time()
-			flat  = info.N.apply(flat,inplace=True)
-			t3 = time.time()
-			work = enmap.samewcs(info.U.trans(flat, work),work)
-			t4 = time.time()
+			t.append(time.time())
+			umap  = info.U.apply(work)
+			t.append(time.time())
+			fmap  = fft.fft(umap+0j, axes=[-2,-1])
+			t.append(time.time())
+			fmap  = info.N.apply(fmap, exp=0.5)
+			t.append(time.time())
+			if info.W is not None:
+				fmap = info.W.apply(fmap)
+			t.append(time.time())
+			fmap  = info.N.apply(fmap, exp=0.5)
+			t.append(time.time())
+			umap  = fft.ifft(fmap, umap+0j, axes=[-2,-1], normalize=True).real
+			t.append(time.time())
+			work = enmap.samewcs(info.U.trans(umap, work),work)
+			t.append(time.time())
 			work *= info.H
-			t5 = time.time()
-			print "t %4.2f %4.2f %4.2f %4.2f %4.2f" % (t1-t0, t2-t1, t3-t2, t4-t3, t5-t4)
+			t.append(time.time())
+			t = np.array(t)
+			print " %4.2f"*(len(t)-1) % tuple(t[1:]-t[:-1])
 			res  += work
 		res = utils.allreduce(res,comm)
 		return self.dof.zip(res)
@@ -329,62 +391,90 @@ def normalize_hits(hits):
 	hits_scaled**2 approx hits for most of its area. This is not
 	the same thing as taking the square root. 1d sims indicate that
 	this is a better approximation, but I'm not sure."""
+	return hits**0.5
 	medval = np.median(hits[hits!=0])
 	return hits/medval**0.5
 
 tref  = 55500
-rhs   = enmap.read_map(args.rhs)
-rhs   = prepare(rhs)
-ipos  = rhs.posmap()
 infos = []
 ifiles= args.infos
+rhs_tot = None
 if args.nmax: ifiles = ifiles[:args.nmax]
 for infofile in ifiles[comm.rank::comm.size]:
 	L.info("Reading %s" % (infofile))
 	with h5py.File(infofile, "r") as hfile:
-		hits    = enmap.samewcs(hfile["hits"].value, rhs)
+		rhs     = hfile["rhs"].value
+		hits    = hfile["hits"].value
 		srate   = hfile["srate"].value
 		speed   = hfile["speed"].value   * utils.degree
 		inspec  = hfile["inspec"].value
 		offsets = hfile["offsets"].value * utils.degree
 		site    = bunch.Bunch(**{k:hfile["site"][k].value for k in hfile["site"]})
 		pattern = hfile["pattern"].value * utils.degree
-		cmode   = hfile["cmode_filter"].value
+		hwcs    = hfile["wcs"]
+		header = astropy.io.fits.Header()
+		for key in hwcs:
+			header[key] = hwcs[key].value
+		wcs = enlib.wcs.WCS(header).sub(2)
+	# Set up our maps
+	rhs  = enmap.ndmap(rhs,  wcs)
+	hits = enmap.ndmap(hits, wcs)
+	rhs  = prepare(rhs)
 	hits = prepare(hits, hitmap=True)
-	# Turn offsets into an average array offset and detector offsets relative to that
+
+	# Turn offsets into an average array offset and detector offsets relative to that,
+	# and use the array offset to set up the Unskew matrix.
 	offset_array = np.mean(offsets,0)
 	offset_det   = offsets - offset_array
+	ndet         = len(offsets)
 	if args.unskew == "curved":
 		U = UnskewCurved(rhs.shape, rhs.wcs, pattern, offset_array, site, order=args.order)
 	elif args.unskew == "shift":
 		U = UnskewShift(rhs.shape, rhs.wcs, pattern, offset_array, site)
-	else:
-		raise ValueError(args.unskew)
+	else: raise ValueError(args.unskew)
 	scale = calc_scale(inspec.size, srate, speed, enmap.pixshape(U.ushape, U.uwcs)[0])
-	#foo = enmap.samewcs(U.apply(rhs), rhs)
-	#enmap.write_map("foo.fits", foo)
-	#U.trans(foo,rhs)
-	#enmap.write_map("foo2.fits", rhs)
-	#enmap.write_map("foo3.fits", rhs)
-	if args.cmode == 1 or args.cmode < 0 and cmode:
-		# Common-mode downweighting noise model.
+
+	# Set up the inv noise matrix N. This should take a 2d ft of the
+	# map as input, though it actually only cares about the y direction.
+	N = NmatUncorr2(U.ushape, inspec, scale)
+
+	# Set up the weight matrix W
+	if args.cmode > 0:
 		offset_upos = calc_offset_upos(pattern, offset_array, offset_det, site, rhs, U)
 		corrfun     = calc_cmode_corrfun(U.ushape, U.uwcs, offset_upos, corrfun_smoothing)
-		#for i in range(-2,0): corrfun = np.roll(corrfun,-corrfun.shape[i]/2,i)
-		#enmap.write_map("test.fits", corrfun)
-		N = NmatCmode(U.ushape, inspec, scale, corrfun)
-		#N2 = NmatUncorr(U.ushape, inspec, scale)
-		#foo = enmap.samewcs(U.apply(rhs),rhs)
-		#Nfoo  = N.apply(foo)
-		#N2foo = N2.apply(foo)
-		#print np.std(Nfoo), np.std(N2foo)
-		#1/0
+		W  = WeightMat(U.ushape, corrfun, 4)#ndet)
+	else: W = None
 
-	else:
-		# Uncorrelated detectors
-		N = NmatUncorr(U.ushape, inspec, scale)
+	# The H in our equation is related to the hitcount, but isn't exactly it.
+	# normalize_hits approximates it using the hitcounts.
 	H = normalize_hits(hits)
-	infos.append(bunch.Bunch(U=U,N=N,H=H,pattern=pattern,site=site,srate=srate,scale=scale,speed=speed))
+
+	# Apply weight to rhs
+	if W is not None:
+		iH  = 1/np.maximum(H,np.max(H)*1e-2)
+		urhs= U.apply(rhs*iH)
+		ft  = fft.fft(urhs+0j, axes=[-2,-1])
+		ft  = W.apply(ft)
+		urhs= fft.ifft(ft, urhs+0j, axes=[-2,-1], normalize=True).real
+		rhs = U.trans(urhs, rhs)*H
+	
+	if rhs_tot is None: rhs_tot = rhs
+	else: rhs_tot += rhs
+
+	infos.append(bunch.Bunch(U=U,N=N,H=H,W=W,pattern=pattern,site=site,srate=srate,scale=scale,speed=speed))
+
+rhs = utils.allreduce(rhs_tot, comm)
+
+#info = infos[0]
+#foo  = rhs*info.H
+#enmap.write_map("test1.fits", foo)
+#bar  = enmap.samewcs(info.U.apply(foo),foo)
+#enmap.write_map("test2.fits", bar)
+#foo  = enmap.samewcs(info.U.trans(bar, foo),foo)
+#enmap.write_map("test3.fits", foo)
+#1/0
+#
+#
 
 dof = zipper.ArrayZipper(rhs.copy())
 A   = Amat(dof, infos, comm)

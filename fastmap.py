@@ -88,7 +88,6 @@ parser.add_argument("prefix", nargs="?")
 parser.add_argument("-b", "--bsize",     type=float, default=1)
 parser.add_argument("-v", "--verbosity", type=int,   default=1)
 parser.add_argument("-d", "--dets",      type=str,   default=None)
-parser.add_argument("-C", "--common",    type=int,   default=1)
 args = parser.parse_args()
 
 comm  = mpi.COMM_WORLD
@@ -160,7 +159,6 @@ for i, pat in enumerate(pats):
 	speed  = 0
 	site   = {}
 	inspec = np.zeros(nbin)
-	incov  = np.zeros(nbin)
 	offsets = np.zeros([ndet_array,2])
 	det_hit = np.zeros([ndet_array],dtype=int)
 	for ind, d in scanutils.scan_iterator(pids, myinds, actscan.ACTScan, filedb.data,
@@ -177,15 +175,9 @@ for i, pat in enumerate(pats):
 			tod  = tod.astype(dtype)
 			junk = np.zeros(pcut.njunk, dtype=dtype)
 		with bench.mark("nmat"):
-			# Build noise model, possibly with common mode subtraction
+			# Build noise model
 			ft = fft.rfft(tod) * tod.shape[1]**-0.5
-			if args.common:
-				# Add common mode to set of eigenmodes, and
-				# set its variance to infinity to fully ignore common mode.
-				vecs = np.full([d.ndet,1],d.ndet**-0.5)
-				eigs = np.inf
-			else: vecs, eigs = None, None
-			nmat = nmat_measure.detvecs_simple(ft, d.srate, vecs=vecs, eigs=eigs)
+			nmat = nmat_measure.detvecs_simple(ft, d.srate)
 			del ft
 		with bench.mark("rhs"):
 			# Calc rhs, accumulating into pattern total
@@ -201,12 +193,8 @@ for i, pat in enumerate(pats):
 			myhits = myhits[0]
 			hits  += myhits
 		del tod
-		# Get the mean noise power spectrum. We model this is an
-		# uncorrelated part (inspec, the inverse noise spectrum),
-		# and a correlated part (incov, the inverse common mode
-		# amplitude).
+		# Get the mean noise power spectrum.
 		myspec = np.mean(nmat.iD,1)
-		mycov  = nmat.iE[0] * d.ndet # d.net to get power per det
 		inspec+= myspec * np.sum(myhits) # weight in total avg
 		bins   = nmat.bins
 		srate  = d.srate
@@ -244,14 +232,12 @@ for i, pat in enumerate(pats):
 		enmap.write_map(proot + "_hits.fits", hits)
 		with h5py.File(proot + "_info.hdf","w") as hfile:
 			hfile["inspec"] = inspec
-			hfile["incov"]  = incov
 			hfile["srate"]  = srate
 			hfile["ids"]    = np.array(pids)
 			hfile["hits"]   = hits
 			hfile["pattern"]= pat
 			hfile["speed"]  = speed
 			hfile["offsets"]= offsets/utils.degree # [det,{el,az}] in deg
-			hfile["cmode_filter"] = args.common
 			for k,v in site.items():
 				hfile["site/"+k] = v
 			for k,v in hits.wcs.to_header().items():

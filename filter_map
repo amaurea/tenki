@@ -23,13 +23,15 @@ if args.hitmap != None:
 else:
 	w = enmap.zeros(m.shape[-2:], m.wcs, dtype=m.dtype)+1
 
-mask  = np.any(np.isnan(m),0)+np.isnan(w)+(w<np.max(w)*1e-3)
+mask  = np.any(np.isnan(m),0)|np.isnan(w)|(w<np.max(w)*1e-3)
 m[:,mask] = 0
 w[mask] = 0
 # The function of the mask is to apodize edges, so smooth out the middle
 w0 = np.max(w)*0.05
 w = 1/(1+w0/w)
 wm = m*w
+
+print np.std(m), np.std(w), np.std(wm)
 
 # Pad to fft-friendly size
 def filter_gauss(l, lsigma):
@@ -64,6 +66,8 @@ for mode in args.mode:
 	for j in range(i+1,len(filters)):
 		filters[j] = filters[i]
 	# Apply filter
+	print np.std(filters)
+	print enmap.map2harm(wm)
 	wm = enmap.harm2map(enmap.map2harm(wm)*filters)
 
 # And recover filtered map

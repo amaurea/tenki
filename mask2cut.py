@@ -1,5 +1,5 @@
 import numpy as np, os, bunch
-from enlib import utils, config, rangelist, mpi, pmat, scan as enscan, enmap, coordinates
+from enlib import utils, config, rangelist, mpi, pmat, scan as enscan, enmap, coordinates, errors
 from enact import filedb, actdata, files
 parser = config.ArgumentParser(os.environ["HOME"]+"./enkirc")
 parser.add_argument("sel")
@@ -29,8 +29,12 @@ for ind in myinds:
 	id = ids[ind]
 	entry = filedb.data[id]
 	# We only need pointing to build this cut
-	d = actdata.read(entry, ["point_offsets","boresight","site","layout"])
-	d = actdata.calibrate(d, exclude=["autocut"])
+	try:
+		d = actdata.read(entry, ["point_offsets","boresight","site","layout"])
+		d = actdata.calibrate(d, exclude=["autocut"])
+	except errors.DataMissing as e:
+		print "Skipping %s (%s)" % (id, e.message)
+		continue
 	# Build a projector between samples and mask. This
 	# requires us to massage d into scan form. It's getting
 	# annoying that scan and data objects aren't compatible.

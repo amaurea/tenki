@@ -9,6 +9,7 @@ parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-a", "--apod",    type=str, default=None)
 parser.add_argument("-e", "--edge",    type=int, default=0)
 parser.add_argument("-t", "--trim",    type=int, default=1, help="Amount to trim maps that need to be interplated by, in pixels on each side.")
+parser.add_argument("--fslice", type=str, default="")
 args = parser.parse_args()
 
 L = log.init(level=log.DEBUG if args.verbose else log.ERROR)
@@ -16,6 +17,8 @@ L = log.init(level=log.DEBUG if args.verbose else log.ERROR)
 n = len(args.imaps_and_hits)
 imaps = args.imaps_and_hits[:n/2]
 ihits = args.imaps_and_hits[n/2:]
+imaps = eval("imaps" + args.fslice)
+ihits = eval("ihits" + args.fslice)
 
 apod_params = [float(w) for w in args.apod.split(":")] if args.apod else None
 

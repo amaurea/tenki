@@ -56,9 +56,10 @@ L.info("Detecting scanning patterns")
 boxes = np.zeros([len(ids),2,2])
 for ind in range(comm_world.rank, len(ids), comm_world.size):
 	id    = ids[ind]
-	entry = filedb.data[id]
+	entry = filedb.data.query(id,multi=True)
 	try:
-		d = actdata.calibrate(actdata.read(entry, ["boresight","tconst"]))
+		d = actdata.calibrate(actdata.read(entry, ["boresight","tconst","cut","cut_noiseest"]))
+		if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("no data")
 	except errors.DataMissing as e:
 		L.debug("Skipped %s (%s)" % (ids[ind], e.message))
 		continue
@@ -97,15 +98,20 @@ for pid, gind, group in tasks[comm_group.rank::comm_group.size]:
 	for ind in group:
 		id = ids[ind]
 		L.info("%3d: %s" % (gind, id))
-		entry = filedb.data[id]
+		entry = filedb.data.query(id, multi=True)
 		try:
-			scan = actscan.ACTScan(entry, dark=True)
+			scan = actscan.ACTScan(entry)
 			scan = scan[:,args.i0:args.i1]
 			scan = scan[:,::config.get("downsample")]
 			scans.append(scan)
 		except errors.DataMissing as e:
 			L.debug("Skipped %s (%s)" % (id, e.message))
 			continue
+	# Count how many scans we actually managed to read
+	nscan = comm_world.allreduce(len(scans))
+	if nscan == 0:
+		L.debug("Skipped group %d (failed to read scans)" % gind)
+		continue
 
 	# Output name for this group
 	proot=root + "pattern_%02d_el_%.1f_az_%.1f_%.1f_ind_%03d_" % (pid, pboxes[pid,0,0]/utils.degree,

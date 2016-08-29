@@ -7,7 +7,7 @@ pixel."""
 import numpy as np, argparse, sys
 from enlib import enmap, utils
 parser = argparse.ArgumentParser()
-parser.add_argument("files", nargs="+")
+parser.add_argument("files", nargs="+", help="map hit odiv map hit odiv ..., or map map ... hit hit ... odiv odiv ... if -T is passed")
 parser.add_argument("-b", "--blocksize", type=int, default=3)
 parser.add_argument("--srate", type=float, default=400)
 parser.add_argument("-T", "--transpose", action="store_true")
@@ -51,6 +51,9 @@ def get_bias(bs):
 	biases = [0, 0, 0.74, 0.89, 0.94, 0.96, 0.97, 0.98, 0.99, 0.99, 0.99]
 	return 1.0 if bs >= len(biases) else biases[bs]
 
+def quant(a, q): return np.percentile(a, q*100)
+qlim = 0.95
+
 print "Measuring sensitivities"
 ratios = []
 for i, (mapfile, hitfile) in enumerate(zip(mapfiles[1:], hitfiles[1:])):
@@ -60,7 +63,8 @@ for i, (mapfile, hitfile) in enumerate(zip(mapfiles[1:], hitfiles[1:])):
 	dmap = (map2-map)/2
 	dhit = hit2+hit
 	vmap = calc_map_block_ivar(dmap, bs)
-	mask = (hit>np.max(hit)*hitlim) & (hit2>np.max(hit2)*hitlim)
+	mask  = (hit>quant(hit,qlim)*hitlim) & (hit2>quant(hit2,qlim)*hitlim)
+	mask &= (hit<quant(hit,qlim)) & (hit2<quant(hit2,qlim))
 	# Reduce dhit and mask to vmap's resolution
 	dhit = calc_map_block_mean(dhit, bs)
 	mask = calc_map_block_mean(mask, bs)>0

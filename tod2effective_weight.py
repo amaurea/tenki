@@ -40,7 +40,7 @@ div_all, div_med = sig_all*0, sig_med*0
 # Read in all our scans
 for ind in range(comm.rank, len(ids), comm.size):
 	id = ids[ind]
-	entry = filedb.data.query(id, multi=True)
+	entry = filedb.data[id]
 	try:
 		d = actscan.ACTScan(entry)
 		if d.ndet == 0 or d.nsamp == 0:

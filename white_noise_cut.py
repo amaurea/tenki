@@ -38,7 +38,7 @@ if args.full_stats: stats = np.zeros([ntod,ndet,4])
 for si in range(comm.rank, ntod, comm.size):
 	try:
 		id    = ids[si]
-		entry = filedb.data.query(id,multi=True)
+		entry = filedb.data[id]
 		ofile = "%s/%s.txt" % (args.odir, id)
 		try:
 			d     = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight","hwp"])

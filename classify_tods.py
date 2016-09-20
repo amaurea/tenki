@@ -17,7 +17,7 @@ filelist = filedb.scans[args.query].ids
 hprint = False
 for ind in range(comm.rank, len(filelist), comm.size):
 	id    = filelist[ind]
-	entry = db[id]
+	entry = db.query(id, multi=False)
 
 	# Get a few representative samples
 	site  = files.read_site(entry.site)

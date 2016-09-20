@@ -3,7 +3,7 @@ from scipy import ndimage
 from enlib import enmap, utils
 from enact import files
 parser = argparse.ArgumentParser()
-parser.add_argument("ifiles", nargs="+")
+parser.add_argument("ifiles", nargs="+", help="imap imap ... layout layout ... if not transpose, else interlaced")
 parser.add_argument("ofile")
 parser.add_argument("-s", "--step", type=int,   default=3)
 parser.add_argument("-r", "--res",  type=float, default=0.2)
@@ -20,7 +20,7 @@ if not args.transpose:
 	ilayfiles = args.ifiles[nfile:]
 else:
 	imapfiles = args.ifiles[0::2]
-	ilayfiles = args.ifiles[1:.2]
+	ilayfiles = args.ifiles[1::2]
 
 # Read in our focalplane layouts so we can define our output map bounds
 dets, offs, boxes, imaps = [], [], [], []
@@ -35,7 +35,7 @@ for i in range(nfile):
 	boxes.append(box)
 	imaps.append(imap)
 box = utils.bounding_box(boxes)
-box = utils.widen_box(box, rad, relative=False)
+box = utils.widen_box(box, rad*5, relative=False)
 
 # We assume that the two maps have the same pixelization
 imaps = enmap.samewcs(np.array(imaps), imaps[0])

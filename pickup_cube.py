@@ -56,7 +56,7 @@ L.info("Detecting scanning patterns")
 boxes = np.zeros([len(ids),2,2])
 for ind in range(comm_world.rank, len(ids), comm_world.size):
 	id    = ids[ind]
-	entry = filedb.data.query(id,multi=True)
+	entry = filedb.data[id]
 	try:
 		d = actdata.calibrate(actdata.read(entry, ["boresight","tconst","cut","cut_noiseest"]))
 		if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("no data")
@@ -98,7 +98,7 @@ for pid, gind, group in tasks[comm_group.rank::comm_group.size]:
 	for ind in group:
 		id = ids[ind]
 		L.info("%3d: %s" % (gind, id))
-		entry = filedb.data.query(id, multi=True)
+		entry = filedb.data[id]
 		try:
 			scan = actscan.ACTScan(entry)
 			scan = scan[:,args.i0:args.i1]

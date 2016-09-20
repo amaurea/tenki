@@ -16,7 +16,7 @@ ids     = scan_db.ids
 stats = []
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
-	entry = file_db.query(id,multi=True)
+	entry = file_db[id]
 	try:
 		stats.append(todinfo.build_tod_stats(entry))
 	except errors.DataMissing as e:

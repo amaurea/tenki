@@ -9,7 +9,7 @@ ids = filedb.scans[args.query].ids
 if len(ids) == 0:
 	print "No matching tods!"
 else:
-	entry = filedb.data.query(ids[0], multi=True)
+	entry = filedb.data[ids[0]]
 	names = sorted(entry.keys())
 	for name in names:
 		vals = entry[name]

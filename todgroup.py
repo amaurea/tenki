@@ -40,7 +40,7 @@ for line in open(args.todinfo,"r"):
 	az = utils.rewind(float(toks[1]),0,360)
 	el = float(toks[2])
 	t  = float(id[:id.index(".")])
-	if site is None: site = files.read_site(entry.site)
+	if site is None: site = files.read_site(entry.site[0])
 
 	angle = calc_driftangle([az*np.pi/180,el*np.pi/180],t,site)*180/np.pi
 	if not np.isfinite(angle): continue

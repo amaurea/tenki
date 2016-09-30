@@ -12,6 +12,7 @@ parser.add_argument("-b", "--blocksize", type=int, default=3)
 parser.add_argument("--srate", type=float, default=400)
 parser.add_argument("-T", "--transpose", action="store_true")
 parser.add_argument("-D", "--dry-run",   action="store_true")
+parser.add_argument("-v", "--verbose",   action="store_true")
 args = parser.parse_args()
 hitlim = 0.05
 bs = args.blocksize
@@ -40,7 +41,9 @@ def calc_map_block_mean(map, n):
 	m = map_to_blocks(map, n)
 	return enmap.samewcs(np.mean(m, axis=(-3,-1)), map[...,::n,::n])
 
-map = enmap.read_map(mapfiles[0])
+print "Reading map %s" % (mapfiles[0])
+map = enmap.read_map(mapfiles[0]).preflat[0]
+print "Reading hit %s" % (hitfiles[0])
 hit = enmap.read_map(hitfiles[0])
 # We assume that the hitcount maps are 2d
 def get_bias(bs):
@@ -57,7 +60,9 @@ qlim = 0.95
 print "Measuring sensitivities"
 ratios = []
 for i, (mapfile, hitfile) in enumerate(zip(mapfiles[1:], hitfiles[1:])):
-	map2 = enmap.read_map(mapfile)
+	print "Reading map %s" % mapfile
+	map2 = enmap.read_map(mapfile).preflat[0]
+	print "Reading hit %s" % hitfile
 	hit2 = enmap.read_map(hitfile)
 	# Compute variances for the current map minus the previous map
 	dmap = (map2-map)/2

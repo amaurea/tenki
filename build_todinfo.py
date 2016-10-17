@@ -8,11 +8,14 @@ parser.add_argument("ofile")
 args = parser.parse_args()
 
 file_db = filedb.ACTFiles()
-scan_db = tagdb.read(args.tagfile)
+scan_db = todinfo.read(args.tagfile)
 comm    = mpi.COMM_WORLD
 
-scan_db = scan_db[args.sel]
+# We want to process *all* tods, not just selected ones. Could also
+# achieve this by adding /all to the selector.
+scan_db = scan_db.select(scan_db.query(args.sel, apply_default_query=False))
 ids     = scan_db.ids
+
 stats = []
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
@@ -35,8 +38,8 @@ inds = np.argsort(stats["id"])
 for key in stats:
 	stats[key] = utils.moveaxis(stats[key][inds],0,-1)
 stat_db = todinfo.Todinfo(stats)
-# Merge with original tags
-stat_db += scan_db
+# Merge with original tags. Rightmost overrides.
+stat_db = scan_db + stat_db
 
 if comm.rank == 0:
 	print "Writing"

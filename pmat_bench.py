@@ -43,21 +43,21 @@
 # the quite significant difference in flops is drowned in memory
 # overhead.
 
-import numpy as np, argparse, bunch, os, time, sys
-from enlib import pmat, config, utils, interpol, coordinates, bench, enmap
+import numpy as np, argparse, os, time, sys
+from enlib import pmat, config, utils, interpol, coordinates, bench, enmap, bunch
 config.default("map_bits", 64, "Bits to use for maps")
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("--t",   type=float, default=56935, help="mjd")
 parser.add_argument("--wt",  type=float, default=15,    help="minutes")
 parser.add_argument("--az",  type=float, default=55,    help="degrees")
-parser.add_argument("--waz", type=float, default=20,    help="degrees")
+parser.add_argument("--waz", type=float, default=80,    help="degrees")
 parser.add_argument("--el",  type=float, default=60,    help="degrees")
 parser.add_argument("--wel", type=float, default=2,     help="degrees")
 parser.add_argument("--res", type=float, default=0.5,   help="arcmin")
-parser.add_argument("--nsamp", type=int, default=100000)
-parser.add_argument("--ndet",  type=int, default=100)
+parser.add_argument("--nsamp", type=int, default=200000)
+parser.add_argument("--ndet",  type=int, default=1000)
 parser.add_argument("--ntime", type=int, default=3)
-parser.add_argument("-T", action="store_true")
+#parser.add_argument("-T", action="store_true")
 parser.add_argument("-H", "--hwp", action="store_true")
 parser.add_argument("-i", "--interpolator", type=str, default="all")
 parser.add_argument("-s", "--seed", type=int, default=0)
@@ -106,18 +106,23 @@ class hor2pix:
 		res[:2] = enmap.sky2pix(self.shape, self.wcs, res[1::-1])
 		return res
 
+det_pos = (np.random.standard_normal((ndet,3))*utils.degree).astype(ptype)
+det_pos[:,0] = 0
+det_box = np.array([np.min(det_pos,0),np.max(det_pos,0)])
+det_comps = np.full((ndet,3),1,dtype=dtype)
+
 # input box
 t0 = args.t
 ibox = np.array([
-		[-args.wt/2., args.wt/2.],
+		[0, args.wt],
 		[args.az-args.waz/2., args.az+args.waz/2.],
 		[args.el-args.wel/2., args.el+args.wel/2.],
-	]).T
+	]).T + det_box/utils.degree
 # units
 ibox[:,0]  /= 24*60
 ibox[:,1:] *= utils.degree
 wibox = ibox.copy()
-wibox[:,1:] = utils.widen_box(ibox[:,1:])
+wibox[:,:] = utils.widen_box(ibox[:,:])
 
 # output box
 icorners = utils.box2corners(ibox)
@@ -129,11 +134,15 @@ wobox    = utils.widen_box(obox)
 shape, wcs = enmap.geometry(pos=wobox[:,::-1], res=args.res*utils.arcmin, proj="cea")
 nphi = int(2*np.pi/(args.res*utils.arcmin))
 map_orig = enmap.rand_gauss((ncomp,)+shape, wcs).astype(dtype)
+print "map shape %s" % str(map_orig.shape)
+
 pbox = np.array([[0,0],shape],dtype=int)
 # define a test tod
-bore = (ibox[None,0] + np.random.uniform(0,1,size=(nsamp,3))*(ibox[1]-ibox[0])[None,:]).astype(ptype)
-det_pos = np.zeros((ndet,3),dtype=ptype)
-det_comps = np.full((ndet,3),1,dtype=dtype)
+bore = np.zeros([nsamp,3],dtype=ptype)
+bore[:,0] = (args.wt*np.linspace(0,1,nsamp,endpoint=False))/24/60
+bore[:,1] = (args.az + args.waz/2*np.sin(np.linspace(0,1,nsamp,endpoint=False)*2*np.pi*20))*utils.degree
+bore[:,2] = (args.el + args.wel/2*np.sin(np.linspace(0,1,nsamp,endpoint=False)*2*np.pi))*utils.degree
+#bore = (ibox[None,0] + np.random.uniform(0,1,size=(nsamp,3))*(ibox[1]-ibox[0])[None,:]).astype(ptype)
 tod = np.zeros((ndet,nsamp),dtype=dtype)
 psi = np.arange(nsamp)*2*np.pi/100
 hwp = np.zeros([nsamp,2])
@@ -145,64 +154,52 @@ transfun = hor2pix(shape, wcs, t0)
 errlim   = np.array([0.01, 0.01, utils.arcmin, utils.arcmin])*acc
 # build our interpolator
 ipfuns = {
-		"grad":  interpol.ip_grad,
-		"igrad": interpol.ip_grad,
-		"ograd": interpol.ip_grad,
-		"bilin": interpol.ip_ndimage,
-		"test":  interpol.ip_ndimage,
-		"test2": interpol.ip_grad,
+		"std_gr_0": interpol.ip_ndimage,
+		"std_bi_0": interpol.ip_ndimage,
+		"std_bi_1": interpol.ip_ndimage,
 	}
 if args.interpolator == "all":
 	ipnames = sorted(ipfuns.keys())
 else:
 	ipnames = args.interpolator.split(",")
 
-for ipname in ipnames:
-	ipfun = ipfuns[ipname]
-	t1 = time.time()
-	ipol, obox, ok, err = interpol.build(transfun, ipfun, wibox, errlim,
-			maxsize=max_size, maxtime=max_time, return_obox=True, return_status=True, order=1)
-	t2 = time.time()
-	tbuild = t2-t1
-	# evaluate accuracy
-	pos_exact = transfun(bore.T)
-	pos_inter = ipol(bore.T)
-	err  = np.max(np.abs(pos_exact-pos_inter)/errlim[:,None])*acc
-	err2 = np.max(np.std(pos_exact-pos_inter,1)/errlim)*acc
-	# evaluate speed
-	if ipname == "ograd":
-		rbox, nbox, yvals = pmat.extract_interpol_params_old(ipol, ptype)
-	else:
+for dir in [-1,1]:
+	for ipname in ipnames:
+		ipfun = ipfuns[ipname]
+		t1 = time.time()
+		ipol, obox, ok, err = interpol.build(transfun, ipfun, wibox, errlim,
+				maxsize=max_size, maxtime=max_time, return_obox=True, return_status=True, order=1)
+		t2 = time.time()
+		tbuild = t2-t1
+		# evaluate accuracy
+		pos_exact = transfun(bore.T)
+		pos_inter = ipol(bore.T)
+		err  = np.max(np.abs(pos_exact-pos_inter)/errlim[:,None])*acc
+		err2 = np.max(np.std(pos_exact-pos_inter,1)/errlim)*acc
+		# evaluate speed
 		rbox, nbox, yvals = pmat.extract_interpol_params(ipol, ptype)
-	map = map_orig.copy()
-	tod = np.arange(tod.size,dtype=dtype).reshape(tod.shape)*1e-8
-	t1 = time.time()
+		map = map_orig.copy()
+		tod = np.arange(tod.size,dtype=dtype).reshape(tod.shape)*1e-8
 
-	dir = -1 if args.T else 1
-	for i in range(args.ntime):
-		if ipname == "grad":
-			core.pmat_nearest_grad_precomp_internal(dir, 1, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
-				np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
-		elif ipname == "igrad":
-			core.pmat_nearest_grad_implicit(dir, 1, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
-				np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
-		elif ipname == "ograd":
-			core.pmat_nearest_grad_precomp(dir, 1, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
-				np.zeros(1), rbox.T, nbox, yvals.T, pbox.T)
-		elif ipname == "bilin":
-			core.pmat_nearest_bilinear(dir, 1, 1, tod.T, map.T, bore.T, det_pos.T, det_comps.T,
-				np.zeros(1), rbox.T, nbox, yvals.T, pbox.T, nphi)
-		elif ipname == "test":
-			core.pmat_map(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-				rbox.T, nbox, yvals.T, pbox.T, nphi)
-		elif ipname == "test2":
-			core.pmat_map(dir, 2, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-				rbox.T, nbox, yvals.T, pbox.T, nphi)
-	t2 = time.time()
-	tuse = (t2-t1)/args.ntime
-	if dir > 0:
-		val = np.sum(tod**2)
-	else:
-		val = np.sum(map**2)
-	print "ip: %-6s b: %6.4f o: %d s: %5.3f M a: %5.3f %5.3f u: %6.4f v: %18.12e" % (
-			ipname, tbuild, ok, np.product(nbox)*1e-6, err, err2, tuse, val)
+		#dir = -1 if args.T else 1
+		t1 = time.time()
+		times = np.zeros(5)
+		for i in range(args.ntime):
+			if   ipname == "std_gr_0":
+				core.pmat_map(dir, 2, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
+					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
+			elif ipname == "std_bi_0":
+				core.pmat_map(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
+					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
+			elif ipname == "std_bi_1":
+				core.pmat_map(dir, 1, 2, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
+					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
+		t2 = time.time()
+		tuse = (t2-t1)/args.ntime
+		times /= args.ntime
+		if dir > 0:
+			val = np.sum(tod**2)
+		else:
+			val = np.sum(map**2)
+		print "ip %-8s dir %2d tb %6.4f ok %d size %5.3f M acc %5.2f %5.2f t %5.3f: %5.3f %5.3f %5.3f %5.3f %5.3f v %13.7e" % ((
+				ipname, dir, tbuild, ok, np.product(nbox)*1e-6, err, err2, tuse) + tuple(times) + (val,))

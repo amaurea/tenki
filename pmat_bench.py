@@ -190,7 +190,7 @@ for dir in dirs:
 		map = map_orig.copy()
 		tod = np.arange(tod.size,dtype=dtype).reshape(tod.shape)*1e-8
 
-		if ipname.split("_")[0] in ["shift","spre"]:
+		if ipname.split("_")[0] in ["shift","spre","sbuf","sphase","spoly"]:
 			# Build shift parameters
 			sdir   = pmat.get_scan_dir(bore[:,1])
 			period = pmat.get_scan_period(bore[:,1], srate)
@@ -201,12 +201,18 @@ for dir in dirs:
 			pmat_test_get_pix = core.pmat_test_get_pix_single if ptype == np.float32 else core.pmat_test_get_pix
 			pmat_test_get_pix(1, 1, pix.T, phase.T, bore.T, hwp.T, det_pos.T, det_comps.T,
 				rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi)
+		if ipname.split("_")[0] in ["spoly"]:
+			poly = pmat.PolyInterpol(transfun, bore, det_pos)
 
 		# What we have learned so far:
 		# * Shifted is 2-3 times faster for the projection part
 		# * With shifted, multiple buffers is twice as fast as atomics for dir -1
 		# * Single precision pointing calculations have practically no effect
 		# * Single precision data also has almost no effect (aside from saving memory)
+		# * Even before these savings, the pointing interpolation is what takes the most time,
+		#   and afterwards it takes 75% of the time
+		# * The pointing interpolation has a relatively low cache miss rate compared to
+		#   the rest of the program: 20%. Not very good, but not as bad as std_bi_0 which has 60%.
 		# This is based on results on simons desktop (24 cores)
 
 		t1 = time.time()
@@ -230,6 +236,12 @@ for dir in dirs:
 			elif ipname == "sbuf_bi_0":
 				core.pmat_test_mbuf(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
 					rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi, times)
+			elif ipname == "sphase_bi_0":
+				core.pmat_test_mbuf_phtest(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
+					rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi, times)
+			elif ipname == "spoly_0":
+				core.pmat_test_mbuf_poly(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_comps.T,
+					poly.coeffs.T, sdir, wbox.T, wshift.T, nphi, times)
 			elif ipname == "shift_gr_0":
 				pmat_test(dir, 2, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
 					rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi, times)

@@ -191,9 +191,9 @@ for dir in dirs:
 		tod = np.arange(tod.size,dtype=dtype).reshape(tod.shape)*1e-8
 
 		tpre = 0
-		if ipname.split("_")[0] in ["spoly","sint"]:
+		if ipname.split("_")[0] in ["spoly","sint","siflat"] or ipname.startswith("new_siflat"):
 			poly = pmat.PolyInterpol(transfun, bore, det_pos)
-		if ipname.split("_")[0] in ["shift","spre","sbuf","sphase","spoly","sint"]:
+		if ipname.split("_")[0] in ["shift","spre","sbuf","sphase","spoly","sint","siflat"] or ipname.startswith("new_siflat"):
 			# Build shift parameters
 			sdir   = pmat.get_scan_dir(bore[:,1])
 			period = pmat.get_scan_period(bore[:,1], srate)
@@ -221,6 +221,22 @@ for dir in dirs:
 			phase = np.zeros([ndet,nsamp,2],dtype)
 			pmat_int_get_pix = core.pmat_int_get_pix
 			pmat_int_get_pix(1, 1, pix.T, phase.T, bore.T, hwp.T, det_comps.T,
+				poly.coeffs.T, sdir, wbox.T, wshift.T, nphi)
+			t4 = time.time()
+			tpre = t4-t3
+		if ipname.split("_")[0] in ["siflat"]:
+			t3 = time.time()
+			pix   = np.zeros([ndet,nsamp],np.int32)
+			phase = np.zeros([ndet,nsamp,2],dtype)
+			core.pmat_int_get_pix_flat(1, 1, pix.T, phase.T, bore.T, hwp.T, det_comps.T,
+				poly.coeffs.T, sdir, wbox.T, wshift.T, nphi)
+			t4 = time.time()
+			tpre = t4-t3
+		if ipname.startswith("new_siflat"):
+			t3 = time.time()
+			pix   = np.zeros([ndet,nsamp],np.int32)
+			phase = np.zeros([ndet,nsamp,2],dtype)
+			core.pmat_map_get_pix_poly_shift(pix.T, phase.T, bore.T, hwp.T, det_comps.T,
 				poly.coeffs.T, sdir, wbox.T, wshift.T, nphi)
 			t4 = time.time()
 			tpre = t4-t3
@@ -272,6 +288,23 @@ for dir in dirs:
 				core.pmat_poly_use_pix(dir, 1, 1, 1, tod.T, map.T, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
 			elif ipname == "sint_0":
 				core.pmat_int_use_pix(dir, 1, 1, 1, tod.T, map.T, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
+			elif ipname == "siflat_0":
+				core.pmat_int_use_pix_flat(dir, 1, 1, 1, tod.T, map.T, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
+			elif ipname == "new_bi_na":
+				core.pmat_map_direct_grid(dir, tod.T, 1, map.T, 1, 1, 1, 0, bore.T, hwp.T, det_pos.T, det_comps.T,
+					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
+			elif ipname == "new_bi_at":
+				core.pmat_map_direct_grid(dir, tod.T, 1, map.T, 1, 1, 1, 1, bore.T, hwp.T, det_pos.T, det_comps.T,
+					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
+			elif ipname == "new_bi_buf":
+				core.pmat_map_direct_grid(dir, tod.T, 1, map.T, 1, 1, 1, 2, bore.T, hwp.T, det_pos.T, det_comps.T,
+					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
+			elif ipname == "new_siflat_na":
+				core.pmat_map_use_pix_shift(dir, tod.T, 1, map.T, 1, 0, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
+			elif ipname == "new_siflat_at":
+				core.pmat_map_use_pix_shift(dir, tod.T, 1, map.T, 1, 1, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
+			elif ipname == "new_siflat_buf":
+				core.pmat_map_use_pix_shift(dir, tod.T, 1, map.T, 1, 2, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
 
 		if False and dir < 0:
 			enmap.write_map("%s_map.fits" % ipname, map)
@@ -289,5 +322,5 @@ for dir in dirs:
 			val = np.sum(tod**2)
 		else:
 			val = np.sum(map**2)
-		print "ip %-12s dir %2d tb %6.4f ok %d size %5.3f M acc %5.2f %5.2f t %5.3f: %5.3f %5.3f %5.3f %5.3f %5.3f v %13.7e %5.3f" % ((
+		print "ip %-14s dir %2d tb %6.4f ok %d size %5.3f M acc %5.2f %5.2f t %5.3f: %5.3f %5.3f %5.3f %5.3f %5.3f v %13.7e %5.3f" % ((
 				ipname, dir, tbuild, ok, np.product(nbox)*1e-6, err, err2, tuse) + tuple(times) + (val,tpre))

@@ -154,10 +154,10 @@ signal_params = signal_params[i:i+1] + signal_params[:i] + signal_params[i+1:]
 # We only support a single distributed map
 dsys = None
 for sig in signal_params:
-	if sig["type"] == "dmap":
+	if sig["type"] in ["dmap","fdmap"]:
 		if dsys: raise ValueError("Only a single map may be distributed")
 		else: dsys=sig["sys"]
-	if sig["type"] in ["map", "dmap"]:
+	if sig["type"] in ["map", "dmap", "fmap", "fdmap"]:
 		assert "value" in sig and sig["value"] is not None, "Map-type signals need a template map as argument. E.g. -S sky:foo.fits"
 
 ######## Filter parmeters ########
@@ -298,10 +298,18 @@ for out_ind in range(nouter):
 			area = enmap.read_map(param["value"])
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
+		elif param["type"] == "fmap":
+			area = enmap.read_map(param["value"])
+			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+			signal = mapmaking.SignalMapFast(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
 		elif param["type"] == "dmap":
 			area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
 			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
+		elif param["type"] == "fdmap":
+			area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
+			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+			signal = mapmaking.SignalDmapFast(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
 		elif param["type"] == "bmap":
 			area = enmap.read_map(param["value"])
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
@@ -488,7 +496,7 @@ for out_ind in range(nouter):
 
 	if nmax > 0:
 		L.info("Solving")
-		cg = CG(eqsys.A, eqsys.b, M=eqsys.M, dot=eqsys.dof.dot)
+		cg = CG(eqsys.A, eqsys.b, M=eqsys.M, dot=eqsys.dot)
 		dump_steps = [int(w) for w in args.dump.split(",")]
 		while cg.i < nmax:
 			with bench.mark("cg_step"):
@@ -498,4 +506,5 @@ for out_ind in range(nouter):
 				x = eqsys.postprocess(cg.x)
 				eqsys.write(root, "map%04d" % cg.i, x)
 			bench.stats.write(benchfile)
-			L.info("CG step %5d %15.7e %6.1f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans))))
+			ptime = bench.stats["M"]["time"].last
+			L.info("CG step %5d %15.7e %6.1f %6.3f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans)), ptime))

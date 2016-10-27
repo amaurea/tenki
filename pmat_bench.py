@@ -166,145 +166,66 @@ transfun = hor2pix(shape, wcs, t0)
 errlim   = np.array([0.01, 0.01, utils.arcmin, utils.arcmin])*acc
 ipfun    = interpol.ip_ndimage
 if args.interpolator == "all":
-	ipnames = ["std_bi_0","std_bi_1","std_gr_0"]
+	ipnames = ["fast","std_bi_0","std_bi_1","std_bi_3"]
 else:
 	ipnames = args.interpolator.split(",")
 pix = None
 
 for dir in dirs:
 	for ipname in ipnames:
-		t1 = time.time()
-		corners = utils.box2corners(wibox).T
-		ocorners = transfun(corners)
-		ipol, obox, ok, err = interpol.build(transfun, ipfun, wibox, errlim,
-				maxsize=max_size, maxtime=max_time, return_obox=True, return_status=True, order=1)
-		t2 = time.time()
-		tbuild = t2-t1
-		# evaluate accuracy
-		pos_exact = transfun(bore.T)
-		pos_inter = ipol(bore.T)
+		# Precompute pointing
+		if ipname.split("_")[0] in ["std"]:
+			t1 = time.time()
+			corners = utils.box2corners(wibox).T
+			ocorners = transfun(corners)
+			ipol, obox, ok, err = interpol.build(transfun, ipfun, wibox, errlim,
+					maxsize=max_size, maxtime=max_time, return_obox=True, return_status=True, order=1)
+			t2 = time.time()
+			tbuild = t2-t1
+			# evaluate accuracy
+			pos_exact = transfun(bore.T)
+			pos_inter = ipol(bore.T)
+			rbox, nbox, yvals = pmat.extract_interpol_params(ipol, ptype)
+		else:
+			t1 = time.time()
+			poly = pmat.PolyInterpol(transfun, bore, det_pos)
+			tbuild = time.time()-t1
+			pos_exact = transfun((bore + det_pos[0]).T)
+			pos_inter = poly(bore, [0])[0]
+			ok   = True
+			nbox = [ndet, 11]
 		err  = np.max(np.abs(pos_exact-pos_inter)/errlim[:,None])*acc
 		err2 = np.max(np.std(pos_exact-pos_inter,1)/errlim)*acc
-		# evaluate speed
-		rbox, nbox, yvals = pmat.extract_interpol_params(ipol, ptype)
+
+		# Set up arrays
 		map = map_orig.copy()
 		tod = np.arange(tod.size,dtype=dtype).reshape(tod.shape)*1e-8
 
+		# Precompute pixels if necessary
 		tpre = 0
-		if ipname.split("_")[0] in ["spoly","sint","siflat"] or ipname.startswith("new_siflat"):
-			poly = pmat.PolyInterpol(transfun, bore, det_pos)
-		if ipname.split("_")[0] in ["shift","spre","sbuf","sphase","spoly","sint","siflat"] or ipname.startswith("new_siflat"):
-			# Build shift parameters
+		if ipname == "fast":
+			pix    = np.zeros([ndet,nsamp],np.int32)
+			phase  = np.zeros([ndet,nsamp,2],dtype)
 			sdir   = pmat.get_scan_dir(bore[:,1])
 			period = pmat.get_scan_period(bore[:,1], srate)
 			wbox, wshift = pmat.build_work_shift(transfun, wibox, period)
-		if ipname.split("_")[0] in ["spre"]:
-			t3 = time.time()
-			pix   = np.zeros([ndet,nsamp,2],ptype)
-			phase = np.zeros([ndet,nsamp,3],ptype)
-			pmat_test_get_pix = core.pmat_test_get_pix_single if ptype == np.float32 else core.pmat_test_get_pix
-			pmat_test_get_pix(1, 1, pix.T, phase.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-				rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi)
-			t4 = time.time()
-			tpre = t4-t3
-		if ipname.split("_")[0] in ["sprepo"]:
-			t3 = time.time()
-			pix   = np.zeros([ndet,nsamp,2],ptype)
-			phase = np.zeros([ndet,nsamp,2],dtype)
-			core.pmat_poly_get_pix(1, 1, pix.T, phase.T, bore.T, hwp.T, det_comps.T,
-				poly.coeffs.T, sdir, wbox.T, wshift.T, nphi)
-			t4 = time.time()
-			tpre = t4-t3
-		if ipname.split("_")[0] in ["sint"]:
-			t3 = time.time()
-			pix   = np.zeros([ndet,nsamp,2],np.int16)
-			phase = np.zeros([ndet,nsamp,2],dtype)
-			pmat_int_get_pix = core.pmat_int_get_pix
-			pmat_int_get_pix(1, 1, pix.T, phase.T, bore.T, hwp.T, det_comps.T,
-				poly.coeffs.T, sdir, wbox.T, wshift.T, nphi)
-			t4 = time.time()
-			tpre = t4-t3
-		if ipname.split("_")[0] in ["siflat"]:
-			t3 = time.time()
-			pix   = np.zeros([ndet,nsamp],np.int32)
-			phase = np.zeros([ndet,nsamp,2],dtype)
-			core.pmat_int_get_pix_flat(1, 1, pix.T, phase.T, bore.T, hwp.T, det_comps.T,
-				poly.coeffs.T, sdir, wbox.T, wshift.T, nphi)
-			t4 = time.time()
-			tpre = t4-t3
-		if ipname.startswith("new_siflat"):
-			t3 = time.time()
-			pix   = np.zeros([ndet,nsamp],np.int32)
-			phase = np.zeros([ndet,nsamp,2],dtype)
+			t1 = time.time()
 			core.pmat_map_get_pix_poly_shift(pix.T, phase.T, bore.T, hwp.T, det_comps.T,
-				poly.coeffs.T, sdir, wbox.T, wshift.T, nphi)
-			t4 = time.time()
-			tpre = t4-t3
-
-		# What we have learned so far:
-		# * Shifted is 2-3 times faster for the projection part
-		# * With shifted, multiple buffers is twice as fast as atomics for dir -1
-		# * Single precision pointing calculations have practically no effect
-		# * Single precision data also has almost no effect (aside from saving memory)
-		# * Even before these savings, the pointing interpolation is what takes the most time,
-		#   and afterwards it takes 75% of the time
-		# * The pointing interpolation has a relatively low cache miss rate compared to
-		#   the rest of the program: 20%. Not very good, but not as bad as std_bi_0 which has 60%.
-		# This is based on results on simons desktop (24 cores)
+				poly.coeffs.T, sdir, wbox.T, wshift.T)
+			t2 = time.time()
+			tpre = t2-t1
 
 		t1 = time.time()
 		times = np.zeros(5, dtype=ptype)
+		iptoks = ipname.split("_")
 		for i in range(args.ntime):
-			pmat_map  = core.pmat_map_single  if ptype == np.float32 else core.pmat_map
-			pmat_test = core.pmat_test_single if ptype == np.float32 else core.pmat_test
-			pmat_test_use_pix = core.pmat_test_use_pix_single if ptype == np.float32 else core.pmat_test_use_pix
-			if   ipname == "std_gr_0":
-				pmat_map(dir, 2, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
+			if ipname == "fast":
+				core.pmat_map_use_pix_shift(dir, tod.T, 1, map.T, 1, pix.T, phase.T, wbox.T, wshift.T, nphi, times)
+			elif iptoks[0] == "std":
+				pmet = {"bi":1,"gr":2}[iptoks[1]]
+				mmet = int(iptoks[2])
+				core.pmat_map_direct_grid(dir, tod.T, 1, map.T, 1, pmet, mmet, bore.T, hwp.T, det_pos.T, det_comps.T,
 					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
-			elif ipname == "std_bi_0":
-				pmat_map(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
-			elif ipname == "std_bi_1":
-				pmat_map(dir, 1, 2, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
-			elif ipname == "shift_bi_0":
-				pmat_test(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "sbuf_bi_0":
-				core.pmat_test_mbuf(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "sphase_bi_0":
-				core.pmat_test_mbuf_phtest(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "spoly_0":
-				core.pmat_test_mbuf_poly(dir, 1, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_comps.T,
-					poly.coeffs.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "shift_gr_0":
-				pmat_test(dir, 2, 1, 1, 1, tod.T, map.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "spre_bi_0":
-				pmat_test_use_pix(dir, 1, 1, 1, tod.T, map.T, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "sprepo_0":
-				core.pmat_poly_use_pix(dir, 1, 1, 1, tod.T, map.T, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "sint_0":
-				core.pmat_int_use_pix(dir, 1, 1, 1, tod.T, map.T, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "siflat_0":
-				core.pmat_int_use_pix_flat(dir, 1, 1, 1, tod.T, map.T, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
-			elif ipname == "new_bi_at":
-				core.pmat_map_direct_grid(dir, tod.T, 1, map.T, 1, 1, 1, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
-			elif ipname == "new_siflat_at":
-				core.pmat_map_use_pix_shift(dir, tod.T, 1, map.T, 1, pix.T, phase.T, sdir, wbox.T, wshift.T, nphi, times)
-
-		if False and dir < 0:
-			enmap.write_map("%s_map.fits" % ipname, map)
-			if ipname == "shift_bi_0":
-				shape = (2*(wbox[1,1]-wbox[0,1]),wbox[1,0]-wbox[0,0],3)
-				wmap = np.zeros(shape, dtype=dtype)
-				core.pmat_test_test(dir, 1, 1, 1, 1, tod.T, wmap.T, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, sdir, wbox.T, wshift.T, nphi, times)
-				wmap = enmap.zeros((3,)+shape[:2],dtype=dtype)+np.rollaxis(wmap,2)
-				enmap.write_map("wmap.fits", wmap)
 		t2 = time.time()
 		tuse = (t2-t1)/args.ntime
 		times /= args.ntime

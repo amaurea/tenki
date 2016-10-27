@@ -448,7 +448,7 @@ for out_ind in range(nouter):
 			continue
 		if param["type"] == "cut":
 			signal.precon = mapmaking.PreconCut(signal, myscans)
-		elif param["type"] == "map" or param["type"] == "bmap":
+		elif param["type"] in ["map","bmap","fmap"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
 			if param["prec"] == "bin":
 				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights)
@@ -462,7 +462,7 @@ for out_ind in range(nouter):
 				prior_weight /= (np.mean(prior_weight)*prior_weight.shape[-1])**0.5
 				prior_weight *= float(param["nohor"])
 				signal.prior = mapmaking.PriorMapNohor(prior_weight)
-		elif param["type"] == "dmap":
+		elif param["type"] in ["dmap","fdmap"]:
 			if param["prec"] == "bin":
 				signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights)
 			elif param["prec"] == "jacobi":

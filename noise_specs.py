@@ -37,7 +37,7 @@ xinds = np.arange(xaxis.n)
 shape, wcs = enmap.geometry(pos=np.array([yaxis.fr,xaxis.fr]).T*np.pi/180, shape=(yaxis.n,xaxis.n), proj="car")
 
 filedb.init()
-ids = filedb.scans[args.sel].ids
+ids = filedb.scans[args.sel]
 for si in range(comm.rank, len(ids), comm.size):
 	id    = ids[si]
 	entry = filedb.data[id]

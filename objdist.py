@@ -15,8 +15,8 @@ sstep = 100
 
 filedb.init()
 db       = filedb.data
-info     = filedb.scans[args.query]
-ids      = info.ids
+ids      = filedb.scans[args.query]
+info     = filedb.select(ids)
 hprint = False
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]

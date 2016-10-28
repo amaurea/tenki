@@ -5,7 +5,7 @@ parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("query", nargs="?", default=None)
 args = parser.parse_args()
 filedb.init()
-ids = filedb.scans[args.query].ids
+ids = filedb.scans[args.query]
 if len(ids) == 0:
 	print "No matching tods!"
 else:

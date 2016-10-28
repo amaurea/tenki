@@ -29,7 +29,7 @@ bins = np.array([[t[0]-t[1]/2,t[0]+t[1]/2] for t in tmp])
 rate = [float(w) for w in args.R.split(":")]
 
 filedb.init()
-ids = filedb.scans[args.sel].ids
+ids = filedb.scans[args.sel]
 ntod= len(ids)
 
 cuts  = np.zeros([ntod,ndet],dtype=np.uint8)

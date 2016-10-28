@@ -7,7 +7,7 @@ parser.add_argument("odir")
 args = parser.parse_args()
 
 filedb.init()
-ids  = filedb.scans[args.sel].ids
+ids  = filedb.scans[args.sel]
 comm = mpi.COMM_WORLD
 
 utils.mkdir(args.odir)

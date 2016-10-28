@@ -15,7 +15,7 @@ nrow, ncol = 33, 32
 # Read our template, which represents the output horizontal coordinates
 template = enmap.read_map(args.template)
 # Use our representative selector to get focalplane offsets and polangles
-entry = filedb.data[filedb.scans[args.sel_repr].ids[0]]
+entry = filedb.data[filedb.scans[args.sel_repr][0]]
 d = actdata.read(entry, ["boresight", "point_offsets", "polangle"])
 d.boresight[2] = args.el # In degrees, calibrated in next step
 d = actdata.calibrate(d, exclude=["autocut"])

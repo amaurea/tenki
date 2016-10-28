@@ -13,7 +13,7 @@ parser.add_argument("prefix",nargs="?")
 args = parser.parse_args()
 
 filedb.init()
-ids = filedb.scans[args.sel].ids
+ids = filedb.scans[args.sel]
 
 comm  = mpi.COMM_WORLD
 dtype = np.float64

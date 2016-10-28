@@ -16,7 +16,7 @@ args = parser.parse_args()
 utils.mkdir(args.odir)
 
 comm = mpi.COMM_WORLD
-ids  = filedb.scans[args.selector].fields["id"]
+ids  = filedb.scans[args.selector]
 nbin = 1000
 ncol, nrow = 32,33
 ndet = ncol*nrow

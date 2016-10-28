@@ -27,7 +27,7 @@ log_level = log.verbosity2level(config.get("verbosity"))
 dtype     = np.float32 if config.get("map_bits") == 32 else np.float64
 area      = enmap.read_map(args.area)
 comm      = mpi.COMM_WORLD
-ids       = filedb.scans[args.sel].ids
+ids       = filedb.scans[args.sel]
 L = log.init(level=log_level, rank=comm.rank)
 
 # Set up our output map.

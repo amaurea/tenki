@@ -21,7 +21,7 @@ utils.mkdir(args.odir)
 
 filedb.init()
 db       = filedb.data
-ids      = filedb.scans[args.query].ids
+ids      = filedb.scans[args.query]
 myinds   = range(len(ids))[myid::nproc]
 n        = len(ids)
 

@@ -1,3 +1,8 @@
+import numpy as np, sys, os
+from enlib import config, mpi, errors, log
+from enact import filedb, actdata
+config.default("verbosity", 1, "Verbosity of output")
+
 # Fast and incremental mapping program.
 # Idea:
 #  1. Map in 2 steps: tod -> work and work -> tod
@@ -63,5 +68,42 @@
 #
 # I prefer the latter. It makes each run independent, and you don't risk losing data
 # by making an error while updating the existing files.
+
+if len(sys.argv) < 2:
+	sys.stderr.write("Usage python fastmap.py [command], where command is classify, build or solve\n")
+	sys.exit(1)
+
+command = sys.argv[1]
+comm    = mpi.COMM_WORLD
+
+if command == "classify":
+	parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
+	parser.add_argument("command")
+	parser.add_argument("sel")
+	args = parser.parse_args()
+
+	log_level = log.verbosity2level(config.get("verbosity"))
+	L = log.init(level=log_level, rank=comm.rank)
+
+	filedb.init()
+	ids = filedb.scans[args.sel]
+	for ind in range(comm.rank, len(ids), comm.size):
+		id    = ids[ind]
+		entry = filedb.data[id]
+		try:
+			# We need the tod and all its dependences to estimate which noise
+			# category the tod falls into. But we don't need all the dets.
+			# Speed things up by only reading 25% of them.
+			d = actdata.read(entry, ["boresight","tags","point_offsets","gain","polangle","site","cut_noiseest","layout","tod_shape"])
+			d.restrict(dets=d.dets[::4])
+			d += actdata.read_tod(entry, dets=d.dets)
+			d = actdata.calibrate(d, exclude=["autocut"])
+			if d.ndet == 0 or d.nsamp == 0:
+				raise errors.DataMissing("Tod contains no valid data")
+		except errors.DataMissing as e:
+			if not quiet: L.debug("Skipped %s (%s)" % (str(filelist[ind]), e.message))
+			continue
+		L.debug(id)
+
 
 

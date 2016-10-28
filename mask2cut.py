@@ -10,7 +10,7 @@ parser.add_argument("--margin", type=float, default=1)
 args = parser.parse_args()
 
 filedb.init()
-ids  = filedb.scans[args.sel].ids
+ids  = filedb.scans[args.sel]
 comm = mpi.COMM_WORLD
 dtype= np.float32
 margin = args.margin*utils.degree

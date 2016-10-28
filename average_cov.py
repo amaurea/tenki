@@ -14,7 +14,7 @@ comm = mpi.COMM_WORLD
 dtype = np.float32
 delay = args.delay
 # Group into ar1+ar2+... groups
-ids = filedb.scans[args.sel].ids
+ids = filedb.scans[args.sel]
 times = np.array([float(id[:id.index(".")]) for id in ids])
 labels = utils.label_unique(times, rtol=0, atol=10)
 nlabel = np.max(labels)+1

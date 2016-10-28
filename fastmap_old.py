@@ -107,7 +107,7 @@ area  = enmap.zeros((ncomp,)+area.shape[-2:], area.wcs, dtype)
 # pattern.
 L.info("Scanning tods")
 mypatids = {}
-ids      = filedb.scans[args.sel].ids
+ids      = filedb.scans[args.sel]
 myinds   = range(comm.rank, len(ids), comm.size)
 ndet_array = 0
 for ind, d in scanutils.scan_iterator(ids, myinds, actscan.ACTScan, filedb.data):

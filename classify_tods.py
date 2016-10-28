@@ -13,7 +13,7 @@ comm  = mpi.COMM_WORLD
 
 filedb.init()
 db       = filedb.data
-filelist = filedb.scans[args.query].ids
+filelist = filedb.scans[args.query]
 hprint = False
 for ind in range(comm.rank, len(filelist), comm.size):
 	id    = filelist[ind]

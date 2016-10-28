@@ -16,7 +16,7 @@ parser.add_argument("-F", "--fields", type=str, default=None)
 args = parser.parse_args()
 
 filedb.init()
-ids = filedb.scans[args.query].ids
+ids = filedb.scans[args.query]
 if len(ids) > 1:
 	# Will process multiple files
 	utils.mkdir(args.ofile)

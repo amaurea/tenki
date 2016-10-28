@@ -22,7 +22,7 @@ myps = np.zeros(args.N)
 mynspec = 0
 
 filedb.init()
-ids = filedb.scans[args.sel].ids
+ids = filedb.scans[args.sel]
 for si in range(comm.rank, len(ids), comm.size):
 	id    = ids[si]
 	entry = filedb.data[id]

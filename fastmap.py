@@ -1,10 +1,11 @@
 import numpy as np, sys, os
-from enlib import config, mpi, errors, log, utils, coordinates, pmat, wcs as enwcs
+from enlib import config, mpi, errors, log, utils, coordinates, pmat, wcs as enwcs, enmap
 from enact import filedb, actdata
 config.default("verbosity", 1, "Verbosity of output")
 config.default("work_az_step", 0.1, "Az resolution for workspace tagging in degrees")
 config.default("work_el_step", 0.1, "El resolution for workspace tagging in degrees")
-config.default("work_ra_step", 20,  "RA resolution for workspace tagging in degrees")
+config.default("work_ra_step", 10,  "RA resolution for workspace tagging in degrees")
+config.default("work_tag_fmt", "%04d_%04d_%03d_%02d", "Format to use for workspace tags")
 
 # Fast and incremental mapping program.
 # Idea:
@@ -86,29 +87,41 @@ def read_todtags(fname):
 	return todtags
 
 class WorkspaceTagger:
-	def __init__(self, az_step=None, el_step=None, ra_step=None):
+	def __init__(self, az_step=None, el_step=None, ra_step=None, fmt=None):
 		self.az_step = config.get("work_az_step", az_step)*utils.degree
 		self.el_step = config.get("work_el_step", el_step)*utils.degree
 		self.ra_step = config.get("work_ra_step", ra_step)*utils.degree
+		self.fmt     = config.get("work_tag_fmt", fmt)
 	def build(self, az1, az2, el, ra1):
 		iaz1 = int(np.round(az1/self.az_step))
 		iaz2 = int(np.round(az2/self.az_step))
 		iel  = int(np.round(el/self.el_step))
 		ira  = int(np.round(ra1/self.ra_step))
-		return "%d_%d_%d_%d" % (iaz1,iaz2,iel,ira)
+		return self.fmt % (iaz1,iaz2,iel,ira)
 	def analyze(self, tag):
 		iaz1, iaz2, iel, ira = [int(w) for w in tag.split("_")]
-		return iaz1*self.az_step, iaz2*self.az_step, iel*self.el_step, ira*self.ra_step
+		az1, az2, el, ra1 = iaz1*self.az_step, iaz2*self.az_step, iel*self.el_step, ira*self.ra_step
+		return az1, az2, el, ra1
 
-def build_fullky_geometry(res):
+def build_fullsky_geometry(res):
 	nx = int(np.round(360/res))
 	ny = int(np.round(180/res))
 	wcs = enwcs.WCS(naxis=2)
-	wcs.wcs.cdelt = [res,res]
+	wcs.wcs.cdelt[:] = res
 	wcs.wcs.crpix = [1+nx/2,1+ny/2]
 	wcs.wcs.crval = [0,0]
 	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
 	return (ny+1,nx), wcs
+
+def build_workspace_wcs(res):
+	wcs = enwcs.WCS(naxis=2)
+	wcs.wcs.cdelt[:] = res
+	wcs.wcs.crpix[:] = 1
+	wcs.wcs.crval[:] = 0
+	# Should really be plain, but let's pretend it's
+	# CAR for ease of plotting.
+	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
+	return wcs
 
 def find_t_giving_ra(az, el, ra, site=None, nt=24*60*6, t0=55500):
 	"""Find a t (mjd) such that ra(az,el,t) = ra. Uses a simple 10-sec-res
@@ -127,7 +140,7 @@ def get_srate(ctime):
 	return float(step)/utils.medmean(ctime[1:]-ctime[:-1])
 
 def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
-		padding=0.5*utils.degree, max_ra_width=2*utils.degree):
+		padding=100, max_ra_width=2.5*utils.degree, pre=()):
 	if tagger is None: tagger = WorkspaceTagger()
 	if isinstance(wid, basestring): wid = tagger.analyze(wid)
 	trans = PospixTransform(global_wcs, site=site)
@@ -140,11 +153,11 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 	foc_offset = np.mean(point_offset,0)
 	t0   = utils.ctime2mjd(bore[0,0])
 	t_ref = find_t_giving_ra(az1+foc_offset[0], el+foc_offset[1], ra_ref, site=site, t0=t0)
-	# Get the dec bounds by evaluating all detectors at az1 and az2 at this time
-	decs = [trans([az+point_offset[0],el+point_offset[1]], time=t_ref)[1] for az in [az1,az2]]
-	decs = np.concatenate(decs,1)
-	dec1 = np.min(decs) - padding
-	dec2 = np.max(decs) + padding
+	## Get the dec bounds by evaluating all detectors at az1 and az2 at this time
+	#decs = [trans([az+point_offset[0],el+point_offset[1]], time=t_ref)[1] for az in [az1,az2]]
+	#decs = np.concatenate(decs,1)
+	#dec1 = np.min(decs) - padding
+	#dec2 = np.max(decs) + padding
 	# We also need the corners of the full workspace area.
 	t1   = find_t_giving_ra(az1+foc_offset[0], el+foc_offset[1], ra1, site=site, t0=t0)
 	t2   = find_t_giving_ra(az1+foc_offset[0], el+foc_offset[1], ra1+tagger.ra_step+max_ra_width, site=site, t0=t0)
@@ -153,15 +166,20 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 	work_corners_hor = bore_corners_hor[None,:,:] + (point_offset[:,[0,0,1]] * [0,1,1])[:,None,:]
 	work_corners_hor = work_corners_hor.T.reshape(3,-1)
 	work_corners     = trans(work_corners_hor[1:], time=work_corners_hor[0])
+	ixcorn, iycorn   = np.round(work_corners[2:]).astype(int)
+	iybox = np.array([np.min(iycorn)-padding,np.max(iycorn)+1+padding])
 	# Generate an up and down sweep
 	srate  = get_srate(bore[0])
 	period = pmat.get_scan_period(bore[1], srate)
 	dmjd   = period/2./24/3600
 	xshifts = []
 	yshifts = []
-	wxs, wys = [], []
+	nwxs, nwys = [], []
 	for si, (afrom,ato) in enumerate([[az1,az2],[az2,az1]]):
-		sweep, iybox = generate_sweep_by_dec_pix([[t_ref,afrom,el],[t_ref+dmjd,ato,el]],[dec1,dec2],trans)
+		sweep = generate_sweep_by_dec_pix(
+				[[ t_ref,     afrom+foc_offset[0],el+foc_offset[1]],
+					[t_ref+dmjd,ato  +foc_offset[0],el+foc_offset[1]]
+				],iybox,trans)
 		# Get the shift in ra pix per dec pix
 		xshift = np.round(sweep[5]-sweep[5,0,None]).astype(int)
 		# Get the shift in dec pix per dec pix. These tell us where
@@ -176,21 +194,44 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 		# Now that we have the x and y mapping, we can determine the
 		# bounds of our workspace by transforming the corners of our
 		# input coordinates.
-		ixcorn, iycorn = np.round(work_corners[2:]).astype(int)
-		wxcorn = ixcorn - xshift[iycorn-iybox[0]]
+		wycorn = ixcorn - xshift[iycorn-iybox[0]]
 		# Modify the shifts so that any scan in this workspace is always transformed
-		# to valid positions
-		xshift -= np.min(ixcorn)
-		wx = np.max(ixcorn)-np.min(ixcorn)+1
-		wy = yshift[-1]+1
+		# to valid positions. wx and wy are transposed relative to x and y
+		xshift -= np.min(wycorn)
+		nwy = np.max(wycorn)-np.min(wycorn)+1
+		nwx = yshift[-1]+1
+		# Make yshift a shift like xshift is, so that wy = y + yshift[y-y0].
+		yshift -= np.round(sweep[6]).astype(int)
+		# And collect so we can pass them to the Workspace construtor later
 		xshifts.append(xshift)
 		yshifts.append(yshift)
-		wxs.append(wx)
-		wys.append(wy)
-	wx = np.max(wxs)
-	print wx, wys
+		nwxs.append(nwx)
+		nwys.append(nwy)
+	# The shifts from each sweep are guaranteed to have the same length,
+	# since they are based on the same iybox.
+	nwx = np.max(nwxs)
+	workspace = Workspace(nwys, nwx, xshifts, yshifts, iybox[0], global_wcs, pre=pre)
+	return workspace
 
-	sweeps, y_range = unify_sweep_ypix(sweeps)
+class Workspace:
+	def __init__(self, nwys, nwx, xshifts, yshifts, y0, wcs, pre=()):
+		"""Construct a workspace in shifted coordinates
+		wy = x + xshifts[y-y0], wx = yshifts[y-y0], where x and y
+		are pixels belonging to the world coordinate system wcs.
+		wy and wx are transposed relative to x and y to improve the
+		memory access pattern. This means that sweeps are horizontal
+		in these coordinates."""
+		self.nwx  = nwx
+		self.nwys = np.array(nwys)
+		self.y0   = y0
+		self.wcs  = wcs
+		self.xshifts = np.array(xshifts)
+		self.yshifts = np.array(yshifts)
+		# Build our internal geometry. The wcs part is only
+		# used when plotting the workspace.
+		shape = tuple(pre) + (np.sum(nwys),nwx)
+		local_wcs = build_workspace_wcs(wcs.wcs.cdelt)
+		self.map = enmap.zeros(shape, local_wcs)
 
 def unify_sweep_ypix(sweeps):
 	y1 = max(*tuple([int(np.round(s[-1,6])) for s in sweeps]))
@@ -213,9 +254,9 @@ class PospixTransform:
 		opos[0] = utils.unwind(opos[0])
 		return np.array([opos[0],opos[1],x,y])
 
-def generate_sweep_by_dec_pix(hor_box, dec_range, trans, padstep=None,nsamp=None,ntry=None):
+def generate_sweep_by_dec_pix(hor_box, iy_box, trans, padstep=None,nsamp=None,ntry=None):
 	"""Given hor_box[{from,to},{t,az,el}] and a hor2{ra,dec,y,x} transformer trans,
-	and a dec range. Compute an azimuth sweep that samples every y pixel once and
+	and a integer y-pixel range iy_box[{from,to}]. Compute an azimuth sweep that samples every y pixel once and
 	covers the whole dec_range."""
 	if nsamp   is None: nsamp   = 100000
 	if padstep is None: padstep = 4*utils.degree
@@ -235,25 +276,24 @@ def generate_sweep_by_dec_pix(hor_box, dec_range, trans, padstep=None,nsamp=None
 		# We all our samples are in the range we want to use,
 		# then we probably didn't cover the whole range.
 		# ....|..++++....|... vs. ...--|+++++++|--...
-		if not (np.any(opos[4] < dec_range[0]) and np.any(opos[4] >= dec_range[1])):
+		iy = np.round(opos[6]).astype(int)
+		if not (np.any(iy < iy_box[0]) and np.any(iy >= iy_box[1])):
 			pad += padstep
 			continue
-		good = (opos[4] >= dec_range[0]) & (opos[4] < dec_range[1])
+		good = (iy >= iy_box[0]) & (iy < iy_box[1])
 		opos = opos[:,good]
-		# Sort by output y pixel
+		# Sort by output y pixel (not rounded)
 		order = np.argsort(opos[6])
 		opos = opos[:,order]
 		# See if we hit every y pixel
 		iy = np.round(opos[6]).astype(int)
-		iy1 = np.min(iy)
-		iy2 = np.max(iy)+1
-		uy = np.arange(iy1,iy2)
+		uy = np.arange(iy_box[0],iy_box[1])
 		ui = np.searchsorted(iy, uy)
 		if len(np.unique(ui)) < len(uy):
 			nsamp *= 2
 			continue
 		opos = opos[:,ui]
-		return opos, (iy1, iy2)
+		return opos
 
 if len(sys.argv) < 2:
 	sys.stderr.write("Usage python fastmap.py [command], where command is classify, build or solve\n")
@@ -327,18 +367,20 @@ elif command == "build":
 	log_level = log.verbosity2level(config.get("verbosity"))
 	L = log.init(level=log_level, rank=comm.rank)
 	tagger  = WorkspaceTagger()
-	gshape, gwcs = build_fullky_geometry(0.5/60)
+	gshape, gwcs = build_fullsky_geometry(0.5/60)
 
 	todtags = read_todtags(args.todtags)
 	print "Found %d tags" % len(todtags)
-	for wid in todtags:
+	wids = sorted(todtags.keys())
+	for wid in wids:
 		ids = todtags[wid]
 		# We need the focalplane, which will be contant for all
 		# tods in a wid, to get accurate bounds of the workspace
 		# we will create.
 		d = actdata.read(filedb.data[ids[0]], ["boresight","point_offsets","site"])
 		d = actdata.calibrate(d, exclude=["autocut"])
-		build_workspace(wid, d.boresight, d.point_offset, global_wcs=gwcs, site=d.site)
+		workspace = build_workspace(wid, d.boresight, d.point_offset, global_wcs=gwcs, site=d.site)
+		print "%-18s %5d %5d" % ((wid,) + tuple(workspace.map.shape[-2:]))
 
 		#ids = todtags[tag]
 		#for ind in range(comm.rank, len(ids), comm.size):

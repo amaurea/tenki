@@ -1,6 +1,6 @@
 import numpy as np, sys, os
 from scipy import optimize
-from enlib import config, mpi, errors, log, utils, coordinates, pmat, wcs as enwcs, enmap
+from enlib import config, mpi, errors, log, utils, coordinates, pmat, wcs as enwcs, enmap, fft
 from enact import filedb, actdata, actscan
 config.default("verbosity", 1, "Verbosity of output")
 config.default("work_az_step", 0.1, "Az resolution for workspace tagging in degrees")
@@ -384,6 +384,8 @@ elif command == "build":
 
 	log_level = log.verbosity2level(config.get("verbosity"))
 	L = log.init(level=log_level, rank=comm.rank)
+	dtype   = np.float32
+	nbin    = 10000
 	tagger  = WorkspaceTagger()
 	gshape, gwcs = build_fullsky_geometry(0.5/60)
 
@@ -412,10 +414,22 @@ elif command == "build":
 				L.debug("Skipped %s (%s)" % (id, e.message))
 				continue
 			print id, d.ndet, d.nsamp
-
-
-
-
+			# Get the actual tod
+			tod = d.get_samples()
+			tod -= np.mean(tod,1)[:,None]
+			tod = tod.astype(dtype)
+			# Compute the per-detector spectrum
+			ft    = fft.rfft(tod) * tod.shape[1]**-0.5
+			nfreq = ft.shape[-1]
+			ps    = np.abs(ft)**2
+			del ft
+			# Measure it in bins
+			binds = np.arange(nfreq)*nbin/nfreq
+			bspec = np.zeros([d.ndet,nbin])
+			hits  = np.bincount(binds)
+			for di in range(d.ndet):
+				bspec[di] = np.bincount(binds, ps[di])
+			bspec /= hits
 
 
 

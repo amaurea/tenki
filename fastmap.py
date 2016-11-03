@@ -1,6 +1,7 @@
 import numpy as np, sys, os
+from scipy import optimize
 from enlib import config, mpi, errors, log, utils, coordinates, pmat, wcs as enwcs, enmap
-from enact import filedb, actdata
+from enact import filedb, actdata, actscan
 config.default("verbosity", 1, "Verbosity of output")
 config.default("work_az_step", 0.1, "Az resolution for workspace tagging in degrees")
 config.default("work_el_step", 0.1, "El resolution for workspace tagging in degrees")
@@ -107,7 +108,7 @@ def build_fullsky_geometry(res):
 	nx = int(np.round(360/res))
 	ny = int(np.round(180/res))
 	wcs = enwcs.WCS(naxis=2)
-	wcs.wcs.cdelt[:] = res
+	wcs.wcs.cdelt[:] = [-res,res]
 	wcs.wcs.crpix = [1+nx/2,1+ny/2]
 	wcs.wcs.crval = [0,0]
 	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
@@ -123,26 +124,34 @@ def build_workspace_wcs(res):
 	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
 	return wcs
 
-def find_t_giving_ra(az, el, ra, site=None, nt=24*60*6, t0=55500):
+def find_t_giving_ra(az, el, ra, site=None, nt=50, t0=55500):
 	"""Find a t (mjd) such that ra(az,el,t) = ra. Uses a simple 10-sec-res
 	grid search for now."""
-	ts = np.linspace(t0, t0+1, nt, endpoint=False)
-	ras, decs = coordinates.transform("hor","cel",[az,el],time=ts,site=site)
-	# Handle angle wrapping
-	ras = utils.rewind(ras, ra)
-	i_ref = np.argmin(np.abs(ras-ra))
-	t_ref = ts[i_ref]
-	return t_ref
+	def err(t):
+		ora, odec = coordinates.transform("hor","cel",[az,el],time=t,site=site)
+		return utils.rewind(ra-ora, 0)
+	ts = np.linspace(t0-0.5,t0+0.5,nt)
+	errs = err(ts)
+	i = np.where((errs[2:]*errs[:-2] < 0)&(abs(errs[2:]-errs[:-2])<np.pi))[0][0]
+	return optimize.brentq(err, ts[i], ts[i+2])
 
 def get_srate(ctime):
 	step = ctime.size/10
 	ctime = ctime[::step]
 	return float(step)/utils.medmean(ctime[1:]-ctime[:-1])
 
+def valid_az_range(az1, az2):
+	az1 %= 2*np.pi
+	az2 %= 2*np.pi
+	return (az1-np.pi)*(az2-np.pi) > 0
+
+class WorkspaceError(Exception): pass
 def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 		padding=100, max_ra_width=2.5*utils.degree, pre=()):
 	if tagger is None: tagger = WorkspaceTagger()
 	if isinstance(wid, basestring): wid = tagger.analyze(wid)
+	if not valid_az_range(wid[0], wid[1]): raise WorkspaceError("Azimuth crosses north/south")
+
 	trans = PospixTransform(global_wcs, site=site)
 	az1, az2, el, ra1 = wid
 	# Extract the workspace definition of the tag name
@@ -180,6 +189,12 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 				[[ t_ref,     afrom+foc_offset[0],el+foc_offset[1]],
 					[t_ref+dmjd,ato  +foc_offset[0],el+foc_offset[1]]
 				],iybox,trans)
+		#print "seep time"
+		#print sweep[:1,::50].T
+		#print "sweep coord"
+		#print sweep[1:5,::50].T/utils.degree
+		#print "sweep pix"
+		#print sweep[5:,::50].T
 		# Get the shift in ra pix per dec pix
 		xshift = np.round(sweep[5]-sweep[5,0,None]).astype(int)
 		# Get the shift in dec pix per dec pix. These tell us where
@@ -343,6 +358,9 @@ if command == "classify":
 		az2 = np.max(d.boresight[1])
 		el  = np.mean(d.boresight[2])
 
+		if not valid_az_range(az1, az2):
+			L.debug("Skipped %s (%s)" % (id, "Azimuth crosses poles"))
+
 		# Then get the ra block we live in. This is set by the lowest RA-
 		# detector at the lowest az of the scan at the earliest time in
 		# the scan. So transform all the detectors.
@@ -379,10 +397,28 @@ elif command == "build":
 		# we will create.
 		d = actdata.read(filedb.data[ids[0]], ["boresight","point_offsets","site"])
 		d = actdata.calibrate(d, exclude=["autocut"])
+		# Prepare the workspace for this wid
 		workspace = build_workspace(wid, d.boresight, d.point_offset, global_wcs=gwcs, site=d.site)
 		print "%-18s %5d %5d" % ((wid,) + tuple(workspace.map.shape[-2:]))
+		# And process the tods that fall within it
+		for ind in range(comm.rank, len(ids), comm.size):
+			id    = ids[ind]
+			entry = filedb.data[id]
+			try:
+				d = actscan.ACTScan(entry)
+				if d.ndet == 0 or d.nsamp == 0:
+					raise errors.DataMissing("Tod contains no valid data")
+			except errors.DataMissing as e:
+				L.debug("Skipped %s (%s)" % (id, e.message))
+				continue
+			print id, d.ndet, d.nsamp
 
-		#ids = todtags[tag]
-		#for ind in range(comm.rank, len(ids), comm.size):
-		#	id = ids[ind]
+
+
+
+
+
+
+
+
 

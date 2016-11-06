@@ -1,12 +1,15 @@
-import numpy as np, sys, os
+import numpy as np, sys, os, h5py
 from scipy import optimize
-from enlib import config, mpi, errors, log, utils, coordinates, pmat, wcs as enwcs, enmap, fft
+from enlib import config, mpi, errors, log, utils, coordinates, pmat
+from enlib import wcs as enwcs, enmap, fft, array_ops
 from enact import filedb, actdata, actscan
 config.default("verbosity", 1, "Verbosity of output")
 config.default("work_az_step", 0.1, "Az resolution for workspace tagging in degrees")
 config.default("work_el_step", 0.1, "El resolution for workspace tagging in degrees")
 config.default("work_ra_step", 10,  "RA resolution for workspace tagging in degrees")
 config.default("work_tag_fmt", "%04d_%04d_%03d_%02d", "Format to use for workspace tags")
+config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
+config.default("downsample", 1, "Factor with which to downsample the TOD")
 
 # Fast and incremental mapping program.
 # Idea:
@@ -97,7 +100,7 @@ class WorkspaceTagger:
 		iaz1 = int(np.round(az1/self.az_step))
 		iaz2 = int(np.round(az2/self.az_step))
 		iel  = int(np.round(el/self.el_step))
-		ira  = int(np.round(ra1/self.ra_step))
+		ira  = int(np.floor(ra1/self.ra_step))
 		return self.fmt % (iaz1,iaz2,iel,ira)
 	def analyze(self, tag):
 		iaz1, iaz2, iel, ira = [int(w) for w in tag.split("_")]
@@ -146,13 +149,14 @@ def valid_az_range(az1, az2):
 	return (az1-np.pi)*(az2-np.pi) > 0
 
 class WorkspaceError(Exception): pass
+
 def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
-		padding=100, max_ra_width=2.5*utils.degree, pre=()):
+		padding=100, max_ra_width=2.5*utils.degree, pre=(), dtype=np.float64):
 	if tagger is None: tagger = WorkspaceTagger()
 	if isinstance(wid, basestring): wid = tagger.analyze(wid)
 	if not valid_az_range(wid[0], wid[1]): raise WorkspaceError("Azimuth crosses north/south")
 
-	trans = PospixTransform(global_wcs, site=site)
+	trans = TransformPos2Pospix(global_wcs, site=site)
 	az1, az2, el, ra1 = wid
 	# Extract the workspace definition of the tag name
 	ra_ref = ra1 + tagger.ra_step/2
@@ -162,14 +166,12 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 	foc_offset = np.mean(point_offset,0)
 	t0   = utils.ctime2mjd(bore[0,0])
 	t_ref = find_t_giving_ra(az1+foc_offset[0], el+foc_offset[1], ra_ref, site=site, t0=t0)
-	## Get the dec bounds by evaluating all detectors at az1 and az2 at this time
-	#decs = [trans([az+point_offset[0],el+point_offset[1]], time=t_ref)[1] for az in [az1,az2]]
-	#decs = np.concatenate(decs,1)
-	#dec1 = np.min(decs) - padding
-	#dec2 = np.max(decs) + padding
 	# We also need the corners of the full workspace area.
 	t1   = find_t_giving_ra(az1+foc_offset[0], el+foc_offset[1], ra1, site=site, t0=t0)
 	t2   = find_t_giving_ra(az1+foc_offset[0], el+foc_offset[1], ra1+tagger.ra_step+max_ra_width, site=site, t0=t0)
+	#print "t1", t1, "t2", t2
+	#print "az1", az1/utils.degree, "az2", az2/utils.degree
+	#print "ra", ra1/utils.degree, (ra1+tagger.ra_step+max_ra_width)/utils.degree
 	bore_box_hor = np.array([[t1,az1,el],[t2,az2,el]])
 	bore_corners_hor = utils.box2corners(bore_box_hor)
 	work_corners_hor = bore_corners_hor[None,:,:] + (point_offset[:,[0,0,1]] * [0,1,1])[:,None,:]
@@ -189,13 +191,8 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 				[[ t_ref,     afrom+foc_offset[0],el+foc_offset[1]],
 					[t_ref+dmjd,ato  +foc_offset[0],el+foc_offset[1]]
 				],iybox,trans)
-		#print "seep time"
-		#print sweep[:1,::50].T
-		#print "sweep coord"
-		#print sweep[1:5,::50].T/utils.degree
-		#print "sweep pix"
-		#print sweep[5:,::50].T
-		# Get the shift in ra pix per dec pix
+		# Get the shift in ra pix per dec pix. At this point,
+		# the shifts are just relative to the lowest-dec pixel
 		xshift = np.round(sweep[5]-sweep[5,0,None]).astype(int)
 		# Get the shift in dec pix per dec pix. These tell us where
 		# each working pixel starts as a function of normal dec pixel.
@@ -209,14 +206,30 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 		# Now that we have the x and y mapping, we can determine the
 		# bounds of our workspace by transforming the corners of our
 		# input coordinates.
+		#print "iyc", iycorn-iybox[0]
+		#print "ixc", ixcorn
+		#for i in np.argsort(iycorn):
+		#	print "A %6d %6d" % (iycorn[i], ixcorn[i])
+		#print "min(ixc)", np.min(ixcorn)
+		#print "max(ixc)", np.max(ixcorn)
+		#print "xshift", xshift[iycorn-iybox[0]]
 		wycorn = ixcorn - xshift[iycorn-iybox[0]]
+		#print "wycorn", wycorn
+		#print "min(wyc)", np.min(wycorn)
+		#print "max(wyc)", np.max(wycorn)
 		# Modify the shifts so that any scan in this workspace is always transformed
-		# to valid positions. wx and wy are transposed relative to x and y
-		xshift -= np.min(wycorn)
-		nwy = np.max(wycorn)-np.min(wycorn)+1
+		# to valid positions. wx and wy are transposed relative to x and y.
+		# Padding is needed because of the rounding involved in recovering the
+		# az and el from the wid.
+		xshift += np.min(wycorn)
+		xshift -= padding
+		wycorn2= ixcorn - xshift[iycorn-iybox[0]]
+		#print "wycorn2", wycorn2
+		#print "min(wyc2)", np.min(wycorn2)
+		#print "max(wyc2)", np.max(wycorn2)
+		#sys.stdout.flush()
+		nwy = np.max(wycorn)-np.min(wycorn)+1 + 2*padding
 		nwx = yshift[-1]+1
-		# Make yshift a shift like xshift is, so that wy = y + yshift[y-y0].
-		yshift -= np.round(sweep[6]).astype(int)
 		# And collect so we can pass them to the Workspace construtor later
 		xshifts.append(xshift)
 		yshifts.append(yshift)
@@ -225,13 +238,13 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 	# The shifts from each sweep are guaranteed to have the same length,
 	# since they are based on the same iybox.
 	nwx = np.max(nwxs)
-	workspace = Workspace(nwys, nwx, xshifts, yshifts, iybox[0], global_wcs, pre=pre)
+	workspace = Workspace(nwys, nwx, xshifts, yshifts, iybox[0], global_wcs, pre=pre, dtype=dtype)
 	return workspace
 
 class Workspace:
-	def __init__(self, nwys, nwx, xshifts, yshifts, y0, wcs, pre=()):
+	def __init__(self, nwys, nwx, xshifts, yshifts, y0, wcs, pre=(), dtype=np.float64):
 		"""Construct a workspace in shifted coordinates
-		wy = x + xshifts[y-y0], wx = yshifts[y-y0], where x and y
+		wy = x - xshifts[y-y0], wx = yshifts[y-y0], where x and y
 		are pixels belonging to the world coordinate system wcs.
 		wy and wx are transposed relative to x and y to improve the
 		memory access pattern. This means that sweeps are horizontal
@@ -246,7 +259,7 @@ class Workspace:
 		# used when plotting the workspace.
 		shape = tuple(pre) + (np.sum(nwys),nwx)
 		local_wcs = build_workspace_wcs(wcs.wcs.cdelt)
-		self.map = enmap.zeros(shape, local_wcs)
+		self.map = enmap.zeros(shape, local_wcs, dtype=dtype)
 
 def unify_sweep_ypix(sweeps):
 	y1 = max(*tuple([int(np.round(s[-1,6])) for s in sweeps]))
@@ -256,7 +269,7 @@ def unify_sweep_ypix(sweeps):
 		sweeps[i] = sweeps[i][:,(iy>=y1)&(iy<y2)]
 	return np.array(sweeps), [y1,y2]
 
-class PospixTransform:
+class TransformPos2Pospix:
 	def __init__(self, wcs, site=None, isys="hor", osys="cel"):
 		self.wcs  = wcs
 		self.isys = isys
@@ -265,9 +278,31 @@ class PospixTransform:
 	def __call__(self, ipos, time):
 		opos = coordinates.transform(self.isys, self.osys, ipos, time=time, site=self.site)
 		x, y = self.wcs.wcs_world2pix(opos[0]/utils.degree,opos[1]/utils.degree,0)
-		x = utils.unwind(x, 360.0/self.wcs.wcs.cdelt[0])
+		nx = int(np.abs(360.0/self.wcs.wcs.cdelt[0]))
+		x = utils.unwind(x, nx, ref=nx/2)
 		opos[0] = utils.unwind(opos[0])
 		return np.array([opos[0],opos[1],x,y])
+
+class TransformPos2Pix:
+	"""Transforms from scan coordinates to pixel-center coordinates.
+	This becomes discontinuous for scans that wrap from one side of the
+	sky to another for full-sky pixelizations."""
+	def __init__(self, scan, wcs):
+		self.scan = scan
+		self.wcs  = wcs
+	def __call__(self, ipos):
+		"""Transform ipos[{t,az,el},nsamp] into opix[{y,x,c,s},nsamp]."""
+		shape = ipos.shape[1:]
+		ipos  = ipos.reshape(ipos.shape[0],-1)
+		time  = self.scan.mjd0 + ipos[0]/utils.day2sec
+		opos  = coordinates.transform("hor", "cel", ipos[1:], time=time, site=self.scan.site, pol=True)
+		opix  = np.zeros((4,)+ipos.shape[1:])
+		opix[:2] = self.wcs.wcs_world2pix(*tuple(opos[:2]/utils.degree)+(0,))[::-1]
+		nx    = int(np.abs(360/self.wcs.wcs.cdelt[0]))
+		opix[1]  = utils.unwind(opix[1], period=nx, ref=nx/2)
+		opix[2]  = np.cos(2*opos[2])
+		opix[3]  = np.sin(2*opos[2])
+		return opix.reshape((opix.shape[0],)+shape)
 
 def generate_sweep_by_dec_pix(hor_box, iy_box, trans, padstep=None,nsamp=None,ntry=None):
 	"""Given hor_box[{from,to},{t,az,el}] and a hor2{ra,dec,y,x} transformer trans,
@@ -309,6 +344,43 @@ def generate_sweep_by_dec_pix(hor_box, iy_box, trans, padstep=None,nsamp=None,nt
 			continue
 		opos = opos[:,ui]
 		return opos
+
+class PmatWorkspace(pmat.PointingMatrix):
+	"""Fortran-accelerated scan <-> enmap pointing matrix implementation
+	for workspaces."""
+	def __init__(self, scan, workspace):
+		# Build the pointing interpolator
+		self.trans = TransformPos2Pix(scan, workspace.wcs)
+		self.poly  = pmat.PolyInterpol(self.trans, scan.boresight, scan.offsets)
+		# Build the pixel shift information. This assumes ces-like scans in equ-like systems
+		self.sdir    = pmat.get_scan_dir(scan.boresight[:,1])
+		self.period  = pmat.get_scan_period(scan.boresight[:,1], scan.srate)
+		self.y0      = workspace.y0
+		self.xshifts = workspace.xshifts
+		self.yshifts = workspace.yshifts
+		self.nwx     = workspace.nwx
+		self.nwys    = workspace.nwys
+		self.dtype   = workspace.map.dtype
+		self.nphi    = int(np.abs(360./workspace.wcs.wcs.cdelt[0]))
+		self.core    = pmat.get_core(self.dtype)
+		self.scan    = scan
+	def get_pix_phase(self):
+		ndet, nsamp = self.scan.ndet, self.scan.nsamp
+		pix    = np.zeros([ndet,nsamp],np.int32)
+		phase  = np.zeros([ndet,nsamp,2],self.dtype)
+		self.core.pmat_map_get_pix_poly_shift_xy(pix.T, phase.T, self.scan.boresight.T,
+				self.scan.hwp_phase.T, self.scan.comps.T, self.poly.coeffs.T, self.sdir,
+				self.y0, self.nwx, self.nwys, self.xshifts.T, self.yshifts.T, self.nphi)
+		return pix, phase
+	def forward(self, tod, map, pix, phase, tmul=1, mmul=1, times=None):
+		"""m -> tod"""
+		if times is None: times = np.zeros(5)
+		self.core.pmat_map_use_pix_direct(1, tod.T, tmul, map.T, mmul, pix.T, phase.T, times)
+	def backward(self, tod, map, pix, phase, tmul=1, mmul=1, times=None):
+		"""tod -> m"""
+		if times is None: times = np.zeros(5)
+		self.core.pmat_map_use_pix_direct(-1, tod.T, tmul, map.T, mmul, pix.T, phase.T, times)
+
 
 if len(sys.argv) < 2:
 	sys.stderr.write("Usage python fastmap.py [command], where command is classify, build or solve\n")
@@ -360,6 +432,7 @@ if command == "classify":
 
 		if not valid_az_range(az1, az2):
 			L.debug("Skipped %s (%s)" % (id, "Azimuth crosses poles"))
+			continue
 
 		# Then get the ra block we live in. This is set by the lowest RA-
 		# detector at the lowest az of the scan at the earliest time in
@@ -372,6 +445,7 @@ if command == "classify":
 		ra1    = np.min(opoint[0])
 		wid    = tagger.build(az1,az2,el,ra1)
 		print "%s %s" % (id, wid)
+		sys.stdout.flush()
 
 elif command == "build":
 	# Given a list of id tag, loop over tags, and project tods on
@@ -384,9 +458,11 @@ elif command == "build":
 
 	log_level = log.verbosity2level(config.get("verbosity"))
 	L = log.init(level=log_level, rank=comm.rank)
-	dtype   = np.float32
+	dtype   = np.float32 if config.get("map_bits") == 32 else np.float64
 	nbin    = 10000
+	ncomp   = 3
 	tagger  = WorkspaceTagger()
+	downsample = config.get("downsample")
 	gshape, gwcs = build_fullsky_geometry(0.5/60)
 
 	todtags = read_todtags(args.todtags)
@@ -400,9 +476,21 @@ elif command == "build":
 		d = actdata.read(filedb.data[ids[0]], ["boresight","point_offsets","site"])
 		d = actdata.calibrate(d, exclude=["autocut"])
 		# Prepare the workspace for this wid
-		workspace = build_workspace(wid, d.boresight, d.point_offset, global_wcs=gwcs, site=d.site)
+		#print "WWWWWWWWWWWWWWWWWWW"
+		try:
+			workspace = build_workspace(wid, d.boresight, d.point_offset, global_wcs=gwcs, site=d.site, pre=(ncomp,), dtype=dtype)
+		except WorkspaceError as e:
+			L.debug("Skipped pattern %s (%s)" % (wid, e.message))
+			continue
 		print "%-18s %5d %5d" % ((wid,) + tuple(workspace.map.shape[-2:]))
 		# And process the tods that fall within it
+		#if not wid.startswith("-668_-254_600_00"): continue
+		#ids = ids[14:15]
+
+		# Set up rhs and div
+		rhs  = workspace.map*0
+		div  = enmap.zeros((rhs.shape[:1]+rhs.shape),rhs.wcs, rhs.dtype)
+
 		for ind in range(comm.rank, len(ids), comm.size):
 			id    = ids[ind]
 			entry = filedb.data[id]
@@ -410,29 +498,78 @@ elif command == "build":
 				d = actscan.ACTScan(entry)
 				if d.ndet == 0 or d.nsamp == 0:
 					raise errors.DataMissing("Tod contains no valid data")
+				d = d[:,::downsample]
+				d = d[:,:]
 			except errors.DataMissing as e:
 				L.debug("Skipped %s (%s)" % (id, e.message))
 				continue
-			print id, d.ndet, d.nsamp
+			L.debug("Processing %s" % id)
+			#print id, d.ndet, d.nsamp
+			#print "mjd0", d.mjd0
+			#samp = 127655
+			#ipoint = np.zeros([2, d.ndet])
+			#ipoint[0] = d.boresight[samp,1] + d.offsets[:,1]
+			#ipoint[1] = d.boresight[samp,2] + d.offsets[:,2]
+			#print "moo", d.boresight[0,1:]/utils.degree
+			#print d.offsets.shape
+			#print "cow", d.offsets[0,1:]/utils.degree
+			#print "ra dec", np.min(coordinates.transform("hor","cel",ipoint,time=d.mjd0,site=d.site)/utils.degree,1)
+			#sys.stdout.flush()
 			# Get the actual tod
 			tod = d.get_samples()
 			tod -= np.mean(tod,1)[:,None]
 			tod = tod.astype(dtype)
+			#tod[:] = np.random.standard_normal(tod.shape[::-1]).T*100
+			#hfile = h5py.File("tod.hdf", "w")
+			#hfile["data"] = tod
 			# Compute the per-detector spectrum
-			ft    = fft.rfft(tod) * tod.shape[1]**-0.5
+			ft    = fft.rfft(tod) * d.nsamp ** -0.5
 			nfreq = ft.shape[-1]
 			ps    = np.abs(ft)**2
-			del ft
 			# Measure it in bins
 			binds = np.arange(nfreq)*nbin/nfreq
-			bspec = np.zeros([d.ndet,nbin])
+			Nmat  = np.zeros([d.ndet,nbin])
 			hits  = np.bincount(binds)
 			for di in range(d.ndet):
-				bspec[di] = np.bincount(binds, ps[di])
-			bspec /= hits
+				Nmat[di] = np.bincount(binds, ps[di])
+			Nmat /= hits
+			iNmat = 1/Nmat
+			iNmat_diag = np.mean(iNmat,1)
+			# Apply inverse noise weighting to the tod
+			ft *= iNmat[:,binds]
+			ft *= d.nsamp ** -0.5
+			fft.ifft(ft, tod)
+			del ft, Nmat
+			#hfile["ntod"] = tod
+			#hfile.close()
+			# Project it onto the workspace
+			pcut = pmat.PmatCut(d)
+			pmap = PmatWorkspace(d, workspace)
+			pix, phase = pmap.get_pix_phase()
+			# Build rhs
+			junk = np.zeros(pcut.njunk,dtype=dtype)
+			print "A"
+			pcut.backward(tod, junk)
+			pmap.backward(tod, rhs, pix, phase)
+			print "B"
+			# Build div
+			idiv = div[0].copy()
+			for i in range(ncomp):
+				idiv[:] = np.eye(ncomp)[i,:,None,None]
+				pmap.forward(tod, idiv, pix, phase)
+				tod *= iNmat_diag[:,None]
+				pmap.backward(tod, div[i], pix, phase)
+			print "C"
+		# Gather data from mpi procs
+		rhs = utils.allreduce(rhs, comm)
+		div = utils.allreduce(div, comm)
+		bin  = rhs/div[0,0]
+		if comm.rank == 0:
+			enmap.write_map("test_rhs_%s.fits" % wid, rhs)
+			enmap.write_map("test_bin_%s.fits" % wid, bin)
 
-
-
-
+else:
+	sys.stderr.write("Unrecognized command '%s'\n" % command)
+	sys.exit(1)
 
 

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import numpy as np, sys, os, h5py
 from scipy import optimize
 from enlib import config, mpi, errors, log, utils, coordinates, pmat
@@ -185,6 +186,7 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 	dmjd   = period/2./24/3600
 	xshifts = []
 	yshifts = []
+	work_dazs = []
 	nwxs, nwys = [], []
 	for si, (afrom,ato) in enumerate([[az1,az2],[az2,az1]]):
 		sweep = generate_sweep_by_dec_pix(
@@ -230,19 +232,27 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 		#sys.stdout.flush()
 		nwy = np.max(wycorn)-np.min(wycorn)+1 + 2*padding
 		nwx = yshift[-1]+1
+		# Get the average azimuth spacing in wx
+		work_daz = (sweep[1,-1]-sweep[1,0])/(yshift[-1]-yshift[0])
+		print work_daz/utils.degree
 		# And collect so we can pass them to the Workspace construtor later
 		xshifts.append(xshift)
 		yshifts.append(yshift)
 		nwxs.append(nwx)
 		nwys.append(nwy)
+		work_dazs.append(work_daz)
 	# The shifts from each sweep are guaranteed to have the same length,
 	# since they are based on the same iybox.
 	nwx = np.max(nwxs)
-	workspace = Workspace(nwys, nwx, xshifts, yshifts, iybox[0], global_wcs, pre=pre, dtype=dtype)
+	# To translate the noise properties, we need a mapping from the x and t
+	# fourier spaces. For this we need the azimuth scanning speed.
+	scan_speed = 2*(az2-az1)/period
+	work_daz  = np.mean(work_dazs)
+	workspace = Workspace(nwys, nwx, xshifts, yshifts, iybox[0], scan_speed, work_daz, global_wcs, pre=pre, dtype=dtype)
 	return workspace
 
 class Workspace:
-	def __init__(self, nwys, nwx, xshifts, yshifts, y0, wcs, pre=(), dtype=np.float64):
+	def __init__(self, nwys, nwx, xshifts, yshifts, y0, scan_speed, daz, wcs, pre=(), dtype=np.float64):
 		"""Construct a workspace in shifted coordinates
 		wy = x - xshifts[y-y0], wx = yshifts[y-y0], where x and y
 		are pixels belonging to the world coordinate system wcs.
@@ -252,14 +262,16 @@ class Workspace:
 		self.nwx  = nwx
 		self.nwys = np.array(nwys)
 		self.y0   = y0
-		self.wcs  = wcs
+		self.gwcs = wcs
+		self.daz  = daz
+		self.scan_speed = scan_speed
 		self.xshifts = np.array(xshifts)
 		self.yshifts = np.array(yshifts)
 		# Build our internal geometry. The wcs part is only
 		# used when plotting the workspace.
-		shape = tuple(pre) + (np.sum(nwys),nwx)
-		local_wcs = build_workspace_wcs(wcs.wcs.cdelt)
-		self.map = enmap.zeros(shape, local_wcs, dtype=dtype)
+		self.shape = tuple(pre) + (np.sum(nwys),nwx)
+		self.lwcs  = build_workspace_wcs(wcs.wcs.cdelt)
+		self.dtype = dtype
 
 def unify_sweep_ypix(sweeps):
 	y1 = max(*tuple([int(np.round(s[-1,6])) for s in sweeps]))
@@ -350,7 +362,7 @@ class PmatWorkspace(pmat.PointingMatrix):
 	for workspaces."""
 	def __init__(self, scan, workspace):
 		# Build the pointing interpolator
-		self.trans = TransformPos2Pix(scan, workspace.wcs)
+		self.trans = TransformPos2Pix(scan, workspace.gwcs)
 		self.poly  = pmat.PolyInterpol(self.trans, scan.boresight, scan.offsets)
 		# Build the pixel shift information. This assumes ces-like scans in equ-like systems
 		self.sdir    = pmat.get_scan_dir(scan.boresight[:,1])
@@ -360,8 +372,8 @@ class PmatWorkspace(pmat.PointingMatrix):
 		self.yshifts = workspace.yshifts
 		self.nwx     = workspace.nwx
 		self.nwys    = workspace.nwys
-		self.dtype   = workspace.map.dtype
-		self.nphi    = int(np.abs(360./workspace.wcs.wcs.cdelt[0]))
+		self.dtype   = workspace.dtype
+		self.nphi    = int(np.abs(360./workspace.gwcs.wcs.cdelt[0]))
 		self.core    = pmat.get_core(self.dtype)
 		self.scan    = scan
 	def get_pix_phase(self):
@@ -381,6 +393,61 @@ class PmatWorkspace(pmat.PointingMatrix):
 		if times is None: times = np.zeros(5)
 		self.core.pmat_map_use_pix_direct(-1, tod.T, tmul, map.T, mmul, pix.T, phase.T, times)
 
+def measure_inv_noise_spectrum(ft, nbin):
+	ndet, nfreq = ft.shape
+	ps    = np.abs(ft)**2
+	binds = np.arange(nfreq)*nbin/nfreq
+	Nmat  = np.zeros([ndet,nbin])
+	hits  = np.bincount(binds)
+	for di in range(ndet):
+		Nmat[di] = np.bincount(binds, ps[di])
+	Nmat /= hits
+	iNmat = 1/Nmat
+	return iNmat, binds
+
+def project_tod_on_workspace(scan, tod, workspace):
+	"""Compute the tod onto a map using the pixelization defined
+	in the workspace, and return it along with a [TQU,TQU] hitmap
+	and a hits-by-detector-by-y array."""
+	rhs  = enmap.zeros(workspace.shape, workspace.lwcs, workspace.dtype)
+	hdiv = enmap.zeros((rhs.shape[:1]+rhs.shape),rhs.wcs, rhs.dtype)
+	# Project it onto the workspace
+	pcut = pmat.PmatCut(scan)
+	pmap = PmatWorkspace(scan, workspace)
+	pix, phase = pmap.get_pix_phase()
+	# Build rhs
+	junk = np.zeros(pcut.njunk,dtype=rhs.dtype)
+	pcut.backward(tod, junk)
+	pmap.backward(tod, rhs, pix, phase)
+	# Build div
+	tmp = hdiv[0].copy()
+	for i in range(ncomp):
+		tmp[:] = np.eye(ncomp)[i,:,None,None]
+		pmap.forward(tod, tmp, pix, phase)
+		pcut.backward(tod, junk)
+		pmap.backward(tod, hdiv[i], pix, phase)
+	# Find each detector's hits by wy. Some detectors have
+	# sufficient residual curvature that they hit every wy.
+	yhits = np.zeros([scan.ndet, rhs.shape[-2]],dtype=np.int32)
+	core  = pmat.get_core(dtype)
+	core.bincount_flat(yhits.T, pix.T, rhs.shape[-2:], 0)
+	return rhs, hdiv, yhits
+
+def project_binned_spec_on_workspace(ispec, srate, yhits, workspace):
+	#  wrhs[c,y,x] = hdiv[c,b,y,x] (F" Fw F Psm sky)[b,y,x]
+	#  Fw[y,k] = (tdsum yhits[y])" (tdsum yhits[y]*Ft[y,k*dfaz*vaz/dft])
+	#  hdiv = tdsum diag(Pwt Pwt')
+	ndet, nbin = ispec.shape
+	nafreq = workspace.nwx/2+1
+	afreq  = np.arange(nafreq)/(workspace.daz*workspace.nwx)
+	tfreq  = afreq * workspace.scan_speed
+	bind   = np.minimum((2*tfreq/srate*nbin).astype(int),nbin)
+	ospec  = np.zeros([workspace.shape[-2],nafreq])
+	# Build the weighted average
+	for di in range(d.ndet):
+		print yhits[di,:,None].shape, ispec[di,None,bind].shape, ospec.shape
+		ospec += yhits[di,:,None] * ispec[di,bind][None,:]
+	return ospec
 
 if len(sys.argv) < 2:
 	sys.stderr.write("Usage python fastmap.py [command], where command is classify, build or solve\n")
@@ -482,18 +549,19 @@ elif command == "build":
 		except WorkspaceError as e:
 			L.debug("Skipped pattern %s (%s)" % (wid, e.message))
 			continue
-		print "%-18s %5d %5d" % ((wid,) + tuple(workspace.map.shape[-2:]))
+		print "%-18s %5d %5d" % ((wid,) + tuple(workspace.shape[-2:]))
 		# And process the tods that fall within it
 		#if not wid.startswith("-668_-254_600_00"): continue
 		#ids = ids[14:15]
 
 		# Set up rhs and div
-		rhs  = workspace.map*0
-		div  = enmap.zeros((rhs.shape[:1]+rhs.shape),rhs.wcs, rhs.dtype)
+		tot_rhs  = enmap.zeros(workspace.shape, workspace.lwcs, workspace.dtype)
+		tot_hdiv = enmap.zeros((tot_rhs.shape[:1]+tot_rhs.shape),tot_rhs.wcs, tot_rhs.dtype)
 
 		for ind in range(comm.rank, len(ids), comm.size):
 			id    = ids[ind]
 			entry = filedb.data[id]
+			print "A"
 			try:
 				d = actscan.ACTScan(entry)
 				if d.ndet == 0 or d.nsamp == 0:
@@ -503,73 +571,24 @@ elif command == "build":
 			except errors.DataMissing as e:
 				L.debug("Skipped %s (%s)" % (id, e.message))
 				continue
+			print "B"
 			L.debug("Processing %s" % id)
-			#print id, d.ndet, d.nsamp
-			#print "mjd0", d.mjd0
-			#samp = 127655
-			#ipoint = np.zeros([2, d.ndet])
-			#ipoint[0] = d.boresight[samp,1] + d.offsets[:,1]
-			#ipoint[1] = d.boresight[samp,2] + d.offsets[:,2]
-			#print "moo", d.boresight[0,1:]/utils.degree
-			#print d.offsets.shape
-			#print "cow", d.offsets[0,1:]/utils.degree
-			#print "ra dec", np.min(coordinates.transform("hor","cel",ipoint,time=d.mjd0,site=d.site)/utils.degree,1)
-			#sys.stdout.flush()
 			# Get the actual tod
 			tod = d.get_samples()
 			tod -= np.mean(tod,1)[:,None]
 			tod = tod.astype(dtype)
-			#tod[:] = np.random.standard_normal(tod.shape[::-1]).T*100
-			#hfile = h5py.File("tod.hdf", "w")
-			#hfile["data"] = tod
 			# Compute the per-detector spectrum
-			ft    = fft.rfft(tod) * d.nsamp ** -0.5
-			nfreq = ft.shape[-1]
-			ps    = np.abs(ft)**2
-			# Measure it in bins
-			binds = np.arange(nfreq)*nbin/nfreq
-			Nmat  = np.zeros([d.ndet,nbin])
-			hits  = np.bincount(binds)
-			for di in range(d.ndet):
-				Nmat[di] = np.bincount(binds, ps[di])
-			Nmat /= hits
-			iNmat = 1/Nmat
-			iNmat_diag = np.mean(iNmat,1)
+			ft  = fft.rfft(tod) * d.nsamp ** -0.5
+			Ft_single, binds = measure_inv_noise_spectrum(ft, nbin)
 			# Apply inverse noise weighting to the tod
-			ft *= iNmat[:,binds]
+			ft *= Ft_single[:,binds]
 			ft *= d.nsamp ** -0.5
 			fft.ifft(ft, tod)
-			del ft, Nmat
-			#hfile["ntod"] = tod
-			#hfile.close()
-			# Project it onto the workspace
-			pcut = pmat.PmatCut(d)
-			pmap = PmatWorkspace(d, workspace)
-			pix, phase = pmap.get_pix_phase()
-			# Build rhs
-			junk = np.zeros(pcut.njunk,dtype=dtype)
-			print "A"
-			pcut.backward(tod, junk)
-			pmap.backward(tod, rhs, pix, phase)
-			print "B"
-			# Build div
-			idiv = div[0].copy()
-			for i in range(ncomp):
-				idiv[:] = np.eye(ncomp)[i,:,None,None]
-				pmap.forward(tod, idiv, pix, phase)
-				tod *= iNmat_diag[:,None]
-				pmap.backward(tod, div[i], pix, phase)
-			print "C"
-		# Gather data from mpi procs
-		rhs = utils.allreduce(rhs, comm)
-		div = utils.allreduce(div, comm)
-		bin  = rhs/div[0,0]
-		if comm.rank == 0:
-			enmap.write_map("test_rhs_%s.fits" % wid, rhs)
-			enmap.write_map("test_bin_%s.fits" % wid, bin)
-
-else:
-	sys.stderr.write("Unrecognized command '%s'\n" % command)
-	sys.exit(1)
-
+			del ft
+			my_rhs, my_hdiv, my_yhits = project_tod_on_workspace(d, tod, workspace)
+			Fw_single = project_binned_spec_on_workspace(Ft_single, d.srate, my_yhits, workspace)
+			# Add to the totals
+			tot_rhs   += my_rhs
+			tot_hdiv  += my_hdiv
+			del my_rhs, my_hdiv, my_yhits
 

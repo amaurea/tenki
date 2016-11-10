@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-import numpy as np, sys, os, h5py
+import numpy as np, sys, os, h5py, copy, time
 from scipy import optimize
-from enlib import config, mpi, errors, log, utils, coordinates, pmat
-from enlib import wcs as enwcs, enmap, fft, array_ops
+from enlib import fft
+from enlib import config, mpi, errors, log, utils, coordinates, pmat, zipper
+from enlib import wcs as enwcs, enmap, array_ops
+from enlib.cg import CG
 from enact import filedb, actdata, actscan
+import astropy.io.fits
 config.default("verbosity", 1, "Verbosity of output")
 config.default("work_az_step", 0.1, "Az resolution for workspace tagging in degrees")
 config.default("work_el_step", 0.1, "El resolution for workspace tagging in degrees")
@@ -11,6 +14,7 @@ config.default("work_ra_step", 10,  "RA resolution for workspace tagging in degr
 config.default("work_tag_fmt", "%04d_%04d_%03d_%02d", "Format to use for workspace tags")
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
+fft.engine = "fftw"
 
 # Fast and incremental mapping program.
 # Idea:
@@ -151,8 +155,8 @@ def valid_az_range(az1, az2):
 
 class WorkspaceError(Exception): pass
 
-def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
-		padding=100, max_ra_width=2.5*utils.degree, pre=(), dtype=np.float64):
+def build_workspace_geometry(wid, bore, point_offset, global_wcs, site=None, tagger=None,
+		padding=100, max_ra_width=2.5*utils.degree, ncomp=3, dtype=np.float64):
 	if tagger is None: tagger = WorkspaceTagger()
 	if isinstance(wid, basestring): wid = tagger.analyze(wid)
 	if not valid_az_range(wid[0], wid[1]): raise WorkspaceError("Azimuth crosses north/south")
@@ -248,17 +252,19 @@ def build_workspace(wid, bore, point_offset, global_wcs, site=None, tagger=None,
 	# fourier spaces. For this we need the azimuth scanning speed.
 	scan_speed = 2*(az2-az1)/period
 	work_daz  = np.mean(work_dazs)
-	workspace = Workspace(nwys, nwx, xshifts, yshifts, iybox[0], scan_speed, work_daz, global_wcs, pre=pre, dtype=dtype)
-	return workspace
+	wgeo = WorkspaceGeometry(nwys, nwx, xshifts, yshifts, iybox[0], scan_speed, work_daz, global_wcs, ncomp=ncomp, dtype=dtype)
+	return wgeo
 
-class Workspace:
-	def __init__(self, nwys, nwx, xshifts, yshifts, y0, scan_speed, daz, wcs, pre=(), dtype=np.float64):
-		"""Construct a workspace in shifted coordinates
+class WorkspaceGeometry:
+	#:, pre=(), dtype=np.float64):
+	def __init__(self, nwys, nwx, xshifts, yshifts, y0, scan_speed, daz, wcs, ncomp=3, dtype=np.float64):
+		"""Construct a workspace geometry in shifted coordinates
 		wy = x - xshifts[y-y0], wx = yshifts[y-y0], where x and y
 		are pixels belonging to the world coordinate system wcs.
 		wy and wx are transposed relative to x and y to improve the
 		memory access pattern. This means that sweeps are horizontal
 		in these coordinates."""
+		# Define our coordinate transformation
 		self.nwx  = nwx
 		self.nwys = np.array(nwys)
 		self.y0   = y0
@@ -267,11 +273,102 @@ class Workspace:
 		self.scan_speed = scan_speed
 		self.xshifts = np.array(xshifts)
 		self.yshifts = np.array(yshifts)
-		# Build our internal geometry. The wcs part is only
-		# used when plotting the workspace.
-		self.shape = tuple(pre) + (np.sum(nwys),nwx)
+		# Define our internal geometry. The
+		# lwcs part is only used for plotting the workspace.
+		self.shape = (ncomp,np.sum(nwys),nwx)
 		self.lwcs  = build_workspace_wcs(wcs.wcs.cdelt)
+		self.num_az_freq = nwx/2+1
+		self.ncomp = ncomp
 		self.dtype = dtype
+	def copy(self): return copy.deepcopy(self)
+	def to_hfile(self, hfile):
+		hfile["nwys"]    = self.nwys
+		hfile["nwx"]     = self.nwx
+		hfile["xshifts"] = self.xshifts
+		hfile["yshifts"] = self.yshifts
+		hfile["y0"]      = self.y0
+		hfile["daz"]     = self.daz
+		hfile["scan_speed"] = self.scan_speed
+		hfile["ncomp"]   = ncomp
+		hfile["dtype"]   = np.dtype(self.dtype).char
+		header = self.gwcs.to_header()
+		for key in header:
+			hfile["gwcs/"+key] = header[key]
+	@classmethod
+	def from_hfile(cls, hfile):
+		nwys    = hfile["nwys"].value
+		nwx     = hfile["nwx"].value
+		xshifts = hfile["xshifts"].value
+		yshifts = hfile["yshifts"].value
+		y0      = hfile["y0"].value
+		daz     = hfile["daz"].value
+		scan_speed = hfile["scan_speed"].value
+		ncomp   = hfile["ncomp"].value
+		dtype   = np.dtype(hfile["dtype"].value)
+		header = astropy.io.fits.Header()
+		hwcs   = hfile["gwcs"]
+		for key in hwcs:
+			header[key] = hwcs[key].value
+		gwcs = enwcs.WCS(header).sub(2)
+		return cls(nwys, nwx, xshifts, yshifts, y0, daz, scan_speed, gwcs, ncomp=ncomp, dtype=dtype)
+
+class Workspace:
+	"""A Workspace consists of:
+	1. Variables specifying a shifted, per-scan-pattern coordinate system and how to
+	   transform between it a pixelization of celestial coordinates.
+	2. rhs: Filtered data that has been projected onto the workspace coordinates
+	3. hdiv: [TQU,TQU] hitcounts for the projection
+	4. wfilter: A workspace-representation of the filter that has been applied to the data."""
+	def __init__(self, geometry, rhs=None, hdiv=None, wfilter=None, ids=[]):
+		if rhs  is None: dtype = geometry.dtype
+		if rhs  is None:
+			rhs  = enmap.zeros(geometry.shape, geometry.lwcs, dtype)
+		if hdiv is None:
+			hdiv = enmap.zeros((geometry.ncomp,) + geometry.shape, geometry.lwcs, dtype)
+		if wfilter is None:
+			wfilter = np.zeros([geometry.shape[-2],geometry.num_az_freq],dtype=dtype)
+		self.geometry = geometry
+		self.rhs     = rhs
+		self.hdiv    = hdiv
+		self.wfilter = wfilter
+		self.ids     = list(ids)
+	def copy(self): return copy.deepcopy(self)
+	def reduce(self, comm):
+		res = self.copy()
+		res.rhs[:]     = utils.allreduce(self.rhs, comm)
+		res.hdiv[:]    = utils.allreduce(self.hdiv, comm)
+		res.wfilter[:] = utils.allreduce(self.wfilter, comm)
+		res.ids        = comm.allreduce(list(res.ids))
+		return res
+	def __add__(self, other):
+		res = self.copy()
+		res.rhs     += other.rhs
+		res.hdiv    += other.hdiv
+		res.wfilter += other.wfilter
+		res.ids      = list(res.ids) + list(other.ids)
+		return res
+	def to_hfile(self, hfile):
+		hfile["rhs"]  = self.rhs
+		hfile["hdiv"] = self.hdiv
+		hfile["wfilter"] = self.wfilter
+		hfile["ids"] = np.array(ids)
+		self.geometry.to_hfile(hfile.create_group("geometry"))
+	@classmethod
+	def from_hfile(cls, hfile):
+		rhs  = hfile["rhs"].value
+		hdiv = hfile["hdiv"].value
+		wfilter = hfile["wfilter"].value
+		ids = list(hfile["ids"].value)
+		geometry = WorkspaceGeometry.from_hfile(hfile["geometry"])
+		return cls(geometry, rhs, hdiv, wfilter, ids)
+
+def write_workspace(fname, workspace):
+	with h5py.File(fname, "w") as hfile:
+		workspace.to_hfile(hfile)
+
+def read_workspace(fname):
+	with h5py.File(fname, "r") as hfile:
+		return Workspace.from_hfile(hfile)
 
 def unify_sweep_ypix(sweeps):
 	y1 = max(*tuple([int(np.round(s[-1,6])) for s in sweeps]))
@@ -357,32 +454,28 @@ def generate_sweep_by_dec_pix(hor_box, iy_box, trans, padstep=None,nsamp=None,nt
 		opos = opos[:,ui]
 		return opos
 
-class PmatWorkspace(pmat.PointingMatrix):
+class PmatWorkspaceTOD(pmat.PointingMatrix):
 	"""Fortran-accelerated scan <-> enmap pointing matrix implementation
 	for workspaces."""
-	def __init__(self, scan, workspace):
+	def __init__(self, scan, wgeo):
 		# Build the pointing interpolator
-		self.trans = TransformPos2Pix(scan, workspace.gwcs)
+		self.trans = TransformPos2Pix(scan, wgeo.gwcs)
 		self.poly  = pmat.PolyInterpol(self.trans, scan.boresight, scan.offsets)
 		# Build the pixel shift information. This assumes ces-like scans in equ-like systems
 		self.sdir    = pmat.get_scan_dir(scan.boresight[:,1])
 		self.period  = pmat.get_scan_period(scan.boresight[:,1], scan.srate)
-		self.y0      = workspace.y0
-		self.xshifts = workspace.xshifts
-		self.yshifts = workspace.yshifts
-		self.nwx     = workspace.nwx
-		self.nwys    = workspace.nwys
-		self.dtype   = workspace.dtype
-		self.nphi    = int(np.abs(360./workspace.gwcs.wcs.cdelt[0]))
-		self.core    = pmat.get_core(self.dtype)
+		self.wgeo    = wgeo
+		self.nphi    = int(np.abs(360./wgeo.gwcs.wcs.cdelt[0]))
+		self.core    = pmat.get_core(wgeo.dtype)
 		self.scan    = scan
 	def get_pix_phase(self):
 		ndet, nsamp = self.scan.ndet, self.scan.nsamp
+		wgeo   = self.wgeo
 		pix    = np.zeros([ndet,nsamp],np.int32)
-		phase  = np.zeros([ndet,nsamp,2],self.dtype)
+		phase  = np.zeros([ndet,nsamp,2],self.wgeo.dtype)
 		self.core.pmat_map_get_pix_poly_shift_xy(pix.T, phase.T, self.scan.boresight.T,
 				self.scan.hwp_phase.T, self.scan.comps.T, self.poly.coeffs.T, self.sdir,
-				self.y0, self.nwx, self.nwys, self.xshifts.T, self.yshifts.T, self.nphi)
+				wgeo.y0, wgeo.nwx, wgeo.nwys, wgeo.xshifts.T, wgeo.yshifts.T, self.nphi)
 		return pix, phase
 	def forward(self, tod, map, pix, phase, tmul=1, mmul=1, times=None):
 		"""m -> tod"""
@@ -392,6 +485,18 @@ class PmatWorkspace(pmat.PointingMatrix):
 		"""tod -> m"""
 		if times is None: times = np.zeros(5)
 		self.core.pmat_map_use_pix_direct(-1, tod.T, tmul, map.T, mmul, pix.T, phase.T, times)
+
+class PmatWorkspaceMap(pmat.PointingMatrix):
+	def __init__(self, wgeo):
+		self.wgeo = wgeo
+		self.nphi = int(np.abs(360./wgeo.gwcs.wcs.cdelt[0]))
+		self.core = pmat.get_core(wgeo.dtype)
+	def forward(self, work, map):
+		wgeo = self.wgeo
+		self.core.pmat_workspace(1,  work.T, map.T, wgeo.y0, wgeo.nwx, wgeo.nwys, wgeo.xshifts.T, wgeo.yshifts.T, self.nphi)
+	def backward(self, work, map):
+		wgeo = self.wgeo
+		self.core.pmat_workspace(-1, work.T, map.T, wgeo.y0, wgeo.nwx, wgeo.nwys, wgeo.xshifts.T, wgeo.yshifts.T, self.nphi)
 
 def measure_inv_noise_spectrum(ft, nbin):
 	ndet, nfreq = ft.shape
@@ -405,15 +510,15 @@ def measure_inv_noise_spectrum(ft, nbin):
 	iNmat = 1/Nmat
 	return iNmat, binds
 
-def project_tod_on_workspace(scan, tod, workspace):
+def project_tod_on_workspace(scan, tod, wgeo):
 	"""Compute the tod onto a map using the pixelization defined
 	in the workspace, and return it along with a [TQU,TQU] hitmap
 	and a hits-by-detector-by-y array."""
-	rhs  = enmap.zeros(workspace.shape, workspace.lwcs, workspace.dtype)
+	rhs  = enmap.zeros(wgeo.shape, wgeo.lwcs, wgeo.dtype)
 	hdiv = enmap.zeros((rhs.shape[:1]+rhs.shape),rhs.wcs, rhs.dtype)
 	# Project it onto the workspace
 	pcut = pmat.PmatCut(scan)
-	pmap = PmatWorkspace(scan, workspace)
+	pmap = PmatWorkspaceTOD(scan, wgeo)
 	pix, phase = pmap.get_pix_phase()
 	# Build rhs
 	junk = np.zeros(pcut.njunk,dtype=rhs.dtype)
@@ -433,21 +538,113 @@ def project_tod_on_workspace(scan, tod, workspace):
 	core.bincount_flat(yhits.T, pix.T, rhs.shape[-2:], 0)
 	return rhs, hdiv, yhits
 
-def project_binned_spec_on_workspace(ispec, srate, yhits, workspace):
+def project_binned_spec_on_workspace(ispec, srate, yhits, wgeo):
 	#  wrhs[c,y,x] = hdiv[c,b,y,x] (F" Fw F Psm sky)[b,y,x]
 	#  Fw[y,k] = (tdsum yhits[y])" (tdsum yhits[y]*Ft[y,k*dfaz*vaz/dft])
 	#  hdiv = tdsum diag(Pwt Pwt')
 	ndet, nbin = ispec.shape
-	nafreq = workspace.nwx/2+1
-	afreq  = np.arange(nafreq)/(workspace.daz*workspace.nwx)
-	tfreq  = afreq * workspace.scan_speed
+	nafreq = wgeo.nwx/2+1
+	afreq  = np.arange(nafreq)/(wgeo.daz*wgeo.nwx)
+	tfreq  = afreq * wgeo.scan_speed
 	bind   = np.minimum((2*tfreq/srate*nbin).astype(int),nbin)
-	ospec  = np.zeros([workspace.shape[-2],nafreq])
+	ospec  = np.zeros([wgeo.shape[-2],nafreq])
 	# Build the weighted average
 	for di in range(d.ndet):
-		print yhits[di,:,None].shape, ispec[di,None,bind].shape, ospec.shape
 		ospec += yhits[di,:,None] * ispec[di,bind][None,:]
 	return ospec
+
+def offset_wcs(wcs, pos):
+	"""Find the integer pixel offset required to give the pos=[dec,ra]
+	(radians), the pixel position [0,0]. Return owcs, offset[{y,x}], where owcs
+	is a copy) of wcs where this offset has been applied."""
+	pos    = np.array(pos)/utils.degree
+	offset = wcs.wcs_world2pix(pos[1],pos[0],0)
+	owcs   = wcs.deepcopy()
+	owcs.wcs.crpix -= offset
+	return owcs, offset[::-1]
+
+class FastmapSolver:
+	def __init__(self, workspaces, template, comm=None):
+		"""Initialize a FastmapSolver for the equation system given by the workspace list
+		workspaces. The template argument specifies the output coordinate system. This
+		enmap have a wcs which is pixel-compatible with that used to build the workspaces."""
+		if comm is None: comm = mpi.COMM_WORLD
+		# Find the global coordinate offset needed to match our
+		# global wcs with the template wcs
+		corner = template.pix2sky([0,0])
+		gwcs, offset = offset_wcs(workspaces[0].geometry.gwcs, corner)
+		# Prepare workspaces for solving in these coordinates
+		self.workspaces = []
+		for work in workspaces:
+			work = work.copy()
+			# Normalize hdiv
+			with utils.nowarn():
+				work.hdiv_norm = work.hdiv / np.sum(work.hdiv[0,0],-1)[None,None,:,None]
+			work.hdiv_norm[~np.isfinite(work.hdiv_norm)] = 0
+			# Update the global wcs and pixel coordinates
+			work.geometry.gwcs = gwcs
+			work.geometry.y0  -= offset[0]
+			work.geometry.xshifts -= offset[1]
+			# Set up our ponting matrix
+			work.pmat = PmatWorkspaceMap(work.geometry)
+			self.workspaces.append(work)
+		# Update our template to match the geometry we're actually using.
+		# If the original template was compatible, this will be a NOP geometry-wise
+		template = enmap.zeros((work.geometry.ncomp,)+template.shape[-2:], work.geometry.gwcs, work.geometry.dtype)
+		# Build a simple binned preconditioner
+		# FIXME: This just makes things worse
+		#idiv = enmap.zeros((work.geometry.ncomp,work.geometry.ncomp)+template.shape[-2:], work.geometry.gwcs, work.geometry.dtype)
+		#for work in self.workspaces:
+		#	wmap = enmap.zeros(work.geometry.shape, work.geometry.lwcs, work.geometry.dtype)
+		#	for i in range(work.geometry.ncomp):
+		#		tmp = idiv[0]*0
+		#		tmp[i] = 1
+		#		work.pmat.forward(wmap, tmp)
+		#		wmap[:] = array_ops.matmul(work.hdiv, wmap, [0,1])
+		#		wmap[:] = array_ops.matmul(np.rollaxis(work.hdiv,1), wmap, [0,1])
+		#		work.pmat.backward(wmap, idiv[i])
+		#self.prec = array_ops.eigpow(idiv, -1, axes=[0,1])
+		self.dof  = zipper.ArrayZipper(template)
+		self.comm = comm
+	def A(self, x):
+		map = self.dof.unzip(x)
+		res = map*0
+		for work in self.workspaces:
+			# This is normall P'N"P. In our case 
+			wmap = enmap.zeros(work.geometry.shape, work.geometry.lwcs, work.geometry.dtype)
+			work.pmat.forward(wmap, map)
+			ft  = fft.rfft(wmap)
+			ft *= work.wfilter
+			fft.ifft(ft, wmap, normalize=True)
+			wmap[:] = array_ops.matmul(work.hdiv_norm, wmap, [0,1])
+			# Noise weighting would go here. No weighting for now
+			wmap[:] = array_ops.matmul(np.rollaxis(work.hdiv_norm,1), wmap, [0,1])
+			fft.rfft(wmap, ft)
+			ft *= work.wfilter
+			fft.ifft(ft, wmap, normalize=True)
+			work.pmat.backward(wmap, res)
+		res = utils.allreduce(res, self.comm)
+		return self.dof.zip(res)
+	def M(self, x):
+		map = self.dof.unzip(x)
+		map[:] = array_ops.matmul(self.prec, map, [0,1])
+		return self.dof.zip(map)
+	def calc_b(self):
+		res = self.dof.unzip(np.zeros(self.dof.n))
+		for work in self.workspaces:
+			# Noise weighitng would go here. No weighting for now
+			wmap = np.ascontiguousarray(work.rhs.copy())
+			# This matmul is inefficient due to the memory layout.
+			# Several transposing copies are involved.
+			wmap[:] = array_ops.matmul(np.rollaxis(work.hdiv_norm,1), work.rhs, [0,1])
+			ft  = fft.rfft(wmap)
+			ft *= work.wfilter
+			fft.ifft(ft, wmap, normalize=True)
+			work.pmat.backward(wmap, res)
+		res = utils.allreduce(res, self.comm)
+		return res
+
+
 
 if len(sys.argv) < 2:
 	sys.stderr.write("Usage python fastmap.py [command], where command is classify, build or solve\n")
@@ -520,6 +717,7 @@ elif command == "build":
 	parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 	parser.add_argument("command")
 	parser.add_argument("todtags")
+	parser.add_argument("odir")
 	args = parser.parse_args()
 	filedb.init()
 
@@ -531,6 +729,7 @@ elif command == "build":
 	tagger  = WorkspaceTagger()
 	downsample = config.get("downsample")
 	gshape, gwcs = build_fullsky_geometry(0.5/60)
+	utils.mkdir(args.odir)
 
 	todtags = read_todtags(args.todtags)
 	print "Found %d tags" % len(todtags)
@@ -543,25 +742,19 @@ elif command == "build":
 		d = actdata.read(filedb.data[ids[0]], ["boresight","point_offsets","site"])
 		d = actdata.calibrate(d, exclude=["autocut"])
 		# Prepare the workspace for this wid
-		#print "WWWWWWWWWWWWWWWWWWW"
 		try:
-			workspace = build_workspace(wid, d.boresight, d.point_offset, global_wcs=gwcs, site=d.site, pre=(ncomp,), dtype=dtype)
+			wgeo = build_workspace_geometry(wid, d.boresight, d.point_offset, global_wcs=gwcs, site=d.site, ncomp=ncomp, dtype=dtype)
 		except WorkspaceError as e:
 			L.debug("Skipped pattern %s (%s)" % (wid, e.message))
 			continue
-		print "%-18s %5d %5d" % ((wid,) + tuple(workspace.shape[-2:]))
-		# And process the tods that fall within it
-		#if not wid.startswith("-668_-254_600_00"): continue
-		#ids = ids[14:15]
+		print "%-18s %5d %5d" % ((wid,) + tuple(wgeo.shape[-2:]))
+		tot_work = Workspace(wgeo)
+		oname = "%s/%s.hdf" % (args.odir, wid)
 
-		# Set up rhs and div
-		tot_rhs  = enmap.zeros(workspace.shape, workspace.lwcs, workspace.dtype)
-		tot_hdiv = enmap.zeros((tot_rhs.shape[:1]+tot_rhs.shape),tot_rhs.wcs, tot_rhs.dtype)
-
+		# And process the tods that fall within this workspace
 		for ind in range(comm.rank, len(ids), comm.size):
 			id    = ids[ind]
 			entry = filedb.data[id]
-			print "A"
 			try:
 				d = actscan.ACTScan(entry)
 				if d.ndet == 0 or d.nsamp == 0:
@@ -571,7 +764,6 @@ elif command == "build":
 			except errors.DataMissing as e:
 				L.debug("Skipped %s (%s)" % (id, e.message))
 				continue
-			print "B"
 			L.debug("Processing %s" % id)
 			# Get the actual tod
 			tod = d.get_samples()
@@ -579,16 +771,70 @@ elif command == "build":
 			tod = tod.astype(dtype)
 			# Compute the per-detector spectrum
 			ft  = fft.rfft(tod) * d.nsamp ** -0.5
-			Ft_single, binds = measure_inv_noise_spectrum(ft, nbin)
+			tfilter, binds = measure_inv_noise_spectrum(ft, nbin)
 			# Apply inverse noise weighting to the tod
-			ft *= Ft_single[:,binds]
+			ft *= tfilter[:,binds]
 			ft *= d.nsamp ** -0.5
 			fft.ifft(ft, tod)
 			del ft
-			my_rhs, my_hdiv, my_yhits = project_tod_on_workspace(d, tod, workspace)
-			Fw_single = project_binned_spec_on_workspace(Ft_single, d.srate, my_yhits, workspace)
+			my_rhs, my_hdiv, my_yhits = project_tod_on_workspace(d, tod, wgeo)
+			my_wfilter = project_binned_spec_on_workspace(tfilter, d.srate, my_yhits, wgeo)
 			# Add to the totals
-			tot_rhs   += my_rhs
-			tot_hdiv  += my_hdiv
-			del my_rhs, my_hdiv, my_yhits
+			tot_work.rhs  += my_rhs
+			tot_work.hdiv += my_hdiv
+			tot_work.wfilter += my_wfilter
+			tot_work.ids.append(id)
+			del my_rhs, my_hdiv, my_yhits, my_wfilter
+		# Reduce
+		tot_work = tot_work.reduce(comm)
+		if comm.rank == 0:
+			write_workspace(oname, tot_work)
 
+elif command == "solve":
+	parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
+	parser.add_argument("command")
+	parser.add_argument("template")
+	parser.add_argument("ifiles", nargs="+")
+	parser.add_argument("odir")
+	args = parser.parse_args()
+
+	log_level = log.verbosity2level(config.get("verbosity"))
+	L = log.init(level=log_level, rank=comm.rank)
+	utils.mkdir(args.odir)
+
+	L.info("Reading template")
+	template = enmap.read_map(args.template)
+	
+	L.info("Reading workspaces")
+	ifiles = args.ifiles
+	nwork  = len(ifiles)
+	inds   = range(comm.rank, nwork, comm.size)
+	mywork = []
+	for ind in inds:
+		L.debug("Read %s" % ifiles[ind])
+		mywork.append(read_workspace(ifiles[ind]))
+
+	# We will solve this system by conjugate gradients:
+	#  Pw' Fw' hdiv_norm' N" hdiv_norm Fw Pw map = Pw' Fw' hdiv_norm' N" rhs
+	# What should N" be? rhs = Pt' Nt" (Pt map + n)
+	# var(rhs) = var(Pt' N" Pt) = ?
+
+	# By the time we have made workspaces, the pixelization is fixed.
+	# Our only freedom is to select which subregion of that pixel space
+	# to actually include in our maps. We will take in a template which
+	# must be in compatible pixelization to indicate this region.
+	L.info("Initializing solver")
+	solver = FastmapSolver(mywork, template, comm)
+	L.info("Computing right-hand side")
+	b = solver.calc_b()
+	L.info("Solving")
+	cg = CG(solver.A, solver.dof.zip(b))
+	for i in range(1000):
+		t1 = time.time()
+		cg.step()
+		t2 = time.time()
+		if cg.i % 10 == 0 and comm.rank == 0:
+			m = solver.dof.unzip(cg.x)
+			enmap.write_map(args.odir + "/step%04d.fits" % cg.i, m)
+		if comm.rank == 0:
+			print "%5d %15.7e %7.2f" % (cg.i, cg.err, t2-t1)

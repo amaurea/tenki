@@ -545,7 +545,7 @@ def project_binned_spec_on_workspace(ispec, srate, yhits, wgeo):
 	ndet, nbin = ispec.shape
 	nafreq = wgeo.nwx/2+1
 	afreq  = np.arange(nafreq)/(wgeo.daz*wgeo.nwx)
-	tfreq  = afreq * wgeo.scan_speed
+	tfreq  = np.abs(afreq * wgeo.scan_speed)
 	bind   = np.minimum((2*tfreq/srate*nbin).astype(int),nbin)
 	ospec  = np.zeros([wgeo.shape[-2],nafreq])
 	# Build the weighted average
@@ -577,10 +577,10 @@ class FastmapSolver:
 		self.workspaces = []
 		for work in workspaces:
 			work = work.copy()
-			# Normalize hdiv
 			with utils.nowarn():
-				work.hdiv_norm = work.hdiv / np.sum(work.hdiv[0,0],-1)[None,None,:,None]
-			work.hdiv_norm[~np.isfinite(work.hdiv_norm)] = 0
+				hdiv_norm = work.hdiv / np.sum(work.hdiv[0,0],-1)[None,None,:,None]
+			hdiv_norm[~np.isfinite(hdiv_norm)] = 0
+			work.hdiv_norm_sqrt = hdiv_norm[0,0]**0.5 # array_ops.eigpow(hdiv_norm, 0.5, [0,1])
 			# Update the global wcs and pixel coordinates
 			work.geometry.gwcs = gwcs
 			work.geometry.y0  -= offset[0]
@@ -613,15 +613,14 @@ class FastmapSolver:
 			# This is normall P'N"P. In our case 
 			wmap = enmap.zeros(work.geometry.shape, work.geometry.lwcs, work.geometry.dtype)
 			work.pmat.forward(wmap, map)
+			#wmap[:] = array_ops.matmul(work.hdiv_norm_sqrt, wmap, [0,1])
+			wmap *= work.hdiv_norm_sqrt
 			ft  = fft.rfft(wmap)
 			ft *= work.wfilter
 			fft.ifft(ft, wmap, normalize=True)
-			wmap[:] = array_ops.matmul(work.hdiv_norm, wmap, [0,1])
+			wmap *= work.hdiv_norm_sqrt
 			# Noise weighting would go here. No weighting for now
-			wmap[:] = array_ops.matmul(np.rollaxis(work.hdiv_norm,1), wmap, [0,1])
-			fft.rfft(wmap, ft)
-			ft *= work.wfilter
-			fft.ifft(ft, wmap, normalize=True)
+			#wmap[:] = array_ops.matmul(np.rollaxis(work.hdiv_norm_sqrt,1), wmap, [0,1])
 			work.pmat.backward(wmap, res)
 		res = utils.allreduce(res, self.comm)
 		return self.dof.zip(res)
@@ -632,14 +631,7 @@ class FastmapSolver:
 	def calc_b(self):
 		res = self.dof.unzip(np.zeros(self.dof.n))
 		for work in self.workspaces:
-			# Noise weighitng would go here. No weighting for now
 			wmap = np.ascontiguousarray(work.rhs.copy())
-			# This matmul is inefficient due to the memory layout.
-			# Several transposing copies are involved.
-			wmap[:] = array_ops.matmul(np.rollaxis(work.hdiv_norm,1), work.rhs, [0,1])
-			ft  = fft.rfft(wmap)
-			ft *= work.wfilter
-			fft.ifft(ft, wmap, normalize=True)
 			work.pmat.backward(wmap, res)
 		res = utils.allreduce(res, self.comm)
 		return res

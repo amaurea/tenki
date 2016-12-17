@@ -16,7 +16,7 @@ parser.add_argument("-A", "--amprel", action="store_true")
 parser.add_argument("-v", dest="verbosity", action="count")
 parser.add_argument("-s", "--scale", type=int, default=6)
 parser.add_argument("--verbosity", dest="verbosity", type=int)
-parser.add_argument("--method", default="fast")
+parser.add_argument("--method", default="auto")
 parser.add_argument("--slice", type=str)
 parser.add_argument("--ext", type=str, default="png")
 args = parser.parse_args()
@@ -114,7 +114,7 @@ for si, src in enumerate(srcs):
 		with dprint("%s rescale" % istr):
 			m_scaled = (mdata-crange[0,i])/(crange[1,i]-crange[0,i])
 		with dprint("%s colorize" % istr):
-			m_color  = colorize.colorize(m_scaled, desc=args.color, method=args.method)
+			m_color  = colorize.colorize(m_scaled, desc=args.color, driver=args.method)
 		with dprint("%s to image" % istr):
 			m_img    = Image.fromarray(m_color).convert('RGBA')
 		oname = args.odir + "/src%03d.%s" % (si,args.ext)

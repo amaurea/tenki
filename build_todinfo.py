@@ -38,7 +38,9 @@ inds = np.argsort(stats["id"])
 for key in stats:
 	stats[key] = utils.moveaxis(stats[key][inds],0,-1)
 stat_db = todinfo.Todinfo(stats)
-# Merge with original tags. Rightmost overrides.
+# Merge with original tags. Rightmost overrides for overridable fields.
+# For tags, we get the union. This means that stat_db can't override incorrect
+# tags in scan_db, just add to them.
 stat_db = scan_db + stat_db
 
 if comm.rank == 0:

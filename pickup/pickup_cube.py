@@ -18,6 +18,7 @@ warnings.filterwarnings("ignore")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
+config.default("noise_model", "uncorr", "Noise model. Defaults to uncorr, since detector correlations have no effect when one is mapping each detector to separate pixels")
 
 parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
 parser.add_argument("sel")
@@ -28,18 +29,21 @@ parser.add_argument("--daz",  type=float, default=2,  help="Pixel size in azimut
 parser.add_argument("--nrow", type=int,   default=33)
 parser.add_argument("--ncol", type=int,   default=32)
 parser.add_argument("--nstep",type=int,   default=20)
+parser.add_argument("--nsub", type=int,   default=2)
 parser.add_argument("--i0", type=int, default=None)
 parser.add_argument("--i1", type=int, default=None)
+parser.add_argument("--p0", type=int, default=0)
 parser.add_argument("-g,", "--group", type=int, default=1)
-parser.add_argument("--dedark", action="store_true")
-parser.add_argument("--demode", action="store_true")
-parser.add_argument("--decommon", action="store_true")
+parser.add_argument("--dedark",     action="store_true")
+parser.add_argument("--demode",     action="store_true")
+parser.add_argument("--decommon",   action="store_true")
+parser.add_argument("-c", "--cont", action="store_true")
 args = parser.parse_args()
 filedb.init()
 
 comm_world = mpi.COMM_WORLD
-comm_group = comm_world
-comm_sub   = mpi.COMM_SELF
+comm_group = comm_world.Split(comm_world.rank%args.nsub, comm_world.rank/args.nsub)
+comm_sub   = comm_world.Split(comm_world.rank/args.nsub, comm_world.rank%args.nsub)
 ids  = todinfo.get_tods(args.sel, filedb.scans)
 tol  = args.tol*utils.arcmin
 daz  = args.daz*utils.arcmin
@@ -48,8 +52,11 @@ tods_per_map = args.group
 
 utils.mkdir(args.odir)
 root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
+# Set up logging
+utils.mkdir(root + "log")
+logfile   = root + "log/log%03d.txt" % comm_world.rank
 log_level = log.verbosity2level(config.get("verbosity"))
-L = log.init(level=log_level, rank=comm_world.rank, shared=False)
+L = log.init(level=log_level, file=logfile, rank=comm_world.rank, shared=False)
 
 # Run through all tods to determine the scanning patterns
 L.info("Detecting scanning patterns")
@@ -58,7 +65,8 @@ for ind in range(comm_world.rank, len(ids), comm_world.size):
 	id    = ids[ind]
 	entry = filedb.data[id]
 	try:
-		d = actdata.calibrate(actdata.read(entry, ["boresight","tconst","cut","cut_noiseest"]))
+		d = actdata.read(entry, ["boresight","tconst","cut","cut_noiseest"])
+		d = actdata.calibrate(d, exclude=["autocut"])
 		if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("no data")
 	except errors.DataMissing as e:
 		L.debug("Skipped %s (%s)" % (ids[ind], e.message))
@@ -87,6 +95,8 @@ L.info("Found %d scanning patterns" % npattern)
 # to do than the last ranks.
 tasks = []
 for pid, group in enumerate(pscans):
+	# Start at pattern p0
+	if pid < args.p0: continue
 	ngroup = (len(group)+tods_per_map-1)/tods_per_map
 	for gind in range(ngroup):
 		tasks.append([pid,gind,group[gind*tods_per_map:(gind+1)*tods_per_map]])
@@ -94,6 +104,15 @@ for pid, group in enumerate(pscans):
 # Ok, run through each for real now
 L.info("Building maps")
 for pid, gind, group in tasks[comm_group.rank::comm_group.size]:
+	# Output name for this group
+	proot=root + "pattern_%02d_el_%.1f_az_%.1f_%.1f_ind_%03d_" % (
+			pid, pboxes[pid,0,0]/utils.degree,
+			pboxes[pid,0,1]/utils.degree, pboxes[pid,1,1]/utils.degree, gind)
+	if args.cont:
+		# Check if the output file exists
+		ofname = proot + "map%04d.fits" % args.nstep
+		if os.path.isfile(ofname):
+			continue
 	scans = []
 	for ind in group:
 		id = ids[ind]
@@ -112,10 +131,6 @@ for pid, gind, group in tasks[comm_group.rank::comm_group.size]:
 	if nscan == 0:
 		L.debug("Skipped group %d (failed to read scans)" % gind)
 		continue
-
-	# Output name for this group
-	proot=root + "pattern_%02d_el_%.1f_az_%.1f_%.1f_ind_%03d_" % (pid, pboxes[pid,0,0]/utils.degree,
-			pboxes[pid,0,1]/utils.degree, pboxes[pid,1,1]/utils.degree, gind)
 	# Record which ids went into this map
 	with open(proot + "ids.txt", "w") as f:
 		for ind in group:

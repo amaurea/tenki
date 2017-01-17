@@ -7,6 +7,7 @@ parser.add_argument("objname")
 parser.add_argument("mask")
 parser.add_argument("odir")
 parser.add_argument("--margin", type=float, default=1)
+parser.add_argument("--persample", action="store_true")
 args = parser.parse_args()
 
 filedb.init()
@@ -32,7 +33,7 @@ for ind in myinds:
 	try:
 		d = actdata.read(entry, ["point_offsets","boresight","site","layout"])
 		d = actdata.calibrate(d, exclude=["autocut"])
-	except errors.DataMissing as e:
+	except (errors.DataMissing, AttributeError) as e:
 		print "Skipping %s (%s)" % (id, e.message)
 		continue
 	# Build a projector between samples and mask. This
@@ -69,7 +70,8 @@ for ind in myinds:
 	print "%s %6.4f %d" % (id, float(cut.sum())/cut.size, visible)
 	mystats.append([ind, float(cut.sum())/cut.size, visible])
 	# Write cuts to output directory
-	files.write_cut("%s/%s.cuts" % (args.odir, id), d.dets, cut, nrow=d.layout.nrow, ncol=d.layout.ncol)
+	if args.persample:
+		files.write_cut("%s/%s.cuts" % (args.odir, id), d.dets, cut, nrow=d.layout.nrow, ncol=d.layout.ncol)
 mystats = np.array(mystats)
 stats = utils.allgatherv(mystats, comm)
 if comm.rank == 0:

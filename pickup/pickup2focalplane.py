@@ -9,6 +9,8 @@ parser.add_argument("-s", "--step", type=int,   default=3)
 parser.add_argument("-r", "--res",  type=float, default=0.2)
 parser.add_argument("-R", "--rad",  type=float, default=1.0)
 parser.add_argument("-T", "--transpose", action="store_true")
+parser.add_argument("-i", "--individual", action="store_true")
+parser.add_argument("--slice", type=str, default="")
 args = parser.parse_args()
 
 dtype = np.float32
@@ -27,6 +29,7 @@ dets, offs, boxes, imaps = [], [], [], []
 for i in range(nfile):
 	det, off = files.read_point_template(ilayfiles[i])
 	imap = enmap.read_map(imapfiles[i])
+	if args.slice: imap = eval("imap"+args.slice)
 	# We want y,x-ordering
 	off = off[:,::-1]
 	box = utils.minmax(off,0)
@@ -47,8 +50,16 @@ naz   = imaps.shape[-1]
 shape, wcs = enmap.geometry(pos=box, res=args.res*utils.arcmin, proj="car", pre=(naz,))
 omap = enmap.zeros(shape, wcs, dtype=dtype)
 
+# Normalization
+norm = enmap.zeros(shape[-2:],wcs)
+norm[0,0] = 1
+norm = enmap.smooth_gauss(norm, rad)[0,0]
+
 # Loop through slices and populate
+bazs = []
 for iaz in range(naz):
+	# Get our boresight az
+	bazs.append(imaps.pix2sky([0,iaz])[1])
 	vals = []
 	for i in range(nfile):
 		# Go from detectors to y-pixel in input maps
@@ -57,22 +68,27 @@ for iaz in range(naz):
 	vals = np.concatenate(vals)
 	pos  = np.concatenate(offs)
 	# Write to appropriate position in array
-	pix  = np.maximum(0,np.minimum((np.array(omap.shape[-2:])-1)[:,None],omap.sky2pix(pos.T).astype(np.int32)))
+	pix  = np.maximum(0,np.minimum((np.array(shape[-2:])-1)[:,None],enmap.sky2pix(shape, wcs, pos.T).astype(np.int32)))
 	m    = enmap.zeros(shape[-2:],wcs)
 	m[tuple(pix)] = vals
 	# Grow by smoothing
-	m = enmap.smooth_gauss(m, rad)
+	m = enmap.smooth_gauss(m, rad)/norm
 	omap[iaz] = m
-
-# Normalization:
-m[:] = 0
-m[0,0] = 1
-m = enmap.smooth_gauss(m, rad)
-omap /= m[0,0]
 
 # Truncate very low values
 refval = np.mean(np.abs(omap))*0.01
 mask = np.any(np.abs(omap)>refval,0)
 omap[:,~mask] = 0
 
-enmap.write_map(args.ofile, omap)
+if not args.individual:
+	# output a single file
+	enmap.write_map(args.ofile, omap)
+else:
+	# output one file for each. This lets us encode
+	# each one's azimuth
+	utils.mkdir(args.ofile)
+	for i, (baz, m) in enumerate(zip(bazs, omap)):
+		if np.all(m==0): continue
+		print i
+		m.wcs.wcs.crval[0] = baz/utils.degree
+		enmap.write_map(args.ofile + "/map%04d.fits" % i, m)

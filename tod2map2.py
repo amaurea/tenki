@@ -57,7 +57,7 @@ dtype = np.float32 if config.get("map_bits") == 32 else np.float64
 comm  = mpi.COMM_WORLD
 nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
-tshape= (240,240)
+tshape= (720,720)
 
 filedb.init()
 db = filedb.data

@@ -24,9 +24,11 @@ apod_params = [float(w) for w in args.apod.split(":")] if args.apod else None
 
 def read_map(fname):
 	m = nonan(enmap.read_map(fname))
+	#return m.preflat[:1]
 	return m.reshape(-1, m.shape[-2], m.shape[-1])
 def read_div(fname, padlen):
 	m = nonan(enmap.read_map(fname))*1.0
+	#return m.preflat[:1][None]
 	if m.ndim == 2:
 		res = enmap.zeros((padlen,padlen)+m.shape[-2:], m.wcs, m.dtype)
 		for i in range(padlen):

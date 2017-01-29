@@ -12,6 +12,7 @@ parser.add_argument("--wpoly", type=str, default="")
 parser.add_argument("--set",   type=str, default="_set_")
 args = parser.parse_args()
 
+output_total = args.total % 2 == 1
 utils.mkdir(args.odir)
 
 fnames = os.listdir(args.idir)
@@ -98,18 +99,20 @@ for tag in tags:
 		if args.single % 2 > 0:
 			vwrite(opre + "map_%04d.fits"   % step, map)
 			vwrite(opre + "div.fits", weight)
-		if tmap is None:
-			tmap = map*0
-			tnosrc = nosrc*0
-			tweight = weight*0
-		tmap += map*weight[None]
-		tnosrc += nosrc*weight[None]
-		tweight += weight
-	tmap[:,tweight>0] /= tweight[None][:,tweight>0]
-	tnosrc[:,tweight>0] /= tweight[None][:,tweight>0]
-	opre = args.odir + "/" + tag % "tot"
-	if args.total % 2 > 0:
-		if beam:
-			vwrite(opre + "nosrc_%04d.fits" % step, tnosrc)
-		vwrite(opre + "map_%04d.fits" % step, tmap)
-		vwrite(opre + "div.fits", tweight)
+		if output_total:
+			if tmap is None:
+				tmap = map*0
+				tnosrc = nosrc*0
+				tweight = weight*0
+			tmap += map*weight[None]
+			tnosrc += nosrc*weight[None]
+			tweight += weight
+	if output_total:
+		tmap[:,tweight>0] /= tweight[None][:,tweight>0]
+		tnosrc[:,tweight>0] /= tweight[None][:,tweight>0]
+		opre = args.odir + "/" + tag % "tot"
+		if args.total % 2 > 0:
+			if beam:
+				vwrite(opre + "nosrc_%04d.fits" % step, tnosrc)
+			vwrite(opre + "map_%04d.fits" % step, tmap)
+			vwrite(opre + "div.fits", tweight)

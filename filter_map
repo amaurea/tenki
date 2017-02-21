@@ -9,27 +9,35 @@ parser.add_argument("hitmap", nargs="?", default=None)
 parser.add_argument("omap")
 parser.add_argument("-F", "--filter", action="append", help="Filter specification. Can be specified multiple times. Formats: g:lcut = gaussian filter, lowpass for positive lcut, highpass for negative. b:lcut:alpha = butterworth filter. Lowpass for positive alpha, highpass for negative.")
 parser.add_argument("-m", "--mode", type=str, default="a")
+parser.add_argument("-s", "--slice", type=str, default=None)
+parser.add_argument("-L", "--limit", type=float, default=0.10)
 parser.add_argument("-v", action="count")
 args = parser.parse_args()
 
 filter_specs = args.filter or ["b:200:-5"]
 
 m = enmap.read_map(args.imap)
+if args.slice:
+	m = eval("m"+args.slice)
 ishape = m.shape
-m = np.reshape(m, [np.prod(ishape[:-2])]+list(ishape[-2:]))
+m = m.preflat
 if args.hitmap != None:
 	w = enmap.read_map(args.hitmap)
 	while w.ndim > 2: w = w[0]
 else:
 	w = enmap.zeros(m.shape[-2:], m.wcs, dtype=m.dtype)+1
 
-mask  = np.any(np.isnan(m),0)|np.isnan(w)|(w<np.max(w)*1e-3)
+samps = w.reshape(-1)[::100]
+samps = samps[samps!=0]
+typ   = np.median(samps)
+mask  = np.any(np.isnan(m),0)|np.isnan(w)|(w<typ*1e-3)
 m[:,mask] = 0
 w[mask] = 0
 # The function of the mask is to apodize edges, so smooth out the middle
-w0 = np.max(w)*0.05
-w = 1/(1+w0/w)
+w0 = typ*0.10
+w = (1/(1+w0/w)).astype(m.dtype)
 wm = m*w
+del samps
 
 print np.std(m), np.std(w), np.std(wm)
 
@@ -60,18 +68,26 @@ for mode in args.mode:
 			elif toks[0] in ["b", "butter", "butterworth"]:
 				lknee = float(toks[1])
 				alpha = float(toks[2])
+				print "a"
 				filter *= filter_butter(l, lknee, alpha)
+				print "b"
 			else: raise ValueError("Unknown filter type: " + toks[0])
 		filters[i] = filter
+		del filter
+	del l
+	print "moo"
 	for j in range(i+1,len(filters)):
 		filters[j] = filters[i]
 	# Apply filter
 	print np.std(filters)
-	print enmap.map2harm(wm)
-	wm = enmap.harm2map(enmap.map2harm(wm)*filters)
+	wm  = enmap.map2harm(wm)
+	wm *= filters
+	del filters
+	wm  = enmap.harm2map(wm)
 
 # And recover filtered map
 m   = wm/w
+del wm, w
 m[:,mask] = np.nan
 m   = np.reshape(m, ishape)
 

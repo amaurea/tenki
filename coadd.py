@@ -1,5 +1,5 @@
-import numpy as np, argparse
-from enlib import enmap, log, array_ops
+import numpy as np, argparse, os
+from enlib import enmap, array_ops, utils, mpi
 from scipy import ndimage
 parser = argparse.ArgumentParser()
 parser.add_argument("imaps_and_hits", nargs="+")
@@ -8,11 +8,12 @@ parser.add_argument("ohit")
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-a", "--apod",    type=str, default=None)
 parser.add_argument("-e", "--edge",    type=int, default=0)
-parser.add_argument("-t", "--trim",    type=int, default=1, help="Amount to trim maps that need to be interplated by, in pixels on each side.")
+parser.add_argument("-t", "--trim",    type=int, default=0, help="Amount to trim maps that need to be interplated by, in pixels on each side.")
+parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("--fslice", type=str, default="")
 args = parser.parse_args()
 
-L = log.init(level=log.DEBUG if args.verbose else log.ERROR)
+comm = mpi.COMM_WORLD
 
 n = len(args.imaps_and_hits)
 imaps = args.imaps_and_hits[:n/2]
@@ -36,6 +37,8 @@ def read_div(fname, padlen):
 		return res
 	elif m.ndim == 4: return m
 	else: raise ValueError("Wrong number of dimensions in div %s" % fname)
+def get_tilenames(dir):
+	return sorted([name for name in os.listdir(dir) if name.endswith(".fits") or name.endswith(".hdf")])
 
 def mul(w,m):
 	if w.ndim == 2: return m*w[None]
@@ -86,29 +89,48 @@ def apply_edge(div):
 	apod = np.minimum(1,dists/float(args.edge))
 	return div*apod[None,None]
 
-# The first map will be used as a reference. All subsequent maps
-# must fit in its boundaries.
-L.info("Reading %s" % imaps[0])
-m = read_map(imaps[0])
-L.info("Reading %s" % ihits[0])
-w = apply_edge(apply_apod(apply_trim(read_div(ihits[0], len(m)))))
-wm = mul(w,m)
+def coadd_maps(imaps, ihits, omap, ohit, cont=False):
+	# The first map will be used as a reference. All subsequent maps
+	# must fit in its boundaries.
+	if cont and os.path.exists(omap): return
+	if args.verbose: print "Reading %s" % imaps[0]
+	m = read_map(imaps[0])
+	if args.verbose: print"Reading %s" % ihits[0]
+	w = apply_edge(apply_apod(apply_trim(read_div(ihits[0], len(m)))))
+	wm = mul(w,m)
 
-for mif,wif in zip(imaps[1:],ihits[1:]):
-	L.info("Reading %s" % mif)
-	mi = read_map(mif)
-	L.info("Reading %s" % wif)
-	wi = apply_edge(apply_apod(apply_trim(read_div(wif, len(mi)))))
-	# We may need to reproject maps
-	if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
-		mi = enmap.project(mi, m.shape, m.wcs, mode="constant")
-		wi = enmap.project(wi, w.shape, w.wcs, mode="constant")
-	w[:len(wi),:len(wi)] += wi
-	wm[:len(wi)] += mul(wi,mi)
+	for mif,wif in zip(imaps[1:],ihits[1:]):
+		if args.verbose: print"Reading %s" % mif
+		mi = read_map(mif)
+		if args.verbose: print"Reading %s" % wif
+		wi = apply_edge(apply_apod(apply_trim(read_div(wif, len(mi)))))
+		# We may need to reproject maps
+		if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
+			mi = enmap.project(mi, m.shape, m.wcs, mode="constant")
+			wi = enmap.project(wi, w.shape, w.wcs, mode="constant")
+		w[:len(wi),:len(wi)] += wi
+		wm[:len(wi)] += mul(wi,mi)
 
-L.info("Solving")
-m = solve(w,wm)
-L.info("Writing %s" % args.omap)
-enmap.write_map(args.omap, m)
-L.info("Writing %s" % args.ohit)
-enmap.write_map(args.ohit, w)
+	if args.verbose: print"Solving"
+	m = solve(w,wm)
+	if args.verbose: print"Writing %s" % omap
+	enmap.write_map(omap, m)
+	if args.verbose: print"Writing %s" % ohit
+	enmap.write_map(ohit, w)
+
+# Two cases: Normal enmaps or dmaps
+if not os.path.isdir(imaps[0]):
+	# Normal monotlithic map
+	coadd_maps(imaps, ihits, args.omap, args.ohit, cont=args.cont)
+else:
+	# Dmap. Each name is actually a directory, but they
+	# all have compatible tile names.
+	tilenames = get_tilenames(imaps[0])
+	utils.mkdir(args.omap)
+	utils.mkdir(args.ohit)
+	for tilename in tilenames[comm.rank::comm.size]:
+		timaps = ["%s/%s" % (imap,tilename) for imap in imaps]
+		tihits = ["%s/%s" % (ihit,tilename) for ihit in ihits]
+		print "%3d %s" % (comm.rank, tilename)
+		coadd_maps(timaps, tihits, args.omap + "/" + tilename, args.ohit + "/" + tilename, cont=args.cont)
+	if args.verbose: print"Done"

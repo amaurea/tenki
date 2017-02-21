@@ -58,6 +58,7 @@ comm  = mpi.COMM_WORLD
 nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
 tshape= (720,720)
+#tshape= (100,100)
 
 filedb.init()
 db = filedb.data
@@ -210,6 +211,7 @@ mycosts = [s.nsamp*s.ndet for s in myscans]
 if dsys: # distributed maps
 	myboxes = [scanutils.calc_sky_bbox_scan(s, dsys) for s in myscans] if dsys else None
 	myinds, mysubs, mybbox = scanutils.distribute_scans(myinds, mycosts, myboxes, comm)
+	print mybbox
 else:
 	myinds = scanutils.distribute_scans(myinds, mycosts, None, comm)
 

@@ -28,7 +28,7 @@ config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{ra
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_sub_default",   "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
@@ -334,6 +334,7 @@ for out_ind in range(nouter):
 	# corresponding signal and supporting both enmaps and dmaps.
 	L.info("Initializing filters")
 	filters = []
+	filters2= []
 	for param in filter_params:
 		if param["name"] == "scan":
 			naz, nt, mode, niter = int(param["naz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
@@ -415,11 +416,18 @@ for out_ind in range(nouter):
 			filter = mapmaking.FilterAddSrcs(myscans, params, sys=param["sys"], mul=-float(param["mul"]))
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
-		filters.append(filter)
+		# Add to normal filters of post-noise-model filters based on parameters
+		if "postnoise" in param and int(param["postnoise"]) > 0:
+			print "postnosie"
+			filters2.append(filter)
+		else:
+			filters.append(filter)
 	# If any filters were added, append a gapfilling operation, since the filters may have
 	# put large values in the gaps, and these may not be representable by our cut model
 	if len(filters) > 0:
 		filters.append(mapmaking.FilterGapfill())
+	if len(filters2) > 0:
+		filters2.append(mapmaking.FilterGapfill())
 
 	# Initialize weights. Done in a hacky manner for now. This and the above needs
 	# to be reworked.
@@ -428,7 +436,7 @@ for out_ind in range(nouter):
 		weights.append(mapmaking.FilterWindow(config.get("tod_window")))
 
 	L.info("Initializing equation system")
-	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, weights=weights, dtype=dtype, comm=comm)
+	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, filters2=filters2, weights=weights, dtype=dtype, comm=comm)
 
 	L.info("Initializing RHS")
 	eqsys.calc_b()
@@ -463,6 +471,8 @@ for out_ind in range(nouter):
 				prior_weight /= (np.mean(prior_weight)*prior_weight.shape[-1])**0.5
 				prior_weight *= float(param["nohor"])
 				signal.prior = mapmaking.PriorMapNohor(prior_weight)
+			if "unmix" in param and param["unmix"] != "no":
+				signal.prior = mapmaking.PriorNorm(float(param["unmix"]))
 		elif param["type"] in ["dmap","fdmap"]:
 			if param["prec"] == "bin":
 				signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights)
@@ -476,6 +486,8 @@ for out_ind in range(nouter):
 				prior_weight /= (dmap.sum(prior_weight)/prior_weight.size*prior_weight.shape[-1])**0.5
 				prior_weight *= float(param["nohor"])
 				signal.prior = mapmaking.PriorDmapNohor(prior_weight)
+			if "unmix" in param and param["unmix"] != "no":
+				signal.prior = mapmaking.PriorNorm(float(param["unmix"]))
 		elif param["type"] == "scan":
 			signal.precon = mapmaking.PreconPhaseBinned(signal, signal_cut, myscans, weights)
 		else:

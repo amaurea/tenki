@@ -32,6 +32,7 @@ def read_sdata(ifile):
 				map = enmap.ndmap(fixorder(g["map"].value), wcs),
 				div = enmap.ndmap(fixorder(g["div"].value), wcs),
 				sid = g["sid"].value,
+				id  = g["id"].value,
 				vel = g["vel"].value,
 				fknee = g["fknee"].value,
 				alpha = g["alpha"].value,

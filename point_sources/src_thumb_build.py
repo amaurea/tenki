@@ -23,7 +23,6 @@ comm = mpi.COMM_WORLD
 R    = args.radius*utils.arcmin
 res  = args.res*utils.arcmin
 dtype= np.float64
-fwhm = args.fwhm * utils.arcmin
 utils.mkdir(args.odir)
 
 def find_scan_vel(scan, ipos, aspeed, dt=0.1):
@@ -41,6 +40,7 @@ def write_sdata(ofile, sdata):
 			g["map"]    = sdat.map
 			g["div"]    = sdat.div
 			g["sid"]    = sdat.sid
+			g["id"]     = sdat.id
 			g["srcpos"] = sdat.srcpos
 			g["vel"]    = sdat.vel
 			g["fknee"]  = sdat.fknee
@@ -117,7 +117,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 		print scan_vel
 		sdata.append(bunch.Bunch(
 			map=map, div=div, srcpos=srcpos[::-1,sid], sid=sid,
-			vel=scan_vel, fknee=args.fknee, alpha=args.alpha))
+			vel=scan_vel, fknee=args.fknee, alpha=args.alpha,
+			id=id))
 
 	write_sdata("%s/%s.hdf" % (args.odir, id), sdata)
 	for i, sdat in enumerate(sdata):

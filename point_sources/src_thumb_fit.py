@@ -41,7 +41,7 @@ def read_sdata(ifile):
 # Single-source likelihood evaluator
 class Srclik:
 	def __init__(self, map, div, fwhm):
-		self.map   = map
+		self.map   = map.preflat[0]
 		self.div   = div
 		self.posmap= map.posmap()
 		self.fwhm  = fwhm
@@ -52,36 +52,50 @@ class Srclik:
 		r2   = np.sum(dpos**2,0)
 		return np.exp(-0.5*r2/self.sigma**2)
 	def calc_amp(self, profile):
-		damp = 1/np.sum(profile*self.div*profile)
-		amp  = damp*np.sum(profile*self.div*self.map)
-		return amp, damp
+		vamp = 1/np.sum(profile*self.div*profile)
+		amp  = vamp*np.sum(profile*self.div*self.map)
+		if ~np.isfinite(amp): amp = 0
+		return amp, vamp
 	def calc_model(self, pos):
 		profile  = self.calc_profile(pos)
-		amp, damp= self.calc_amp(profile)
-		return profile*amp
+		amp, vamp= self.calc_amp(profile)
+		return profile*np.abs(amp)
 	def calc_chisq(self, posoff):
 		model = self.calc_model(posoff)
 		resid = self.map - model
-		chisq = np.sum(resid**2)
+		chisq = np.mean(resid**2)
 		return chisq
 
 class SrcFitter:
 	def __init__(self, sdata, fwhm):
 		self.nsrc  = len(sdata)
+		self.scale = utils.arcmin
 		self.sdata = sdata
 		self.liks  = [Srclik(s.map, s.div, fwhm) for s in sdata]
 		self.i     = 0
-	def calc_chisq(self, dpos):
+	def calc_chisq(self, x):
+		dpos   = x*utils.arcmin
 		chisqs = [lik.calc_chisq(s.srcpos+dpos) for lik,s in zip(self.liks,self.sdata)]
-		chisq  = np.sum(chisqs)
-		print "%4d %9.4f %9.4f %15.7e" % (self.i, dpos[0]/utils.arcmin, cpos[1]/utils.arcmin, chisq)
+		chisq  = np.mean(chisqs)
+		print "%4d %9.4f %9.4f %15.7e" % (self.i, dpos[0]/utils.arcmin, dpos[1]/utils.arcmin, chisq)
 		self.i += 1
 		return chisq
+	def calc_full_model(self, dpos):
+		amps, models, poss = [], [], []
+		for i in range(self.nsrc):
+			lik, sd = self.liks[i], self.sdata[i]
+			profile = lik.calc_profile(sd.srcpos+dpos)
+			amp, vamp = lik.calc_amp(profile)
+			amps.append(amp)
+			models.append(amp*profile)
+			poss.append(sd.srcpos+dpos)
+		return bunch.Bunch(dpos=dpos, poss=np.array(poss), amps=np.array(amps),
+				models=models, nsrc=len(poss))
 	def fit(self):
-		dpos = np.zeros(self.nsrc)
-		dpos = optimize.fmin_powell(self.calc_chisq, dpos, disp=False)
-		self.i += 1
-		return dpos
+		dpos = np.zeros(2)
+		dpos = optimize.fmin_powell(self.calc_chisq, dpos/utils.arcmin, disp=False)*utils.arcmin
+		res  = self.calc_full_model(dpos)
+		return res
 
 # Load source database
 #srcpos = np.loadtxt(args.srclist, usecols=(args.rcol, args.dcol)).T*utils.degree
@@ -91,4 +105,11 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	sdata = read_sdata(ifile)
 
 	fitter = SrcFitter(sdata, fwhm)
-	dpos   = fitter.fit()
+	# Find the ML position
+	fit    = fitter.fit()
+	# Output map,model,resid for each
+
+
+
+
+	print "dpos", dpos/utils.arcmin

@@ -116,7 +116,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		scan_vel = find_scan_vel(scan, srcpos[:,sid], aspeed)
 		print scan_vel
 		sdata.append(bunch.Bunch(
-			map=map, div=div, srcpos=srcpos[::-1,sid], sid=sid,
+			map=map, div=div, srcpos=srcpos[:,sid], sid=sid,
 			vel=scan_vel, fknee=args.fknee, alpha=args.alpha,
 			id=id))
 

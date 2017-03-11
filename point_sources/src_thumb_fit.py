@@ -84,18 +84,11 @@ class BeamModel:
 		rvec[0] *= np.cos(self.dec_ref)
 		rpara    = np.sum(rvec*self.e_para[:,None,None],0)
 		rorto    = np.sum(rvec*self.e_orto[:,None,None],0)
-		#enmap.write_map("rvec.fits",  rvec)
-		#enmap.write_map("rpara.fits", rpara)
-		#enmap.write_map("rorto.fits", rorto)
 		# Evaluate each beam component
 		ipara    = rpara/self.res+self.vbeam.size/2
 		bpara    = utils.interpol(self.vbeam, ipara[None], mask_nan=False, order=self.order, prefilter=False)
 		borto    = np.exp(-0.5*rorto**2/self.sigma**2)
 		res      = enmap.samewcs(bpara*borto, rvec)
-		#enmap.write_map("test.fits", res)
-		#enmap.write_map("testA.fits", enmap.samewcs(bpara,rvec))
-		#enmap.write_map("testB.fits", enmap.samewcs(borto,rvec))
-		#1/0
 		return res
 
 # Single-source likelihood evaluator
@@ -105,6 +98,7 @@ class Srclik:
 		#enmap.write_map("map.fits", map)
 		self.div   = div
 		self.posmap= map.posmap()
+		self.off   = map.size/3
 		#enmap.write_map("posmap.fits", self.posmap)
 		self.beam  = beam
 	def calc_profile(self, pos):
@@ -118,11 +112,13 @@ class Srclik:
 	def calc_model(self, pos):
 		profile  = self.calc_profile(pos)
 		amp, vamp= self.calc_amp(profile)
+		return profile*amp
 		return profile*np.abs(amp)
 	def calc_chisq(self, posoff):
 		model = self.calc_model(posoff)
 		resid = self.map - model
-		chisq = np.mean(resid**2)
+		chisq = np.sum(resid**2*self.div)
+		chisq-= self.off
 		return chisq
 
 class SrcFitter:
@@ -137,35 +133,56 @@ class SrcFitter:
 			self.liks.append(lik)
 		self.i     = 0
 		self.verbose = False
-	def calc_chisq(self, x):
-		dpos   = x*utils.arcmin
-		chisqs = [lik.calc_chisq(s.srcpos+dpos) for lik,s in zip(self.liks,self.sdata)]
-		chisq  = np.mean(chisqs)
+	def calc_chisq_wrapper(self, x):
+		chisq = self.calc_chisq(x*self.scale)
 		if self.verbose:
 			print "%4d %9.4f %9.4f %15.7e" % (self.i, dpos[0]/utils.arcmin, dpos[1]/utils.arcmin, chisq)
 		self.i += 1
 		return chisq
-	def calc_full_model(self, dpos):
-		amps, models, poss = [], [], []
+	def calc_chisq(self, dpos):
+		chisqs = [lik.calc_chisq(s.srcpos+dpos) for lik,s in zip(self.liks,self.sdata)]
+		chisq  = np.sum(chisqs)
+		return chisq
+	def calc_deriv(self, dpos, step=0.05*utils.arcmin):
+		return np.array([
+			self.calc_chisq(dpos+[step,0])-self.calc_chisq(dpos-[step,0]),
+			self.calc_chisq(dpos+[0,step])-self.calc_chisq(dpos-[0,step])])/(2*step)
+	def calc_hessian(self, dpos, step=0.05*utils.arcmin):
+		return np.array([
+			self.calc_deriv(dpos+[step,0])-self.calc_deriv(dpos-[step,0]),
+			self.calc_deriv(dpos+[0,step])-self.calc_deriv(dpos-[0,step])
+		])/(2*step)
+	def calc_full_result(self, dpos):
+		amps, models, poss, vamps = [], [], [], []
 		for i in range(self.nsrc):
 			lik, sd = self.liks[i], self.sdata[i]
 			profile = lik.calc_profile(sd.srcpos+dpos)
 			amp, vamp = lik.calc_amp(profile)
 			amps.append(amp)
+			vamps.append(vamp)
 			models.append(amp*profile)
 			poss.append(sd.srcpos+dpos)
-		return bunch.Bunch(dpos=dpos, poss=np.array(poss), amps=np.array(amps),
-				models=models, nsrc=len(poss))
+		# Get the position uncertainty
+		hess  = self.calc_hessian(dpos, step=0.1*utils.arcmin)
+		hess  = 0.5*(hess+hess.T)
+		pcov  = np.linalg.inv(0.5*hess)
+		ddpos = np.diag(pcov)**0.5
+		pcorr = pcov[0,1]/ddpos[0]/ddpos[1]
+		return bunch.Bunch(dpos=dpos, ddpos=ddpos, pcorr=pcorr, poss=np.array(poss),
+				amps=np.array(amps), damps=np.array(vamps)**0.5, models=models, nsrc=len(poss))
 	def fit(self, verbose=False):
 		self.verbose = verbose
 		dpos = np.zeros(2)
-		dpos = optimize.fmin_powell(self.calc_chisq, dpos/utils.arcmin, disp=False)*utils.arcmin
-		res  = self.calc_full_model(dpos)
+		t1   = time.time()
+		dpos = optimize.fmin_powell(self.calc_chisq_wrapper, dpos/self.scale, disp=False)*self.scale
+		res  = self.calc_full_result(dpos)
+		res.time = time.time()-t1
 		return res
 
 # Load source database
 #srcpos = np.loadtxt(args.srclist, usecols=(args.rcol, args.dcol)).T*utils.degree
 # We use ra,dec ordering in source positions here
+f = open(args.odir + "/fit_rank_%03d.txt" % comm.rank, "w")
 
 for ind in range(comm.rank, len(args.ifiles), comm.size):
 	ifile = args.ifiles[ind]
@@ -175,10 +192,13 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	# Find the ML position
 	fit    = fitter.fit()
 	# Output summary
-	print "%s %7.3f %7.3f" % (sdata[0].id, fit.dpos[0]/utils.arcmin, fit.dpos[1]/utils.arcmin),
 	for i in range(fit.nsrc):
-		print " |%3d %7.4f" % (sdata[i].sid, fit.amps[i]/1e3),
-	print
+		ostr = "%s %7.4f %7.4f %7.4f %7.4f %3d %7.4f %7.4f" % (sdata[i].id,
+			fit.dpos[0]/utils.arcmin, fit.ddpos[0]/utils.arcmin,
+			fit.dpos[1]/utils.arcmin, fit.ddpos[1]/utils.arcmin,
+			sdata[i].sid, fit.amps[i]/1e3, fit.damps[i]/1e3)
+		print ostr
+		f.write(ostr + "\n")
 	# Output map,model,resid for each
 	for i in range(fit.nsrc):
 		omap = enmap.samewcs([sdata[i].map.preflat[0],fit.models[i],sdata[i].map.preflat[0]-fit.models[i]],sdata[i].map)

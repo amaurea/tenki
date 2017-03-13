@@ -114,7 +114,6 @@ for ind in range(comm.rank, len(ids), comm.size):
 		map, div, area = [m[...,1:-1,1:-1] for m in [map,div,area]]
 		# Find the local scanning velocity at the source position
 		scan_vel = find_scan_vel(scan, srcpos[:,sid], aspeed)
-		print scan_vel
 		sdata.append(bunch.Bunch(
 			map=map, div=div, srcpos=srcpos[:,sid], sid=sid,
 			vel=scan_vel, fknee=args.fknee, alpha=args.alpha,

@@ -105,7 +105,9 @@ class Srclik:
 		dpos = self.posmap[::-1] - pos[:,None,None]
 		return self.beam.eval(dpos)
 	def calc_amp(self, profile):
-		vamp = 1/np.sum(profile*self.div*profile)
+		ivamp= np.sum(profile**2*self.div)
+		if ivamp == 0: return 0, np.inf
+		vamp = 1/ivamp
 		amp  = vamp*np.sum(profile*self.div*self.map)
 		if ~np.isfinite(amp): amp = 0
 		return amp, vamp
@@ -120,11 +122,18 @@ class Srclik:
 		chisq = np.sum(resid**2*self.div)
 		chisq-= self.off
 		return chisq
+	def simple_max(self):
+		smap = enmap.smooth_gauss(self.map*self.div**0.5, self.beam.sigma)
+		enmap.write_map("smap.fits",smap)
+		pos  = enmap.argmax(smap)
+		val  = smap.at(pos)
+		return pos[::-1], val
 
 class SrcFitter:
 	def __init__(self, sdata, fwhm):
 		self.nsrc  = len(sdata)
-		self.scale = utils.arcmin
+		self.scale = 6*utils.arcmin
+		self.rmax  = 6*utils.arcmin
 		self.sdata = sdata
 		self.liks  = []
 		for s in sdata:
@@ -142,6 +151,8 @@ class SrcFitter:
 	def calc_chisq(self, dpos):
 		chisqs = [lik.calc_chisq(s.srcpos+dpos) for lik,s in zip(self.liks,self.sdata)]
 		chisq  = np.sum(chisqs)
+		rrel   = np.sum(dpos**2)**0.5/self.rmax
+		if rrel > 1: chisq *= rrel
 		return chisq
 	def calc_deriv(self, dpos, step=0.05*utils.arcmin):
 		return np.array([
@@ -170,10 +181,25 @@ class SrcFitter:
 		pcorr = pcov[0,1]/ddpos[0]/ddpos[1]
 		return bunch.Bunch(dpos=dpos, ddpos=ddpos, pcorr=pcorr, poss=np.array(poss),
 				amps=np.array(amps), damps=np.array(vamps)**0.5, models=models, nsrc=len(poss))
+	def find_starting_point(self):
+		poss, vals = [], []
+		for i in range(self.nsrc):
+			pos, val = self.liks[i].simple_max()
+			poss.append(pos)
+			vals.append(val)
+		best = np.argmax(vals)
+		return poss[best] - self.sdata[best].srcpos
+		#bpos, bval = None, np.inf
+		#for ddec in np.linspace(-self.rmax, self.rmax, self.ngrid):
+		#	for dra in np.linspace(-self.rmax, self.rmax, self.ngrid):
+		#		dpos  = np.array([dra,ddec])
+		#		chisq = self.calc_chisq(dpos)
+		#		if chisq < bval: bpos, bval = dpos, chisq
+		#return bpos
 	def fit(self, verbose=False):
 		self.verbose = verbose
-		dpos = np.zeros(2)
 		t1   = time.time()
+		dpos = self.find_starting_point()
 		dpos = optimize.fmin_powell(self.calc_chisq_wrapper, dpos/self.scale, disp=False)*self.scale
 		res  = self.calc_full_result(dpos)
 		res.time = time.time()-t1

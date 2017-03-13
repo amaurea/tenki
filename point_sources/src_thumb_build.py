@@ -9,10 +9,11 @@ parser.add_argument("sel")
 parser.add_argument("odir")
 parser.add_argument("--rcol", type=int, default=6)
 parser.add_argument("--dcol", type=int, default=7)
-parser.add_argument("-f", "--fknee", type=float, default=10.0)
+parser.add_argument("-f", "--fknee", type=float, default=3.0)
 parser.add_argument("-a", "--alpha", type=float, default=10)
 parser.add_argument("-R", "--radius",type=float, default=10)
 parser.add_argument("-r", "--res",   type=float, default=0.1)
+parser.add_argument("-s", "--restrict", type=str, default=None)
 args = parser.parse_args()
 
 config.default("pmat_accuracy", 10.0, "Factor by which to lower accuracy requirement in pointing interpolation. 1.0 corresponds to 1e-3 pixels and 0.1 arc minute in polangle")
@@ -22,7 +23,7 @@ ids  = filedb.scans[args.sel]
 comm = mpi.COMM_WORLD
 R    = args.radius*utils.arcmin
 res  = args.res*utils.arcmin
-dtype= np.float64
+dtype= np.float32
 utils.mkdir(args.odir)
 
 def find_scan_vel(scan, ipos, aspeed, dt=0.1):
@@ -45,40 +46,50 @@ def write_sdata(ofile, sdata):
 			g["vel"]    = sdat.vel
 			g["fknee"]  = sdat.fknee
 			g["alpha"]  = sdat.alpha
+			g["ctime"]  = sdat.ctime
 			header = sdat.map.wcs.to_header()
 			for key in header:
 				g["wcs/"+key] = header[key]
 
+bounds = filedb.scans.select(ids).data["bounds"]
+
 # Load source database
-srcpos = np.loadtxt(args.srclist, usecols=(args.rcol, args.dcol)).T*utils.degree
+srcpos   = np.loadtxt(args.srclist, usecols=(args.rcol, args.dcol)).T*utils.degree
+restrict = None
+if args.restrict is not None:
+	restrict = set([int(w) for w in args.restrict.split(",")])
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
 	# Check if we hit any of the sources
-	poly      = filedb.scans.select([id]).data["bounds"][:,:,0]*utils.degree
+	poly      = bounds[:,:,ind]*utils.degree
 	srcpos    = srcpos.copy()
 	srcpos[0] = utils.rewind(srcpos[0], poly[0,0])
 	sids      = np.where(utils.point_in_polygon(srcpos.T, poly.T))[0]
+	if restrict is not None:
+		sids = list(set(sids)&restrict)
 	if len(sids) == 0:
 		print "%s has 0 srcs: skipping" % id
 		continue
 	print "%s has %d srcs: %s" % (id,len(sids),",".join([str(i) for i in sids]))
 	entry = filedb.data[id]
 	try:
-		d = actdata.read(entry)
-		d = actdata.calibrate(d, exclude=["autocut"])
+		with bench.mark("read"):
+			d = actdata.read(entry)
+		with bench.mark("calib"):
+			d = actdata.calibrate(d, exclude=["autocut"])
 	except errors.DataMissing as e:
 		print "%s skipped: %s" % (id, e.message)
 		continue
-	tod = d.tod
+	tod = d.tod.astype(dtype)
 	del d.tod
 	# Apply high-pass filter. Will assume white tod after this
-	with bench.show("filter"):
+	with bench.mark("filter"):
 		freqs = fft.rfftfreq(d.nsamp)*d.srate
 		ft    = fft.rfft(tod)
 		ft[:,0]   = 0
 		ft[:,1:] /= 1 + (freqs[1:]/args.fknee)**-args.alpha
 		fft.ifft(ft, tod, normalize=True)
-		tod = tod.astype(dtype)
+		del ft
 
 	# Estimate white noise level, and weight tod by it
 	ivar = 1/np.mean(tod**2,-1)
@@ -86,10 +97,11 @@ for ind in range(comm.rank, len(ids), comm.size):
 
 	# Find azimuth scanning speed
 	aspeed = np.median(np.abs(d.boresight[1,1:]-d.boresight[1,:-1])[::10])*d.srate
+	tref   = d.boresight[0,0] + d.nsamp*d.srate/2
 
 	# Build a small, high-res map around each source
 	sdata = []
-	with bench.show("scan"):
+	with bench.mark("scan"):
 		scan = actscan.ACTScan(entry, d=d)
 	pcut = pmat.PmatCut(scan)
 	junk = np.zeros(pcut.njunk, dtype)
@@ -99,13 +111,13 @@ for ind in range(comm.rank, len(ids), comm.size):
 	for sid in sids:
 		shape, wcs = enmap.geometry(pos=[srcpos[::-1,sid]-R,srcpos[::-1,sid]+R], res=res, proj="car")
 		area = enmap.zeros(shape, wcs, dtype)
-		with bench.show("pmap"):
+		with bench.mark("pmap"):
 			pmap = pmat.PmatMap(scan, area)
 		rhs  = enmap.zeros((3,)+shape, wcs, dtype)
 		div  = rhs*0
-		with bench.show("rhs"):
+		with bench.mark("rhs"):
 			pmap.backward(tod, rhs)
-		with bench.show("div"):
+		with bench.mark("div"):
 			pmap.backward(wtod,div)
 		div  = div[0]
 		map  = rhs.copy()
@@ -117,7 +129,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 		sdata.append(bunch.Bunch(
 			map=map, div=div, srcpos=srcpos[:,sid], sid=sid,
 			vel=scan_vel, fknee=args.fknee, alpha=args.alpha,
-			id=id))
+			id=id, ctime=tref))
+	del tod, wtod, d
 
 	write_sdata("%s/%s.hdf" % (args.odir, id), sdata)
 	for i, sdat in enumerate(sdata):

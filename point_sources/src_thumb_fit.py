@@ -37,7 +37,9 @@ def read_sdata(ifile):
 				vel = g["vel"].value,
 				fknee = g["fknee"].value,
 				alpha = g["alpha"].value,
-				srcpos = g["srcpos"].value)
+				srcpos = g["srcpos"].value,
+				ctime = g["ctime"].value if "ctime" in g else int(g["id"].value.split(".")[0]),
+				)
 			if args.file_srcpos_decra:
 				sdata[ind].srcpos = sdata[ind].srcpos[::-1]
 	return sdata

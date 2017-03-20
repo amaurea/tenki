@@ -1,11 +1,13 @@
 import numpy as np, os, time, h5py, astropy.io.fits, sys, argparse
 from scipy import optimize
-from enlib import utils, mpi, fft, enmap, bunch
+from enlib import utils, mpi, fft, enmap, bunch, coordinates
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("odir")
 parser.add_argument("-b", "--fwhm",  type=float, default=1.3)
-parser.add_argument("-x", "--file-srcpos-decra", action="store_true")
+parser.add_argument("-x", "--ignore-ctime", action="store_true")
+parser.add_argument("--orad",        type=float, default=10)
+parser.add_argument("--ores",        type=float, default=0.1)
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -38,10 +40,8 @@ def read_sdata(ifile):
 				fknee = g["fknee"].value,
 				alpha = g["alpha"].value,
 				srcpos = g["srcpos"].value,
-				ctime = g["ctime"].value if "ctime" in g else int(g["id"].value.split(".")[0]),
+				ctime = g["ctime"].value if "ctime" in g and not args.ignore_ctime else float(g["id"].value.split(".")[0]),
 				)
-			if args.file_srcpos_decra:
-				sdata[ind].srcpos = sdata[ind].srcpos[::-1]
 	return sdata
 
 class BeamModel:
@@ -122,36 +122,63 @@ class Srclik:
 		model = self.calc_model(posoff)
 		resid = self.map - model
 		chisq = np.sum(resid**2*self.div)
-		chisq-= self.off
 		return chisq
 	def simple_max(self):
 		smap = enmap.smooth_gauss(self.map*self.div**0.5, self.beam.sigma)
-		enmap.write_map("smap.fits",smap)
 		pos  = enmap.argmax(smap)
 		val  = smap.at(pos)
 		return pos[::-1], val
 
+class DposTrans:
+	def __init__(self, ref_pos_cel, ctime):
+		self.ref_pos_cel = ref_pos_cel
+		self.mjd         = utils.ctime2mjd(ctime)
+	def to_cel(self, dpos): return dpos
+	def from_cel(self, dpos): return dpos
+
+class DposTransFoc(DposTrans):
+	def __init__(self, ref_pos_cel, ctime):
+		self.ref_pos_cel = ref_pos_cel
+		self.mjd          = utils.ctime2mjd(ctime)
+		self.ref_pos_hor = coordinates.transform("cel","hor",ref_pos_cel,time=self.mjd)
+	def to_cel(self, dpos):
+			pos_hor = coordinates.recenter(dpos, [0,0,self.ref_pos_hor[0],self.ref_pos_hor[1]])
+			dpos_cel = utils.rewind(
+					coordinates.transform("hor","cel",pos_hor,time=self.mjd)-self.ref_pos_cel)
+			return dpos_cel
+	def from_cel(self, dpos):
+		pos_hor = coordinates.transform("cel","hor",self.ref_pos_cel+dpos,time=self.mjd)
+		pos_foc = utils.rewind(coordinates.recenter(pos_hor,[self.ref_pos_hor[0],self.ref_pos_hor[1],0,0]))
+		return pos_foc
+
 class SrcFitter:
-	def __init__(self, sdata, fwhm):
+	def __init__(self, sdata, fwhm, ctrans=DposTransFoc):
 		self.nsrc  = len(sdata)
 		self.scale = 6*utils.arcmin
 		self.rmax  = 6*utils.arcmin
+		self.ngrid = 15
 		self.sdata = sdata
 		self.liks  = []
 		for s in sdata:
 			beam = BeamModel(fwhm, s.vel, s.srcpos[1], s.fknee, s.alpha)
 			lik  = Srclik(s.map, s.div, beam)
 			self.liks.append(lik)
+		if ctrans is None: ctrans = lambda (dpos,sdat): dpos
+		self.trfs  = [ctrans(s.srcpos, s.ctime) for s in sdata]
 		self.i     = 0
 		self.verbose = False
 	def calc_chisq_wrapper(self, x):
-		chisq = self.calc_chisq(x*self.scale)
+		dpos  = x*self.scale
+		chisq = self.calc_chisq(dpos)
 		if self.verbose:
 			print "%4d %9.4f %9.4f %15.7e" % (self.i, dpos[0]/utils.arcmin, dpos[1]/utils.arcmin, chisq)
 		self.i += 1
 		return chisq
 	def calc_chisq(self, dpos):
-		chisqs = [lik.calc_chisq(s.srcpos+dpos) for lik,s in zip(self.liks,self.sdata)]
+		chisqs = []
+		for lik, trf, s in zip(self.liks, self.trfs, self.sdata):
+			dpos_cel = trf.to_cel(dpos)
+			chisqs.append(lik.calc_chisq(s.srcpos+dpos_cel))
 		chisq  = np.sum(chisqs)
 		rrel   = np.sum(dpos**2)**0.5/self.rmax
 		if rrel > 1: chisq *= rrel
@@ -166,38 +193,51 @@ class SrcFitter:
 			self.calc_deriv(dpos+[0,step])-self.calc_deriv(dpos-[0,step])
 		])/(2*step)
 	def calc_full_result(self, dpos):
-		amps, models, poss, vamps = [], [], [], []
+		amps, models, poss_cel, poss_hor, vamps = [], [], [], [], []
 		for i in range(self.nsrc):
 			lik, sd = self.liks[i], self.sdata[i]
-			profile = lik.calc_profile(sd.srcpos+dpos)
+			dpos_cel= self.trfs[i].to_cel(dpos)
+			pos_cel = dpos_cel + sd.srcpos
+			pos_hor = coordinates.transform("cel","hor",pos_cel,utils.ctime2mjd(self.sdata[i].ctime))
+			profile = lik.calc_profile(pos_cel)
 			amp, vamp = lik.calc_amp(profile)
 			amps.append(amp)
 			vamps.append(vamp)
 			models.append(amp*profile)
-			poss.append(sd.srcpos+dpos)
+			poss_cel.append(pos_cel)
+			poss_hor.append(pos_hor)
 		# Get the position uncertainty
 		hess  = self.calc_hessian(dpos, step=0.1*utils.arcmin)
 		hess  = 0.5*(hess+hess.T)
-		pcov  = np.linalg.inv(0.5*hess)
-		ddpos = np.diag(pcov)**0.5
-		pcorr = pcov[0,1]/ddpos[0]/ddpos[1]
-		return bunch.Bunch(dpos=dpos, ddpos=ddpos, pcorr=pcorr, poss=np.array(poss),
-				amps=np.array(amps), damps=np.array(vamps)**0.5, models=models, nsrc=len(poss))
+		try:
+			pcov  = np.linalg.inv(0.5*hess)
+			ddpos = np.diag(pcov)**0.5
+			pcorr = pcov[0,1]/ddpos[0]/ddpos[1]
+		except np.linalg.LinAlgError:
+			ddpos = np.array([np.inf,np.inf])
+			pcorr = 0
+		return bunch.Bunch(dpos=dpos, ddpos=ddpos, pcorr=pcorr, poss_cel=np.array(poss_cel),
+				poss_hor=np.array(poss_hor), amps=np.array(amps), damps=np.array(vamps)**0.5,
+				models=models, nsrc=len(poss_cel))
 	def find_starting_point(self):
-		poss, vals = [], []
-		for i in range(self.nsrc):
-			pos, val = self.liks[i].simple_max()
-			poss.append(pos)
-			vals.append(val)
-		best = np.argmax(vals)
-		return poss[best] - self.sdata[best].srcpos
-		#bpos, bval = None, np.inf
-		#for ddec in np.linspace(-self.rmax, self.rmax, self.ngrid):
-		#	for dra in np.linspace(-self.rmax, self.rmax, self.ngrid):
-		#		dpos  = np.array([dra,ddec])
-		#		chisq = self.calc_chisq(dpos)
-		#		if chisq < bval: bpos, bval = dpos, chisq
-		#return bpos
+		if True:
+			poss, vals = [], []
+			for i in range(self.nsrc):
+				pos, val = self.liks[i].simple_max()
+				poss.append(pos)
+				vals.append(val)
+			best = np.argmax(vals)
+			dpos_cel = poss[best] - self.sdata[best].srcpos
+			dpos = self.trfs[best].from_cel(dpos_cel)
+			return dpos
+		else:
+			bpos, bval = None, np.inf
+			for ddec in np.linspace(-self.rmax, self.rmax, self.ngrid):
+				for dra in np.linspace(-self.rmax, self.rmax, self.ngrid):
+					dpos  = np.array([dra,ddec])
+					chisq = self.calc_chisq(dpos)
+					if chisq < bval: bpos, bval = dpos, chisq
+			return bpos
 	def fit(self, verbose=False):
 		self.verbose = verbose
 		t1   = time.time()
@@ -207,9 +247,23 @@ class SrcFitter:
 		res.time = time.time()-t1
 		return res
 
+def project_maps(imaps, pos, shape, wcs):
+	pos   = np.asarray(pos)
+	omaps = enmap.zeros((len(imaps),)+imaps[0].shape[:-2]+shape, wcs, imaps[0].dtype)
+	pmap  = omaps.posmap()
+	for i, imap in enumerate(imaps):
+		omaps[i] = imaps[i].at(pmap+pos[i,::-1,None,None])
+	return omaps
+
 # Load source database
 #srcpos = np.loadtxt(args.srclist, usecols=(args.rcol, args.dcol)).T*utils.degree
 # We use ra,dec ordering in source positions here
+
+# Set up shifted map geometry
+shape, wcs = enmap.geometry(
+		pos=np.array([[-1,-1],[1,1]])*args.orad*utils.arcmin, res=args.ores*utils.arcmin, proj="car")
+
+# Set up fit output
 f = open(args.odir + "/fit_rank_%03d.txt" % comm.rank, "w")
 
 for ind in range(comm.rank, len(args.ifiles), comm.size):
@@ -218,16 +272,38 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 
 	fitter = SrcFitter(sdata, fwhm)
 	# Find the ML position
-	fit    = fitter.fit()
+	t1     = time.time()
+	fit    = fitter.fit(verbose=False)
+	t2     = time.time()
 	# Output summary
 	for i in range(fit.nsrc):
 		ostr = "%s %7.4f %7.4f %7.4f %7.4f %3d %7.4f %7.4f" % (sdata[i].id,
 			fit.dpos[0]/utils.arcmin, fit.ddpos[0]/utils.arcmin,
 			fit.dpos[1]/utils.arcmin, fit.ddpos[1]/utils.arcmin,
 			sdata[i].sid, fit.amps[i]/1e3, fit.damps[i]/1e3)
+		# Add some convenience data
+		hour  = sdata[i].ctime/3600.%24
+		ostr += " | %5.2f %9.4f %9.4f | %7.4f %2d" % (hour,
+				fit.poss_hor[i,0]/utils.degree, fit.poss_hor[i,1]/utils.degree,
+				(t2-t1)/fit.nsrc, fit.nsrc)
 		print ostr
 		f.write(ostr + "\n")
-	# Output map,model,resid for each
+		f.flush()
+	# Build shifted models
+	smap = project_maps([s.map.preflat[0] for s in sdata], fit.poss_cel, shape, wcs)
+	sdiv = project_maps([s.div for s in sdata], fit.poss_cel, shape, wcs)
+	smod = project_maps(fit.models, fit.poss_cel, shape, wcs)
+	smap = enmap.samewcs([smap,smod,smap-smod],smap)
+	# And build scaled coadd
+	trhs = np.sum(smap*sdiv*fit.amps[None,:,None,None],1)
+	tdiv = np.sum(sdiv*fit.amps[:,None,None]**2,0)
+	tdiv[tdiv==0] = np.inf
+	tmap = trhs/tdiv
+	# And write them
+	enmap.write_map(args.odir + "/totmap_%s.fits" % sdata[0].id, tmap)
 	for i in range(fit.nsrc):
+		enmap.write_map(args.odir + "/shiftmap_%s_%03d.fits" % (sdata[i].id, sdata[i].sid), smap[:,i])
+		# Output unshifted map too
 		omap = enmap.samewcs([sdata[i].map.preflat[0],fit.models[i],sdata[i].map.preflat[0]-fit.models[i]],sdata[i].map)
 		enmap.write_map(args.odir + "/fitmap_%s_%03d.fits" % (sdata[i].id,sdata[i].sid), omap)
+f.close()

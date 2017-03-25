@@ -1,4 +1,4 @@
-import numpy as np, os, time, h5py
+import numpy as np, os, time, h5py, astropy.io.fits
 from scipy import optimize
 from enlib import utils, config, enplot, mpi, errors, fft
 from enlib import pmat, coordinates, enmap, bench, bunch
@@ -50,33 +50,39 @@ def measure_fknee(bps, df, fref=10, ratio=2):
 		return df
 	return above[-1]*df
 
+def read_srcs(fname, cols=(0,1,2)):
+	if fname.endswith(".fits"):
+		data = astropy.io.fits.open(fname)[1].data
+		return np.array([data.ra*utils.degree,data.dec*utils.degree,data.sn])
+	else:
+		data = np.loadtxt(fname, usecols=cols).T
+		data[:2] *= utils.degree
+		return data
+
 def write_sdata(ofile, sdata):
 	# Output thumb for this tod
 	with h5py.File(ofile, "w") as hfile:
 		for i, sdat in enumerate(sdata):
 			g = hfile.create_group("%d"%i)
-			g["map"]    = sdat.map
-			g["div"]    = sdat.div
-			g["sid"]    = sdat.sid
-			g["id"]     = sdat.id
-			g["srcpos"] = sdat.srcpos
-			g["vel"]    = sdat.vel
-			g["fknee"]  = sdat.fknee
-			g["alpha"]  = sdat.alpha
-			g["ctime"]  = sdat.ctime
+			for key in ["map","div","srcpos","sid","vel","fknee","alpha",
+					"id", "ctime", "dur", "el", "az", "off"]:
+				g[key] = sdat[key]
 			header = sdat.map.wcs.to_header()
 			for key in header:
 				g["wcs/"+key] = header[key]
+			for key in sdat.site:
+				g["site/"+key] = sdat.site[key]
 
 bounds = filedb.scans.select(ids).data["bounds"]
 
 # Load source database
-srcpos   = np.loadtxt(args.srclist, usecols=(args.rcol, args.dcol)).T*utils.degree
-amps     = np.loadtxt(args.srclist, usecols=(args.acol,))
+srcdata  = read_srcs(args.srclist, cols=(args.rcol, args.dcol, args.acol))
+srcpos, amps = srcdata[:2], srcdata[2]
+print srcpos, amps
 allowed  = set(range(amps.size))
 allowed &= set(np.where(amps > args.minamp)[0])
 if args.restrict is not None:
-	selected = [int(w) for w in args.restrict(split(","))]
+	selected = [int(w) for w in args.restrict.split(",")]
 	allowed &= set(selected)
 
 for ind in range(comm.rank, len(ids), comm.size):
@@ -159,10 +165,15 @@ for ind in range(comm.rank, len(ids), comm.size):
 		map, div, area = [m[...,1:-1,1:-1] for m in [map,div,area]]
 		# Find the local scanning velocity at the source position
 		scan_vel = find_scan_vel(scan, srcpos[:,sid], aspeed)
+		hbox = scan.box
+		dur  = d.nsamp*d.srate
+		el   = np.mean(scan.box[:,2])
+		az   = scan.box[:,1]
 		sdata.append(bunch.Bunch(
 			map=map, div=div, srcpos=srcpos[:,sid], sid=sid,
 			vel=scan_vel, fknee=fknee, alpha=args.alpha,
-			id=id, ctime=tref))
+			id=id, ctime=tref, dur=dur, el=el, az=az,
+			site=d.site, off=d.point_correction))
 	del tod, wtod, d
 
 	write_sdata("%s/%s.hdf" % (args.odir, id), sdata)

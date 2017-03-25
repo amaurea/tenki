@@ -26,22 +26,22 @@ def read_sdata(ifile):
 		for key in hfile:
 			ind  = int(key)
 			g    = hfile[key]
+			sdat = bunch.Bunch()
+			# First parse the wcs
 			hwcs = g["wcs"]
 			header = astropy.io.fits.Header()
 			for key in hwcs:
 				header[key] = hwcs[key].value
 			wcs = enmap.enlib.wcs.WCS(header).sub(2)
-			sdata[ind] = bunch.Bunch(
-				map = enmap.ndmap(fixorder(g["map"].value), wcs),
-				div = enmap.ndmap(fixorder(g["div"].value), wcs),
-				sid = g["sid"].value,
-				id  = g["id"].value,
-				vel = g["vel"].value,
-				fknee = g["fknee"].value,
-				alpha = g["alpha"].value,
-				srcpos = g["srcpos"].value,
-				ctime = g["ctime"].value if "ctime" in g and not args.ignore_ctime else float(g["id"].value.split(".")[0]),
-				)
+			# Then get the site
+			sdat.site= bunch.Bunch(**{key:g["site/"+key].value for key in g["site"]})
+			# And the rest
+			for key in ["map","div","srcpos","sid","vel","fknee","alpha",
+					"id", "ctime", "dur", "el", "az", "off"]:
+				sdat[key] = g[key].value
+			sdat.map = enmap.ndmap(fixorder(sdat.map),wcs)
+			sdat.div = enmap.ndmap(fixorder(sdat.div),wcs)
+			sdata[ind] = sdat
 	return sdata
 
 class BeamModel:
@@ -129,27 +129,51 @@ class Srclik:
 		val  = smap.at(pos)
 		return pos[::-1], val
 
-class DposTrans:
-	def __init__(self, ref_pos_cel, ctime):
-		self.ref_pos_cel = ref_pos_cel
-		self.mjd         = utils.ctime2mjd(ctime)
-	def to_cel(self, dpos): return dpos
-	def from_cel(self, dpos): return dpos
+# Transform between focalplane coordinates for a given boresight pointing
+# and celestial coordinates.
+def foc2cel(fpos, site, mjd, bore):
+	baz, bel = bore
+	hpos = coordinates.recenter(fpos, [0,0,baz,bel])
+	cpos = coordinates.transform("hor","cel",hpos,time=mjd,site=site)
+	return cpos
+def cel2foc(cpos, site, mjd, bore):
+	baz, bel = bore
+	hpos = coordinates.transform("cel","hor",cpos,time=mjd,site=site)
+	fpos = coordinates.recenter(hpos, [baz,bel,0,0])
+	return fpos
 
-class DposTransFoc(DposTrans):
-	def __init__(self, ref_pos_cel, ctime):
-		self.ref_pos_cel = ref_pos_cel
-		self.mjd          = utils.ctime2mjd(ctime)
-		self.ref_pos_hor = coordinates.transform("cel","hor",ref_pos_cel,time=self.mjd)
-	def to_cel(self, dpos):
-			pos_hor = coordinates.recenter(dpos, [0,0,self.ref_pos_hor[0],self.ref_pos_hor[1]])
-			dpos_cel = utils.rewind(
-					coordinates.transform("hor","cel",pos_hor,time=self.mjd)-self.ref_pos_cel)
-			return dpos_cel
-	def from_cel(self, dpos):
-		pos_hor = coordinates.transform("cel","hor",self.ref_pos_cel+dpos,time=self.mjd)
-		pos_foc = utils.rewind(coordinates.recenter(pos_hor,[self.ref_pos_hor[0],self.ref_pos_hor[1],0,0]))
-		return pos_foc
+class DposTransFoc:
+	"""Transform between focalplane coordinate *offsets* and celestial
+	coordinage *offsets*."""
+	def __init__(self, sdat):
+		self.mjd  = utils.ctime2mjd(sdat.ctime)
+		self.site = sdat.site
+		self.ref_cel = sdat.srcpos
+		# Find the boresight pointing that defines our focalplane
+		# coordinates. This is not exact for two reasons:
+		# 1. The array center is offset from the boresight, by about 1 degree.
+		# 2. The detectors are offset from the array center by half that.
+		# We could store the former to improve our accuracy a bit, but
+		# to get #2 we would need a time-domain fit, which is what we're
+		# trying to avoid here. The typical error from using the array center
+		# instead would be about 1' offset * 1 degree error = 1.05 arcsec error.
+		# We *can* easily get the boresight elevation since we have constant
+		# elevation scans, so that removes half the error. That should be
+		# good enough.
+		self.bore= [
+				coordinates.transform("cel","hor",sdat.srcpos,time=self.mjd,site=self.site)[0],
+				sdat.el ]
+		self.ref_foc = cel2foc(self.ref_cel, self.site, self.mjd, self.bore)
+	def foc2cel(self, dfoc):
+		foc = self.ref_foc + dfoc
+		cel = foc2cel(foc, self.site, self.mjd, self.bore)
+		dcel = utils.rewind(cel-self.ref_cel)
+		return dcel
+	def cel2foc(self, dcel):
+		cel = self.ref_cel + dcel
+		foc = cel2foc(cel, self.site, self.mjd, self.bore)
+		dfoc = utils.rewind(foc-self.ref_foc)
+		return dfoc
 
 class SrcFitter:
 	def __init__(self, sdata, fwhm, ctrans=DposTransFoc):
@@ -164,7 +188,7 @@ class SrcFitter:
 			lik  = Srclik(s.map, s.div, beam)
 			self.liks.append(lik)
 		if ctrans is None: ctrans = lambda (dpos,sdat): dpos
-		self.trfs  = [ctrans(s.srcpos, s.ctime) for s in sdata]
+		self.trfs  = [ctrans(s) for s in sdata]
 		self.i     = 0
 		self.verbose = False
 	def calc_chisq_wrapper(self, x):
@@ -177,7 +201,7 @@ class SrcFitter:
 	def calc_chisq(self, dpos):
 		chisqs = []
 		for lik, trf, s in zip(self.liks, self.trfs, self.sdata):
-			dpos_cel = trf.to_cel(dpos)
+			dpos_cel = trf.foc2cel(dpos)
 			chisqs.append(lik.calc_chisq(s.srcpos+dpos_cel))
 		chisq  = np.sum(chisqs)
 		rrel   = np.sum(dpos**2)**0.5/self.rmax
@@ -196,7 +220,7 @@ class SrcFitter:
 		amps, models, poss_cel, poss_hor, vamps = [], [], [], [], []
 		for i in range(self.nsrc):
 			lik, sd = self.liks[i], self.sdata[i]
-			dpos_cel= self.trfs[i].to_cel(dpos)
+			dpos_cel= self.trfs[i].foc2cel(dpos)
 			pos_cel = dpos_cel + sd.srcpos
 			pos_hor = coordinates.transform("cel","hor",pos_cel,utils.ctime2mjd(self.sdata[i].ctime))
 			profile = lik.calc_profile(pos_cel)
@@ -216,6 +240,9 @@ class SrcFitter:
 		except np.linalg.LinAlgError:
 			ddpos = np.array([np.inf,np.inf])
 			pcorr = 0
+		# We want to know how far to move the detector to hit the source,
+		# not how far to move the source to hit the detector.
+		dpos = -dpos
 		return bunch.Bunch(dpos=dpos, ddpos=ddpos, pcorr=pcorr, poss_cel=np.array(poss_cel),
 				poss_hor=np.array(poss_hor), amps=np.array(amps), damps=np.array(vamps)**0.5,
 				models=models, nsrc=len(poss_cel))
@@ -228,7 +255,7 @@ class SrcFitter:
 				vals.append(val)
 			best = np.argmax(vals)
 			dpos_cel = poss[best] - self.sdata[best].srcpos
-			dpos = self.trfs[best].from_cel(dpos_cel)
+			dpos = self.trfs[best].cel2foc(dpos_cel)
 			return dpos
 		else:
 			bpos, bval = None, np.inf
@@ -294,9 +321,24 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	sdiv = project_maps([s.div for s in sdata], fit.poss_cel, shape, wcs)
 	smod = project_maps(fit.models, fit.poss_cel, shape, wcs)
 	smap = enmap.samewcs([smap,smod,smap-smod],smap)
-	# And build scaled coadd
-	trhs = np.sum(smap*sdiv*fit.amps[None,:,None,None],1)
-	tdiv = np.sum(sdiv*fit.amps[:,None,None]**2,0)
+	# And build scaled coadd. When map is divided by a, div = ivar
+	# is multiplied by a**2. Points in very noisy regions can have
+	# large error bars in the amplitude, and hence might randomly
+	# appear to have a very strong signal. We don't want to let these
+	# dominate, so downweight points with atypically high variance.
+	# FIXME: Need a better approach than this. This fixed some things,
+	# but broke others.
+	#beam_exposure = []
+	#for i, s in enumerate(sdata):
+	#	med_div = np.median(s.div[s.div!=0])
+	#	profile = fit.models[i]/fit.amps[i]
+	#	avg_div = np.sum(s.div*profile)/np.sum(profile)
+	#	beam_exposure.append(avg_div/med_div)
+	#beam_exposure = np.array(beam_exposure)
+	#weight = np.minimum(1,beam_exposure*1.25)**4
+	weight = 1
+	trhs = np.sum(smap*sdiv*(fit.amps*weight)[None,:,None,None],1)
+	tdiv = np.sum(sdiv*(fit.amps*weight)[:,None,None]**2,0)
 	tdiv[tdiv==0] = np.inf
 	tmap = trhs/tdiv
 	# And write them

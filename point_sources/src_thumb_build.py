@@ -26,8 +26,12 @@ comm = mpi.COMM_WORLD
 R    = args.radius*utils.arcmin
 res  = args.res*utils.arcmin
 dtype= np.float32
-bsize= 100
+bsize_fknee = 100
+bsize_ivar  = 400
 utils.mkdir(args.odir)
+
+rfreqs  = [12, 80]
+drfreqs = [1,   1]
 
 def find_scan_vel(scan, ipos, aspeed, dt=0.1):
 	hpos  = coordinates.transform("equ","hor", ipos, time=scan.mjd0, site=scan.site)
@@ -49,6 +53,21 @@ def measure_fknee(bps, df, fref=10, ratio=2):
 		print "This really shouldn't happen in measure_fknee"
 		return df
 	return above[-1]*df
+
+def measure_power(ps, f, w, srate):
+	i1 = int((f-w)*ps.shape[-1]/(srate/2.))
+	i2 = int((f+w)*ps.shape[-1]/(srate/2.))
+	return np.mean(ps[...,i1:i2]**-1,-1)**-1
+
+def apply_bivar(tod, bivar, bsize, inplace=False):
+	if not inplace: tod = tod.copy()
+	nsamp = tod.shape[-1]
+	work  = tod[...,:nsamp/bsize*bsize].reshape(tod.shape[:-1]+(-1,bsize))
+	work *= bivar[...,:,None]
+	# Handle left-over samples
+	nleft = nsamp % bsize
+	if nleft > 0: tod[...,-nleft:] *= bivar[...,-1,None]
+	return tod
 
 def read_srcs(fname, cols=(0,1,2)):
 	if fname.endswith(".fits"):
@@ -115,12 +134,15 @@ for ind in range(comm.rank, len(ids), comm.size):
 	with bench.mark("filter"):
 		freqs = fft.rfftfreq(d.nsamp)*d.srate
 		ft    = fft.rfft(tod)
+		ps    = np.abs(ft)**2
+		rpows = [measure_power(ps,rfreq,drfreq,d.srate) for rfreq,drfreq in zip(rfreqs, drfreqs)]
+		rpows = np.array(rpows)
 		# Determine the fknee to use. First get a typical spectrum.
 		# This does not work well with s16, which currently doesn't
 		# have time constants.
-		ps     = np.median(np.abs(ft)**2,0)
-		bps    = bin_spectrum(ps, bsize)
-		fknee  = measure_fknee(bps, d.srate/2/ps.size*bsize)
+		ps     = np.median(ps,0)
+		bps    = bin_spectrum(ps, bsize_fknee)
+		fknee  = measure_fknee(bps, d.srate/2/ps.size*bsize_fknee)
 		print "fknee %7.4f" % fknee
 		#np.savetxt("ps.txt", ps)
 		#1/0
@@ -130,9 +152,11 @@ for ind in range(comm.rank, len(ids), comm.size):
 		fft.ifft(ft, tod, normalize=True)
 		del ft
 
-	# Estimate white noise level, and weight tod by it
-	ivar = 1/np.mean(tod**2,-1)
-	tod *= ivar[:,None]
+	# Estimate white noise level in bins, and weight tod by it
+	ivar  = 1/np.mean(tod**2,-1)
+	bivar = 1/np.mean(tod[:,:d.nsamp/bsize_ivar*bsize_ivar].reshape(d.ndet,-1,bsize_ivar)**2,-1)
+	tod   = apply_bivar(tod, bivar, bsize_ivar, inplace=True)
+	#tod  *= ivar[:,None]
 
 	# Find azimuth scanning speed
 	aspeed = np.median(np.abs(d.boresight[1,1:]-d.boresight[1,:-1])[::10])*d.srate
@@ -145,7 +169,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 	pcut = pmat.PmatCut(scan)
 	junk = np.zeros(pcut.njunk, dtype)
 	pcut.backward(tod, junk)
-	wtod = tod*0+ivar[:,None]
+	wtod = apply_bivar(tod*0+1,bivar,bsize_ivar,inplace=True)
+	#wtod = tod*0+ivar[:,None]
 	pcut.backward(wtod, junk)
 	for sid in sids:
 		shape, wcs = enmap.geometry(pos=[srcpos[::-1,sid]-R,srcpos[::-1,sid]+R], res=res, proj="car")
@@ -161,6 +186,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		div  = div[0]
 		map  = rhs.copy()
 		map[:,div>0] /= div[div>0]
+		map = map[0]
 		# Crop the outermost pixel, where outside hits will have accumulated
 		map, div, area = [m[...,1:-1,1:-1] for m in [map,div,area]]
 		# Find the local scanning velocity at the source position

@@ -118,13 +118,16 @@ class Srclik:
 		amp, vamp= self.calc_amp(profile)
 		return profile*amp
 		return profile*np.abs(amp)
-	def calc_chisq(self, posoff):
-		model = self.calc_model(posoff)
+	def calc_chisq(self, pos):
+		model = self.calc_model(pos)
 		resid = self.map - model
 		chisq = np.sum(resid**2*self.div)
 		return chisq
 	def simple_max(self):
-		smap = enmap.smooth_gauss(self.map*self.div**0.5, self.beam.sigma)
+		srhs = enmap.smooth_gauss(self.map*self.div, self.beam.sigma)
+		sdiv = enmap.smooth_gauss(self.div, self.beam.sigma)
+		sdiv = np.maximum(sdiv, np.median(np.abs(sdiv))*0.1)
+		smap = srhs/sdiv**0.5
 		pos  = enmap.argmax(smap)
 		val  = smap.at(pos)
 		return pos[::-1], val
@@ -205,7 +208,7 @@ class SrcFitter:
 			chisqs.append(lik.calc_chisq(s.srcpos+dpos_cel))
 		chisq  = np.sum(chisqs)
 		rrel   = np.sum(dpos**2)**0.5/self.rmax
-		if rrel > 1: chisq *= rrel
+		if rrel > 1: chisq += (5*(rrel-1))**2
 		return chisq
 	def calc_deriv(self, dpos, step=0.05*utils.arcmin):
 		return np.array([
@@ -251,11 +254,13 @@ class SrcFitter:
 			poss, vals = [], []
 			for i in range(self.nsrc):
 				pos, val = self.liks[i].simple_max()
+				print (pos-self.sdata[i].srcpos)/utils.arcmin, val
 				poss.append(pos)
 				vals.append(val)
 			best = np.argmax(vals)
 			dpos_cel = poss[best] - self.sdata[best].srcpos
 			dpos = self.trfs[best].cel2foc(dpos_cel)
+			print dpos/utils.arcmin
 			return dpos
 		else:
 			bpos, bval = None, np.inf
@@ -263,8 +268,18 @@ class SrcFitter:
 				for dra in np.linspace(-self.rmax, self.rmax, self.ngrid):
 					dpos  = np.array([dra,ddec])
 					chisq = self.calc_chisq(dpos)
+					print dpos/utils.arcmin, chisq
 					if chisq < bval: bpos, bval = dpos, chisq
 			return bpos
+	def likgrid(self, R, n):
+		shape, wcs = enmap.geometry(pos=np.array([[-R,-R],[R,R]]), shape=(n,n), proj="car")
+		res = enmap.zeros(shape, wcs)
+		pos = res.posmap()
+		for i,p in enumerate(pos.reshape(2,-1).T):
+			chisq = self.calc_chisq(p)
+			print "%6d %7.3f %7.3f %15.7e" % (i, p[0]/utils.arcmin, p[1]/utils.arcmin, chisq)
+			res.reshape(-1)[i] = chisq
+		return res
 	def fit(self, verbose=False):
 		self.verbose = verbose
 		t1   = time.time()
@@ -297,7 +312,24 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	ifile = args.ifiles[ind]
 	sdata = read_sdata(ifile)
 
+	#for i, sdat in enumerate(sdata):
+	#	print np.sum(sdat.map**2*sdat.div), sdat.div.size
+	#	enmap.write_map("rmap%d.fits" % (i+1), sdat.map*sdat.div**0.5)
+	#	print np.array(np.sort((sdat.map*sdat.div**0.5).reshape(-1)))
+	#1/0
+
+	# Fill with fake data
+	np.random.seed(0)
+	for sdat in sdata:
+		sdat.map[:] = np.random.standard_normal(sdat.map.shape)*np.maximum(sdat.div,1e-15)**-0.5
+
+	sdata = sdata[0:1]
 	fitter = SrcFitter(sdata, fwhm)
+	cmap = fitter.likgrid(6*utils.arcmin, 80)
+	enmap.write_map("cmap1e.fits", cmap)
+	1/0
+
+
 	# Find the ML position
 	t1     = time.time()
 	fit    = fitter.fit(verbose=False)

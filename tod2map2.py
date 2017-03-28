@@ -186,13 +186,16 @@ if comm.rank == 0:
 		for id, dets in zip(read_ids, read_dets):
 			f.write("%s %3d: " % (id, len(dets)) + " ".join([str(d) for d in dets]) + "\n")
 # Output autocuts
-autocuts = utils.allgatherv(np.array([[cut[1:] for cut in scan.autocut] for scan in myscans]),comm)
-autokeys = [cut[0] for cut in myscans[0].autocut]
-if comm.rank == 0:
-	with open(root + "autocut.txt","w") as ofile:
-		ofile.write(("#%29s" + " %15s"*len(autokeys)+"\n") % (("id",)+tuple(autokeys)))
-		for id, acut in zip(read_ids, autocuts):
-			ofile.write(("%30s" + " %7.3f %7.3f"*len(autokeys) + "\n") % ((id,)+tuple(1e-6*acut.reshape(-1))))
+try:
+	autocuts = utils.allgatherv(np.array([[cut[1:] for cut in scan.autocut] for scan in myscans]),comm)
+	autokeys = [cut[0] for cut in myscans[0].autocut]
+	if comm.rank == 0:
+		with open(root + "autocut.txt","w") as ofile:
+			ofile.write(("#%29s" + " %15s"*len(autokeys)+"\n") % (("id",)+tuple(autokeys)))
+			for id, acut in zip(read_ids, autocuts):
+				ofile.write(("%30s" + " %7.3f %7.3f"*len(autokeys) + "\n") % ((id,)+tuple(1e-6*acut.reshape(-1))))
+except AttributeError:
+	pass
 # Output sample stats
 if comm.rank == 0:
 	with open(root + "samps.txt", "w") as ofile:

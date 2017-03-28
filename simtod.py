@@ -7,10 +7,10 @@ config.default("verbosity", 1, "Verbosity for output. Higher means more verbose.
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("odir")
 parser.add_argument("--area",  type=str)
-parser.add_argument("--bore",  type=str, default="grid:2:0.24:0.8")
+parser.add_argument("--bore",  type=str, default="grid:2:0.2:0.8")
 parser.add_argument("--dets",  type=str, default="scattered:3:3:2.0")
 parser.add_argument("--signal",type=str, default="ptsrc:100:1e3:-3")
-parser.add_argument("--noise", type=str, default="1/f:100:2:0.5")
+parser.add_argument("--noise", type=str, default="1/f:20:2:0.5")
 parser.add_argument("--seed",  type=int, default=1)
 parser.add_argument("--measure", type=float, default=None)
 parser.add_argument("--real",  type=str, default=None)
@@ -24,8 +24,7 @@ if args.area:
 	area = enmap.read_map(args.area)
 	if area.ndim == 2: area = area[None]
 else:
-	shape= (3,512,512)
-	wcs  = enmap.create_wcs(shape, np.array([[-1,-1],[1,1]])*np.pi/180)
+	shape, wcs = enmap.geometry(pos=np.array([[-1,-1],[1,1]])*np.pi/180, shape=(600,600), pre=(3,), proj="car", ref=[0,0])
 	area = enmap.zeros(shape, wcs)
 
 def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override=None):

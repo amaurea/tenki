@@ -2,11 +2,17 @@ import numpy as np, argparse
 from enlib import enmap, utils, bench
 parser = argparse.ArgumentParser()
 parser.add_argument("div")
+parser.add_argument("ofile", nargs="?", default="/dev/stdout")
+parser.add_argument("-d", "--downgrade", type=int, default=1)
 parser.add_argument("-t", "--thin", type=int, default=1000)
 parser.add_argument("-A", "--area-model", type=str, default="exact", help="How to model pixel area. exact: Compute shape of each pixel. average: Use a single average number for all")
 args = parser.parse_args()
 
 div = enmap.read_map(args.div)
+if args.downgrade:
+	div  = enmap.downgrade(div, args.downgrade)
+	div *= args.downgrade**2
+
 div = div.reshape((-1,)+div.shape[-2:])[0]
 # Individual pixel area
 if args.area_model == "average":
@@ -34,4 +40,4 @@ with utils.nowarn():
 	mask = np.isfinite(rms)
 	rms, area = rms[mask], area[mask]
 
-np.savetxt("/dev/stdout", np.array([area[::args.thin],rms[::args.thin]]).T, fmt="%9.3f %15.4f")
+np.savetxt(args.ofile, np.array([area[::args.thin],rms[::args.thin]]).T, fmt="%9.3f %15.4f")

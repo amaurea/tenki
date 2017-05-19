@@ -105,7 +105,13 @@ if args.restrict is not None:
 	selected = [int(w) for w in args.restrict.split(",")]
 	allowed &= set(selected)
 
+print "allowed"
+print allowed
+print "ids"
+print ids
+
 for ind in range(comm.rank, len(ids), comm.size):
+	print "moo"
 	id    = ids[ind]
 	oid   = id.replace(":","_")
 	oname = "%s/%s.hdf" % (args.odir, oid)

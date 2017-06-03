@@ -26,11 +26,15 @@ if len(args.templates) > 1:
 ncomp = args.ncomp
 
 assert ncomp == 1 or ncomp == 3, "Only 1 or 3 components supported"
-dtype = np.float64
+dtype = np.float32
 ctype = np.result_type(dtype,0j)
+
 # Read the input maps
 L.info("Reading " + args.ihealmap)
-m = np.atleast_2d(healpy.read_map(args.ihealmap, field=tuple(range(args.first,args.first+ncomp)))).astype(dtype)
+m = np.atleast_2d(healpy.read_map(args.ihealmap, field=tuple(range(args.first,args.first+ncomp)))).astype(dtype,copy=False)
+mask    = m < -1e20
+m[mask] = np.mean(m[~mask])
+
 if args.unit != 1: m /= args.unit
 # Prepare the transformation
 L.debug("Preparing SHT")
@@ -78,12 +82,14 @@ for tfile in args.templates:
 			if s1 != s2:
 				# Note: rotate_alm does not actually modify alm
 				# if it is single precision
+				alm = alm.astype(np.complex128,copy=False)
 				if s1 == "gal" and (s2 == "equ" or s2 == "cel"):
 					healpy.rotate_alm(alm, euler[0], euler[1], euler[2])
 				elif s2 == "gal" and (s1 == "equ" or s1 == "cel"):
 					healpy.rotate_alm(alm,-euler[2],-euler[1],-euler[0])
 				else:
 					raise NotImplementedError
+				alm = alm.astype(ctype,copy=False)
 		L.debug("Projecting")
 		res = enmap.zeros((len(alm),)+shape[-2:], wcs, dtype)
 		res = curvedsky.alm2map(alm, res)

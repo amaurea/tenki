@@ -11,6 +11,7 @@ parser.add_argument("-e", "--edge",    type=int, default=0)
 parser.add_argument("-t", "--trim",    type=int, default=0, help="Amount to trim maps that need to be interplated by, in pixels on each side.")
 parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("--fslice", type=str, default="")
+parser.add_argument("-M", "--allow-missing", action="store_true")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -27,8 +28,9 @@ def read_map(fname):
 	m = nonan(enmap.read_map(fname))
 	#return m.preflat[:1]
 	return m.reshape(-1, m.shape[-2], m.shape[-1])
-def read_div(fname, padlen):
+def read_div(fname):
 	m = nonan(enmap.read_map(fname))*1.0
+	return m
 	#return m.preflat[:1][None]
 	if m.ndim == 2:
 		res = enmap.zeros((padlen,padlen)+m.shape[-2:], m.wcs, m.dtype)
@@ -41,13 +43,21 @@ def get_tilenames(dir):
 	return sorted([name for name in os.listdir(dir) if name.endswith(".fits") or name.endswith(".hdf")])
 
 def mul(w,m):
-	if w.ndim == 2: return m*w[None]
-	elif w.ndim == 3: return m*w
+	if w.ndim < 4: return m*w
 	elif w.ndim == 4: return enmap.samewcs(array_ops.matmul(w,m, axes=[0,1]),m)
 	else: raise NotImplementedError("Only 2d, 3d or 4d weight maps understood")
+def add(m1,m2):
+	ndim = min(m1.ndim,m2.ndim)
+	if m1.ndim == m2.ndim or ndim < 4: return m1+m2
+	elif ndim == 4:
+		if m1.ndim < m2.ndim: m1,m2 = m2,m1
+		res = m1.copy()
+		for i in range(len(m1)):
+			res[i,i] += (m2 if m2.ndim == 2 else m2[i])
+		return res
+	else: raise NotImplementedError("Only 2d, 3d or 4d maps understood")
 def solve(w,m):
-	if w.ndim == 2: return m/w[None]
-	elif w.ndim == 3: return m/w
+	if w.ndim < 4: return m/w
 	elif w.ndim == 4:
 		# This is slower, but handles low-hit areas near the edge better
 		iw = array_ops.eigpow(w,-1,axes=[0,1])
@@ -60,17 +70,16 @@ def nonan(a):
 	return res
 def apply_apod(div):
 	if apod_params is None: return div
-	weight = div[0,0]
+	weight = div.preflat[0]
 	moo = enmap.downgrade(weight,50)
-	print np.mean(moo), np.median(moo), np.max(moo)
 	maxval = np.max(enmap.downgrade(weight,50))
 	apod   = np.minimum(1,weight/maxval/apod_params[0])**apod_params[1]
-	return div*apod[None,None]
+	return div*apod
 def apply_trim(div):
 	t = args.trim
 	if t <= 0: return div
-	div[:,:,range(t)+range(-t,0),:] = 0
-	div[:,:,:,range(t)+range(-t)] = 0
+	div[...,range(t)+range(-t,0),:] = 0
+	div[...,:,range(t)+range(-t)] = 0
 	return div
 	#fdiv = div.reshape((-1,)+div.shape[-2:])
 	#dists= ndimage.distance_transform_edt(np.any(fdiv!=0,0))
@@ -82,12 +91,12 @@ def apply_trim(div):
 	return div
 def apply_edge(div):
 	if args.edge == 0: return div
-	w = div[0,0]*0+1
+	w = div.preflat[0]*0+1
 	w[[0,-1],:] = 0
 	w[:,[0,-1]] = 0
 	dists = ndimage.distance_transform_edt(w)
 	apod = np.minimum(1,dists/float(args.edge))
-	return div*apod[None,None]
+	return div*apod
 
 def coadd_maps(imaps, ihits, omap, ohit, cont=False):
 	# The first map will be used as a reference. All subsequent maps
@@ -96,20 +105,27 @@ def coadd_maps(imaps, ihits, omap, ohit, cont=False):
 	if args.verbose: print "Reading %s" % imaps[0]
 	m = read_map(imaps[0])
 	if args.verbose: print"Reading %s" % ihits[0]
-	w = apply_edge(apply_apod(apply_trim(read_div(ihits[0], len(m)))))
+	w = apply_edge(apply_apod(apply_trim(read_div(ihits[0]))))
 	wm = mul(w,m)
 
 	for mif,wif in zip(imaps[1:],ihits[1:]):
 		if args.verbose: print"Reading %s" % mif
-		mi = read_map(mif)
+		try:
+			mi = read_map(mif)
+		except IOError:
+			if args.allow_missing:
+				print "Can't read %s. Skipping" % mif
+				continue
+			else: raise
 		if args.verbose: print"Reading %s" % wif
-		wi = apply_edge(apply_apod(apply_trim(read_div(wif, len(mi)))))
+
+		wi = apply_edge(apply_apod(apply_trim(read_div(wif))))
 		# We may need to reproject maps
 		if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
 			mi = enmap.project(mi, m.shape, m.wcs, mode="constant")
 			wi = enmap.project(wi, w.shape, w.wcs, mode="constant")
-		w[:len(wi),:len(wi)] += wi
-		wm[:len(wi)] += mul(wi,mi)
+		w  = add(w,wi)
+		wm = add(wm,mul(wi,mi))
 
 	if args.verbose: print"Solving"
 	m = solve(w,wm)

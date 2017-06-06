@@ -346,7 +346,7 @@ def coadd_tile_data(datasets, box, odir, ps_smoothing=10, pad=0, ref_beam=None,
 			fw *= dataset.iN_b
 			if args.filter: fw *= dataset.filter
 			w   = map_ifft(fw)*split.data.H
-			enmap.write_map(odir + "/%s_%02d_rhs.fits" % (dataset.name, i), w)
+			#enmap.write_map(odir + "/%s_%02d_rhs.fits" % (dataset.name, i), w)
 			rhs += w
 			i += 1
 	del w, iN, iN_A, iN_b, filter

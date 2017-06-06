@@ -14,7 +14,7 @@ parser.add_argument("-N", "--nsim",     type=int,  default=1)
 parser.add_argument("--ncomp",          type=int,  default=3)
 parser.add_argument("-v", "--verbosity", action="count", default=0)
 parser.add_argument("--method",         type=str,  default="auto")
-parser.add_argument("-e", "--extent",   type=str,  default="intermediate")
+parser.add_argument("-e", "--extent",   type=str,  default="subgrid")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD

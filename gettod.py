@@ -58,9 +58,10 @@ for id in ids:
 	oname = args.ofile
 	if len(ids) > 1: oname = "%s/%s.hdf" % (args.ofile, id)
 	with h5py.File(oname, "w") as hfile:
-		hfile["tod"] = d.tod
-		hfile["az"]  = d.boresight[1]
-		hfile["el"]  = d.boresight[2]
+		if "tod" in d: hfile["tod"] = d.tod
+		if "boresight" in d:
+			hfile["az"]  = d.boresight[1]
+			hfile["el"]  = d.boresight[2]
 		hfile["dets"] = d.dets
 		try:
 			hfile["mask"] = d.cut.to_mask().astype(np.int16)

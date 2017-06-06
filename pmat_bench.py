@@ -166,7 +166,9 @@ transfun = hor2pix(shape, wcs, t0)
 errlim   = np.array([0.01, 0.01, utils.arcmin, utils.arcmin])*acc
 ipfun    = interpol.ip_ndimage
 if args.interpolator == "all":
-	ipnames = ["fast","std_bi_0","std_bi_1","std_bi_3"]
+	ipnames = [
+			#"fast",
+			"std_bi_0","std_bi_1","std_bi_3"]
 else:
 	ipnames = args.interpolator.split(",")
 pix = None

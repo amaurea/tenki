@@ -7,7 +7,7 @@ parser.add_argument("sel", nargs="?", default="")
 parser.add_argument("ofile")
 args = parser.parse_args()
 
-file_db = filedb.ACTFiles()
+file_db = filedb.setup_filedb()
 scan_db = todinfo.read(args.tagfile)
 comm    = mpi.COMM_WORLD
 

@@ -16,6 +16,8 @@ parser.add_argument("-a", "--alpha",     type=float, default=5)
 parser.add_argument("-R", "--radius",    type=float, default=10)
 parser.add_argument("-r", "--res",       type=float, default=0.1)
 parser.add_argument("-s", "--restrict",  type=str,   default=None)
+parser.add_argument("-m", "--minimaps",  action="store_true")
+parser.add_argument("-c", "--cont",      action="store_true")
 args = parser.parse_args()
 
 config.default("pmat_accuracy", 10.0, "Factor by which to lower accuracy requirement in pointing interpolation. 1.0 corresponds to 1e-3 pixels and 0.1 arc minute in polangle")
@@ -97,15 +99,26 @@ bounds = filedb.scans.select(ids).data["bounds"]
 # Load source database
 srcdata  = read_srcs(args.srclist, cols=(args.rcol, args.dcol, args.acol))
 srcpos, amps = srcdata[:2], srcdata[2]
-print srcpos, amps
 allowed  = set(range(amps.size))
 allowed &= set(np.where(amps > args.minamp)[0])
 if args.restrict is not None:
 	selected = [int(w) for w in args.restrict.split(",")]
 	allowed &= set(selected)
 
+print "allowed"
+print allowed
+print "ids"
+print ids
+
 for ind in range(comm.rank, len(ids), comm.size):
+	print "moo"
 	id    = ids[ind]
+	oid   = id.replace(":","_")
+	oname = "%s/%s.hdf" % (args.odir, oid)
+	if args.cont and os.path.exists(oname):
+		print "%s is done: skipping" % id
+		continue
+
 	# Check if we hit any of the sources. We first make sure
 	# there's no angle wraps in the bounds, and then move the sources
 	# to the same side of the sky.
@@ -119,12 +132,14 @@ for ind in range(comm.rank, len(ids), comm.size):
 		print "%s has 0 srcs: skipping" % id
 		continue
 	print "%s has %d srcs: %s" % (id,len(sids),",".join([str(i) for i in sids]))
+
 	entry = filedb.data[id]
 	try:
 		with bench.mark("read"):
 			d = actdata.read(entry)
 		with bench.mark("calib"):
 			d = actdata.calibrate(d, exclude=["autocut"])
+		if d.ndet < 2 or d.nsamp < 1: raise errors.DataMissing("no data in tod")
 	except errors.DataMissing as e:
 		print "%s skipped: %s" % (id, e.message)
 		continue
@@ -143,7 +158,6 @@ for ind in range(comm.rank, len(ids), comm.size):
 		ps     = np.median(ps,0)
 		bps    = bin_spectrum(ps, bsize_fknee)
 		fknee  = measure_fknee(bps, d.srate/2/ps.size*bsize_fknee)
-		print "fknee %7.4f" % fknee
 		#np.savetxt("ps.txt", ps)
 		#1/0
 		fknee *= args.fknee_mul
@@ -154,9 +168,17 @@ for ind in range(comm.rank, len(ids), comm.size):
 
 	# Estimate white noise level in bins, and weight tod by it
 	ivar  = 1/np.mean(tod**2,-1)
-	bivar = 1/np.mean(tod[:,:d.nsamp/bsize_ivar*bsize_ivar].reshape(d.ndet,-1,bsize_ivar)**2,-1)
-	tod   = apply_bivar(tod, bivar, bsize_ivar, inplace=True)
-	#tod  *= ivar[:,None]
+	#bivar = 1/np.mean(tod[:,:d.nsamp/bsize_ivar*bsize_ivar].reshape(d.ndet,-1,bsize_ivar)**2,-1)
+	#tod   = apply_bivar(tod, bivar, bsize_ivar, inplace=True)
+	tod  *= ivar[:,None]
+
+	# Kill ivar outliers
+	ivar_tol = 10
+	medivar  = np.median(ivar)
+	good = (ivar > medivar / ivar_tol)*(ivar < medivar * ivar_tol)
+	d.restrict(d.dets[good])
+	tod  = tod[good]
+	ivar = ivar[good]
 
 	# Find azimuth scanning speed
 	aspeed = np.median(np.abs(d.boresight[1,1:]-d.boresight[1,:-1])[::10])*d.srate
@@ -169,8 +191,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 	pcut = pmat.PmatCut(scan)
 	junk = np.zeros(pcut.njunk, dtype)
 	pcut.backward(tod, junk)
-	wtod = apply_bivar(tod*0+1,bivar,bsize_ivar,inplace=True)
-	#wtod = tod*0+ivar[:,None]
+	#wtod = apply_bivar(tod*0+1,bivar,bsize_ivar,inplace=True)
+	wtod = tod*0+ivar[:,None]
 	pcut.backward(wtod, junk)
 	for sid in sids:
 		shape, wcs = enmap.geometry(pos=[srcpos[::-1,sid]-R,srcpos[::-1,sid]+R], res=res, proj="car")
@@ -202,6 +224,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			site=d.site, off=d.point_correction))
 	del tod, wtod, d
 
-	write_sdata("%s/%s.hdf" % (args.odir, id), sdata)
-	for i, sdat in enumerate(sdata):
-		enmap.write_map("%s/%s_srcmap_%03d.fits" % (args.odir, id, sdat.sid), sdat.map)
+	write_sdata(oname, sdata)
+	if args.minimaps:
+		for i, sdat in enumerate(sdata):
+			enmap.write_map("%s/%s_srcmap_%03d.fits" % (args.odir, oid, sdat.sid), sdat.map)

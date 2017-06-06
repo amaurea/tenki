@@ -1,18 +1,28 @@
 import numpy as np, os, time, h5py, astropy.io.fits, sys, argparse, copy
-from scipy import optimize, stats
+from scipy import optimize, stats, ndimage
 from enlib import utils, mpi, fft, enmap, bunch, coordinates
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("odir")
-parser.add_argument("-b", "--fwhm",  type=float, default=1.3)
-parser.add_argument("-x", "--ignore-ctime", action="store_true")
-parser.add_argument("--orad",        type=float, default=10)
-parser.add_argument("--ores",        type=float, default=0.1)
+parser.add_argument("-B", "--fwhm",    type=float, default=1.3)
+parser.add_argument("--orad",          type=float, default=10)
+parser.add_argument("--ores",          type=float, default=0.1)
+parser.add_argument("-m", "--method",  type=str,   default="mlg")
+parser.add_argument("-b", "--burnin",  type=int,   default=120)
+parser.add_argument("-t", "--thin",    type=int,   default=3)
+parser.add_argument("-n", "--nsamp",   type=int,   default=200)
+parser.add_argument("-v", "--verbose", action="count", default=0)
+parser.add_argument("-q", "--quiet",   action="count", default=0)
+parser.add_argument("-g", "--grid-res",type=float, default=0.5*utils.arcmin)
+parser.add_argument("-M", "--minimaps",action="store_true")
+parser.add_argument("-c", "--cont-from",type=str,  default=None)
+parser.add_argument("-i", "--individual",action="store_true")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
 utils.mkdir(args.odir)
 fwhm = args.fwhm * utils.arcmin
+verbosity = args.verbose - args.quiet
 
 def marg_weights(dchisq, npoint, nsamp=10000):
 	"""Compute the marginalization weights for a detection
@@ -21,6 +31,7 @@ def marg_weights(dchisq, npoint, nsamp=10000):
 	normal distributed significance, and hence standard chisquare
 	chisq improvements. This weight is explicitly
 	< exp(0.5*chi)/(sum_npoint exp(0.5*chi_i) + exp(0.5*dchisq)) >"""
+	if dchisq > 500: return 0, 1
 	#chisqs= np.random.standard_normal((npoint,nsamp))**2
 	chisqs = np.random.chisquare(1, size=(npoint,nsamp))
 	p  = np.exp(0.5*chisqs)
@@ -70,7 +81,7 @@ def read_sdata(ifile):
 	return sdata
 
 class BeamModel:
-	def __init__(self, fwhm, vel, dec_ref, fknee, alpha, nsigma=2000, nsub=100, order=3):
+	def __init__(self, fwhm, vel, dec_ref, fknee, alpha, nsigma=1000, nsub=50, order=3):
 		# Vel is [dra,ddec]/s.
 		sigma  = fwhm/(8*np.log(2))**0.5
 		res    = sigma/nsub
@@ -88,6 +99,8 @@ class BeamModel:
 		freq   = fft.rfftfreq(npoint, res/speed)
 		fbeam[1:] /= 1 + (freq[1:]/fknee)**-alpha
 		vbeam  = fft.ifft(fbeam, vbeam, normalize=True)
+		# Beam should be zero at large distances
+		vbeam -= vbeam[0]
 		# Prefilter for fast lookups
 		vbeam  = utils.interpol_prefilter(vbeam, npre=0, order=order)
 		# The total beam will be this beam times a normal one in the
@@ -123,21 +136,24 @@ class BeamModel:
 class Srclik:
 	def __init__(self, map, div, beam, maxdist=8):
 		self.map   = map.preflat[0]
-		#enmap.write_map("map.fits", map)
 		self.div   = div
-		self.posmap= map.posmap()
-		self.off   = map.size/3
+		#enmap.write_map("map.fits", map)
 		self.chisq0= np.sum(map**2*div)
+		self.npix  = np.sum(div>0)
+		self.posmap= map.posmap()
 		#enmap.write_map("posmap.fits", self.posmap)
 		self.beam  = beam
 	def calc_profile(self, pos):
 		dpos = self.posmap[::-1] - pos[:,None,None]
+		if np.abs(dpos[0,0,0]) > np.pi:
+			dpos[0] = utils.rewind(dpos[0])
 		return self.beam.eval(dpos)
 	def calc_amp(self, profile):
 		ivamp= np.sum(profile**2*self.div)
 		if ivamp == 0: return 0, np.inf
-		vamp = 1/ivamp
-		amp  = vamp*np.sum(profile*self.div*self.map)
+		with utils.nowarn():
+			vamp = 1/ivamp
+			amp  = vamp*np.sum(profile*self.div*self.map)
 		if ~np.isfinite(amp): amp = 0
 		return amp, vamp
 	def eval(self, pos):
@@ -148,7 +164,8 @@ class Srclik:
 		res.resid = self.map - res.model
 		res.chisq = np.sum(res.resid**2*self.div)
 		res.chisq0= self.chisq0
-		res.marg  = -res.amp**2/res.vamp
+		res.npix  = self.npix
+		res.marg  = -res.amp**2/res.vamp - np.sum(np.log(res.vamp))
 		res.pos   = pos
 		return res
 	def simple_max(self):
@@ -207,14 +224,18 @@ class DposTransFoc:
 		return dfoc
 
 class SrclikMulti:
-	def __init__(self, sdata, fwhm, ctrans=DposTransFoc, rmax=6*utils.arcmin):
+	def __init__(self, sdata, fwhm, ctrans=DposTransFoc, rmax=5*utils.arcmin):
 		self.sdata = sdata
 		self.nsrc  = len(sdata)
 		self.liks  = []
 		self.rmax  = rmax
+		self.chisq0= 0
+		self.npix  = 0
 		for s in sdata:
 			beam = BeamModel(fwhm, s.vel, s.srcpos[1], s.fknee, s.alpha)
 			lik  = Srclik(s.map, s.div, beam)
+			self.chisq0 += lik.chisq0
+			self.npix   += lik.npix
 			self.liks.append(lik)
 		if ctrans is None: ctrans = lambda (dpos,sdat): dpos
 		self.trfs  = [ctrans(s) for s in sdata]
@@ -232,6 +253,7 @@ class SrclikMulti:
 			res.poss.append(sub.pos)
 			res.models.append(sub.model)
 		res.amps  = np.array(res.amps)
+		res.npix  = self.npix
 		res.vamps = np.array(res.vamps)
 		# Add prior
 		rrel   = np.sum(dpos**2)**0.5/self.rmax
@@ -247,18 +269,19 @@ class SrcFitterML:
 		self.nsrc  = len(self.sdata)
 		self.lik   = SrclikMulti(sdata, fwhm, ctrans=ctrans)
 		self.fwhm  = fwhm
-		self.scale = 2*utils.arcmin
+		self.ctrans= ctrans
+		self.scale = 0.5*utils.arcmin
 		self.i     = 0
 		self.verbose = False
 	def calc_chisq(self, dpos):
 		return self.lik.eval(dpos).chisq
 	def calc_chisq_wrapper(self, x):
 		dpos  = x*self.scale
-		chisq = self.calc_chisq(dpos)
+		L     = self.lik.eval(dpos)
 		if self.verbose:
-			print "%4d %9.4f %9.4f %15.7e" % (self.i, dpos[0]/utils.arcmin, dpos[1]/utils.arcmin, chisq)
+			print "%4d %9.4f %9.4f %15.7f" % (self.i, dpos[0]/utils.arcmin, dpos[1]/utils.arcmin, L.chisq0-L.chisq)
 		self.i += 1
-		return chisq
+		return L.chisq
 	def calc_deriv(self, dpos, step=0.05*utils.arcmin):
 		return np.array([
 			self.calc_chisq(dpos+[step,0])-self.calc_chisq(dpos-[step,0]),
@@ -291,14 +314,19 @@ class SrcFitterML:
 			# Correct position and uncertainty
 			dpos, pcov = marg_pos(dpos, pcov, res.chisq0-res.chisq, npoint, R)
 			# Correct total chisquare
-			dchisq = (stats.norm.ppf(stats.norm.cdf(-dchisq**0.5)*npoint))**2
+			prob   = stats.norm.cdf(-dchisq**0.5)
+			if prob > 1e-10:
+				prob   = 1-(1-prob)**npoint
+				dchisq = stats.norm.ppf(prob)**2
 		ddpos = np.diag(pcov)**0.5
 		pcorr = pcov[0,1]/ddpos[0]/ddpos[1]
-		res.dpos  = -dpos
+		res.dpos  = dpos
 		res.ddpos = ddpos
 		res.damps = res.vamps**0.5
 		res.pcorr = pcorr
+		res.pcov  = pcov
 		res.nsrc  = self.nsrc
+		res.dchisq= dchisq
 		res.nsigma= dchisq**0.5
 		return res
 	def find_starting_point(self):
@@ -318,47 +346,185 @@ class SrcFitterML:
 				for dra in np.linspace(-self.rmax, self.rmax, self.ngrid):
 					dpos  = np.array([dra,ddec])
 					chisq = self.calc_chisq(dpos)
-					print dpos/utils.arcmin, chisq
+					#print dpos/utils.arcmin, chisq
 					if chisq < bval: bpos, bval = dpos, chisq
 			return bpos
-	def likgrid(self, R, n, marg=False):
+	def likgrid(self, R, n, super=1, marg=False, verbose=False):
 		shape, wcs = enmap.geometry(pos=np.array([[-R,-R],[R,R]]), shape=(n,n), proj="car")
-		res = enmap.zeros(shape, wcs)
-		pos = res.posmap()
+		dchisqs = enmap.zeros(shape, wcs)
+		amps    = enmap.zeros((self.nsrc,)+shape, wcs)
+		pos     = dchisqs.posmap()
 		for i,p in enumerate(pos.reshape(2,-1).T):
+			if np.sum(p**2)**0.5 > R: continue
 			L = self.lik.eval(p)
-			chisq = L.marg if marg else L.chisq
-			print "%6d %7.3f %7.3f %15.7e" % (i, p[0]/utils.arcmin, p[1]/utils.arcmin, chisq)
-			res.reshape(-1)[i] = chisq
-		return res
-	def fit(self, verbose=False, marginalize=True):
+			if verbose:
+				print "%6d %7.3f %7.3f %15.7f" % (i, p[0]/utils.arcmin, p[1]/utils.arcmin, L.chisq0-L.chisq)
+			dchisqs.reshape(-1)[i]          = L.chisq0-L.chisq
+			amps.reshape(self.nsrc,-1)[:,i] = L.amps
+		if super > 1:
+			# Use bicubic spline interpolation to upscale
+			shape2, wcs2 = enmap.geometry(pos=np.array([[-R,-R],[R,R]]), shape=(n*super,n*super), proj="car")
+			dchisqs = dchisqs.project(shape2, wcs2, mode="constant")
+			amps    = amps.project(shape2, wcs2, mode="constant")
+		return dchisqs, amps
+	def fit(self, verbose=False, marg=True):
 		self.verbose = verbose
 		t1   = time.time()
 		dpos = self.find_starting_point()
 		dpos = optimize.fmin_powell(self.calc_chisq_wrapper, dpos/self.scale, disp=False)*self.scale
-		res  = self.calc_full_result(dpos, marginalize=marginalize)
+		res  = self.calc_full_result(dpos, marginalize=marg)
 		res.time = time.time()-t1
 		return res
+	def fit_grid(self, verbose=False, grid_res=0.6*utils.arcmin, super=10):
+		self.verbose = verbose
+		t1 = time.time()
+		if verbose: print "Building coarse likelihood grid"
+		ngrid = int(np.round(2*self.lik.rmax/grid_res))
+		dchisqs, amps = self.likgrid(self.lik.rmax, ngrid, super=super, verbose=verbose)
+		if np.all(dchisqs == 0):
+			raise ValueError("featureless likelihood")
+		if False and verbose:
+			for i,s in enumerate(self.sdata):
+				enmap.write_map("map_%d.fits"%i,s.map)
+				enmap.write_map("div_%d.fits"%i,s.div)
+				enmap.write_map("white_%d.fits"%i,s.map*s.div**0.5)
+				enmap.write_map("pchisq_%d.fits"%i,s.map**2*s.div)
+				enmap.write_map("pchisq_smooth_%d.fits%i",enmap.smooth_gauss(s.map**2*s.div,0.6*utils.arcmin))
+			enmap.write_map("dchisqs.fits",dchisqs)
+		# Find local dchisq maxima
+		maxmap  = ndimage.maximum_filter(dchisqs, super)
+		peaks   = np.where((dchisqs==maxmap)*(maxmap>0))
+		maxvals = dchisqs[peaks]
+		maxpos  = dchisqs.pix2sky(peaks)
+		# Why isn't this just amps[:,peaks] or similar?
+		maxamps = amps.reshape(amps.shape[0],-1)[:,np.ravel_multi_index(peaks, amps.shape[-2:])]
+		inds    = np.argsort(maxvals)[::-1]
+		maxvals = maxvals[inds]
+		maxpos  = maxpos[:,inds]
+		maxamps = maxamps[:,inds]
+		# Perform ML fit for the highest one
+		dpos = optimize.fmin_powell(self.calc_chisq_wrapper, maxpos[:,0]/self.scale, disp=False)*self.scale
+		res  = self.calc_full_result(dpos, marginalize=False)
+		if False and verbose:
+			for i, m in enumerate(res.models):
+				enmap.write_map("model_%d.fits"%i,m)
+				resid  = self.sdata[i].map-m
+				enmap.write_map("resid_%d.fits"%i,resid)
+				pchisq = resid**2*sdata[i].div
+				pchisq_smooth = enmap.smooth_gauss(pchisq, 0.6*utils.arcmin)
+				enmap.write_map("pchisq_smooth_resid.fits",pchisq_smooth)
+				print np.sum((self.sdata[i].map-m)**2*self.sdata[i].div) - self.lik.chisq0
+
+		# Ideally we would integrate over the full likelihood, not
+		# just the peaks. But the peaks have higher weight
+		# and should be distributed representatively. Using just the
+		# peaks makes it easy to compare with our ML-fit, which is also
+		# a single point. So we loop over just the peaks here.
+		maxvals = maxvals[1:]
+		maxpos  = maxpos[:,1:]
+		maxamps = maxamps[:,1:]
+		P    = np.exp(0.5*(maxvals-res.dchisq))
+		P0   = 1/(1+np.sum(P))
+		P   *= P0
+		# Marginalize over peaks
+		res.dpos  = P0*res.dpos + np.sum(P*maxpos,-1)
+		off = maxpos-res.dpos[:,None]
+		res.pcov  = P0*res.pcov + np.sum(P*off[:,None]*off[None,:],-1)
+		res.ddpos = np.diag(res.pcov)**0.5
+		res.pcorr = res.pcov[0,1]/res.ddpos[0]/res.ddpos[1]
+		res.amps  = P0*res.amps + np.sum(P*maxamps,-1)
+		res.damps = (res.damps**2 + np.sum(P*(maxamps-res.amps[:,None])**2,-1))**0.5
+		# For the significance, we will use the difference from our peak to our
+		# strongest competitor
+		res.dchisq= res.dchisq - maxvals[0]
+		# Base nsigma on the sources
+		res.nsigma= max(0,res.dchisq)**0.5
+		res.time = time.time()-t1
+		return res
+	#def fit_grid(self, verbose=False, init_res=0.8*utils.arcmin, grid_res=0.4*utils.arcmin):
+	#	self.verbose = verbose
+	#	t1 = time.time()
+	#	if verbose: print "Searching for initial position"
+	#	ninit = int(np.round(2*self.lik.rmax/init_res))
+	#	dchisqs, amps = self.likgrid(self.lik.rmax, ninit, super=10, verbose=verbose)
+	#	enmap.write_map("dchisqs1.fits",dchisqs)
+	#	# Optimize based on the ML point
+	#	dpos =enmap.argmax(dchisqs)
+	#	if verbose: print "Doing ML search"
+	#	dpos =optimize.fmin_powell(self.calc_chisq_wrapper,dpos/self.scale,disp=False)*self.scale
+	#	res  =self.calc_full_result(dpos, marginalize=False)
+	#	# Set up new likelihood with ML model removed
+	#	models = self.lik.eval(dpos).models
+	#	srcsub = copy.deepcopy(self.sdata)
+	#	for i in range(len(srcsub)):
+	#		srcsub[i].map -= models[i]
+	#	if verbose: print "Building likelihood grid"
+	#	fitter = SrcFitterML(srcsub, self.fwhm, ctrans=self.ctrans)
+	#	# Evaluate this grid at higher resolution
+	#	ngrid = int(np.round(2*self.lik.rmax/grid_res))
+	#	dchisqs, amps = fitter.likgrid(fitter.lik.rmax, ngrid, super=5, verbose=verbose)
+	#	enmap.write_map("dchisqs2.fits",dchisqs)
+	#	# Marginalize using chisqs. The accuracy of this is limited
+	#	# by the resolution of the grid. The default is 0.4' raw grid
+	#	# that's interpolated onto a ~0.08' intermediate grid.
+	#	# That sounds pretty bad, but because the underlying chisq is
+	#	# smooth, most of the information is present even with a pretty
+	#	# coarse grid. Still, better accuracty than about 0.08' should not
+	#	# be expected here (and doesn't improve with higher interpolation).
+	#	# However, that only applies to the low-S/N cases where the ML point
+	#	# does not dominate.
+	#	#
+	#	# But the ML point is sort of counted twice here, at lesat for an
+	#	# infinitely fine grid. Wouldn't this lead to about twice as high
+	#	# variance in the position as we should have in this case? In fact,
+	#	# for strong sources it would be better to have a coarse grid,
+	#	# as it would be less likely to have a grid point match the ML
+	#	# position.
+	#	#
+	#	# Would be nice if we could remove the ML model before calculating
+	#	# the marginalization part. Well, we could. But we would have to
+	#	# do the gridding twice. Could do the first one, which just serves to
+	#	# give us the starting point, at lower resolution.
+	#	P    = np.exp(0.5*(dchisqs-(res.chisq0-res.chisq)))
+	#	P0   = 1/(1+np.sum(P))
+	#	P   *= P0
+	#	gpos = P.posmap()
+	#	res.dpos  = res.dpos  * P0 + np.sum(P*gpos,(-2,-1))
+	#	off = gpos-res.dpos[:,None,None]
+	#	print np.sum(P), P0
+	#	print off/utils.arcmin
+	#	res.pcov  = res.pcov * P0 + np.sum(off[:,None]*off[None,:]*P,(-2,-1))
+	#	res.ddpos = np.diag(res.pcov)**0.5
+	#	res.pcorr = res.pcov[0,1]/res.ddpos[0]/res.ddpos[1]
+	#	res.amps  = res.amps * P0 + np.sum(P*amps,(-2,-1))
+	#	res.damps = (res.damps**2 + np.sum((amps-res.amps[:,None,None])**2*P,(-2,-1)))**0.5
+	#	res.chisq = res.chisq* P0 + np.sum((res.chisq0-dchisqs)*P)
+	#	# Base nsigma on the sources
+	#	res.nsigma= np.sum(res.amps**2/res.damps**2)**0.5
+	#	res.time = time.time()-t1
+	#	return res
 
 class SrcFitterMC:
 	def __init__(self, sdata, fwhm, ctrans=DposTransFoc, nburn=100, atarg=0.3, thin=3):
 		self.sdata = sdata
 		self.lik   = SrclikMulti(sdata, fwhm, ctrans=ctrans)
 		self.nsamp = 0
-		self.naccept = 0
 		self.dpos  = np.zeros(2)
 		self.marg  = np.inf
-		self.step  = 2*utils.arcmin
-		self.step_interval = 50
 		self.lpar  = None
 		self.atarg = atarg
+		self.tune_interval = 30
 		self.thin  = thin
 		self.nburn = nburn
 		self.verbose = False
-	def draw(self, burnin=False, models=False):
+		# Accept rate tuning
+		self.steptune = [[2*utils.arcmin, 0, 0]]
+	@property
+	def arate(self): return float(self.steptune[-1][2]+0.1)/float(self.steptune[-1][1]+0.2)
+	def draw(self, burnin=False, models=False, verbose=False):
 		# Sample position
-		t1 = time.time()
-		dpos = self.dpos + self.step * np.random.standard_normal(2)
+		step = self.steptune[-1][0]
+		dpos = self.dpos + step * np.random.standard_normal(2)
 		lpar = self.lik.eval(dpos)
 		if not models:
 			del lpar.models
@@ -366,21 +532,44 @@ class SrcFitterMC:
 			self.lpar = lpar
 			self.dpos = dpos
 			self.marg = lpar.marg
-			self.naccept += 1
+			self.steptune[-1][2] += 1
 		lpar = self.lpar
 		self.nsamp += 1
+		self.steptune[-1][1] += 1
 		# We don't really need to sample amplitude, as this can be
 		# done post-hoc using amps and vamps.
-		if True and burnin:
-			# Tune step length
-			if self.nsamp % self.step_interval == 0:
-				arate = float(self.naccept)/self.nsamp
-				scale = min(2,max(1.0/2,(arate/self.atarg)**0.3))
-				self.step *= scale
-				print scale, self.step/utils.arcmin, arate, self.atarg, arate/self.atarg
-				self.nsamp, self.naccept = 0, 0
-		t2 = time.time()
-		lpar.time = t2-t1
+		if burnin and self.nsamp % self.tune_interval == 0:
+			if len(self.steptune) < 6:
+				self.steptune.append([self.steptune[-1][0]/2,0,0])
+			else:
+				# Try to fit model
+				steptune  = self.steptune[len(self.steptune)/2:]
+				stepsizes = np.array([s[0] for s in steptune])
+				arates    = np.array([(s[2]+0.1)/(s[1]+0.2) for s in steptune])
+				logita    = np.log(arates/(1-arates))
+				logs      = np.log(stepsizes)
+				#basis     = np.array([logs,logs*0+1])
+				#line      = np.linalg.solve(basis.dot(basis.T),basis.dot(logita))
+				# -1.12 slope comes from https://arxiv.org/pdf/1103.5986.pdf
+				line = [-1.12, np.mean(logita+1.12*logs)]
+				# Find logs needed to get the target logit(a), wiht
+				# our model being logit(a) = la*log(s)+lb =>
+				# log(s) = (logit(a) - lb)/la
+				targ_logita = np.log(self.atarg/(1-self.atarg))
+				targ_logs   = (targ_logita-line[1])/line[0]
+				new_step    = np.exp(targ_logs)
+				self.steptune.append([new_step,0,0])
+			mp,mn = self.steptune[-2:]
+			if verbose:
+				print "%7.4f %4d %4d %7.2f %7.4f" % (mp[0]/utils.arcmin,mp[1],mp[2],100*float(mp[2])/mp[1],mn[0]/utils.arcmin)
+		#if True and burnin:
+		#	# Tune step length
+		#	if self.nsamp % self.step_interval == 0:
+		#		arate = float(self.naccept)/self.nsamp
+		#		scale = min(2,max(1.0/2,(arate/self.atarg)**0.3))
+		#		self.step *= scale
+		#		print scale, self.step/utils.arcmin, arate, self.atarg, arate/self.atarg
+		#		self.nsamp, self.naccept = 0, 0
 		return copy.deepcopy(lpar)
 	def summarize(self, chain):
 		"""Given a chain of lpars, compute a summary in the
@@ -412,35 +601,35 @@ class SrcFitterMC:
 		#vamps   = np.var(ampss,0)+np.mean(vampss,0)
 		damps   = vamps**0.5
 		models  = self.lik.eval(dpos).models
-		time    = sum([c.time for c in chain])
 		nsigma  = (chisq0-chisq)**0.5
 		# We want how much to offset detector by, not how much to offset
 		# source by
-		dpos = -dpos
 		res  = bunch.Bunch(
 				dpos = dpos,  poss_cel=pos_cel, poss_hor=pos_hor,
 				ddpos= ddpos, amps=amps, damps=damps, pcorr=pcorr,
-				nsrc = len(self.sdata), models=models, time=time,
-				nsigma = nsigma, chisq0 = chisq0, chisq = chisq)
+				nsrc = len(self.sdata), models=models,
+				nsigma = nsigma, chisq0 = chisq0, chisq = chisq, npix=self.lik.npix)
 		return res
 	def fit(self, verbose=False, nsamp=500):
+		t1 = time.time()
 		for i in range(self.nburn):
 			for j in range(self.thin):
-				lpar = self.draw(burnin=True)
+				lpar = self.draw(burnin=True, verbose=verbose)
 			if verbose:
-				print "%4d %9.4f %9.4f %15.7e %6.2f" % (i-self.nburn,
-						lpar.dpos[0]/utils.arcmin, lpar.dpos[1]/utils.arcmin, lpar.chisq,
-						100.*self.naccept/(max(1,self.nsamp)))
+				print "%4d %9.4f %9.4f %10.3f %6.2f" % (i-self.nburn,
+						lpar.dpos[0]/utils.arcmin, lpar.dpos[1]/utils.arcmin, lpar.chisq0-lpar.chisq,
+						100.*self.arate)
 		chain = []
 		for i in range(nsamp):
 			for j in range(self.thin):
-				lpar = self.draw()
+				lpar = self.draw(verbose=verbose)
 			if verbose:
-				print "%4d %9.4f %9.4f %15.7e %6.2f" % (i,
-						lpar.dpos[0]/utils.arcmin, lpar.dpos[1]/utils.arcmin, lpar.chisq,
-						100.*self.naccept/self.nsamp)
+				print "%4d %9.4f %9.4f %10.3f %6.2f" % (i,
+						lpar.dpos[0]/utils.arcmin, lpar.dpos[1]/utils.arcmin, lpar.chisq0-lpar.chisq,
+						100.*self.arate)
 			chain.append(lpar)
 		res = self.summarize(chain)
+		res.time = time.time()-t1
 		return res
 
 def project_maps(imaps, pos, shape, wcs):
@@ -451,9 +640,15 @@ def project_maps(imaps, pos, shape, wcs):
 		omaps[i] = imaps[i].at(pmap+pos[i,::-1,None,None])
 	return omaps
 
-# Load source database
-#srcpos = np.loadtxt(args.srclist, usecols=(args.rcol, args.dcol)).T*utils.degree
-# We use ra,dec ordering in source positions here
+# Set up existing data if we are continuing
+cont_data = {}
+if args.cont_from:
+	with open(args.cont_from,"r") as f:
+		for line in f:
+			toks = line.split()
+			id   = toks[0]
+			sid  = int(toks[5])
+			cont_data[(id,sid)] = line
 
 # Set up shifted map geometry
 shape, wcs = enmap.geometry(
@@ -464,7 +659,34 @@ f = open(args.odir + "/fit_rank_%03d.txt" % comm.rank, "w")
 
 for ind in range(comm.rank, len(args.ifiles), comm.size):
 	ifile = args.ifiles[ind]
-	sdata = read_sdata(ifile)
+	try:
+		sdata = read_sdata(ifile)
+	except Exception as e:
+		sys.stderr.write("Exception for %s: %s\n" % (ifile, e.message))
+		continue
+
+	# Eliminate invalid data
+	sdata = [s for s in sdata if np.any(s.div > 0)]
+	if len(sdata) == 0:
+		sys.stderr.write("Skipping %s: no usable data" % ifile)
+		continue
+
+	# Is this one already done?
+	ndone = 0
+	for sdat in sdata:
+		key = (sdat.id,sdat.sid)
+		if key in cont_data:
+			f.write(cont_data[key])
+			print cont_data[key][:-1] + " c"
+			ndone += 1
+	if ndone > 0:
+		continue
+
+	# The noise model is not totally trustworthy. Sometimes pixels have
+	# abnormally high div values. Remove those.
+	for sdat in sdata:
+		divscale = np.median(sdat.div[sdat.div>0])
+		sdat.div[sdat.div>divscale*5] = 0
 
 	#for i, sdat in enumerate(sdata):
 	#	print np.sum(sdat.map**2*sdat.div), sdat.div.size
@@ -533,67 +755,76 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	# <dx>= R/sqrt(3*[w0+(N-1)]/N)
 	# If there is no signal at x=0, this becomes 0.58 R
 
-
-
-
-
-	sdata=sdata[:]
-	if True:
-		##sdata = sdata[0:1]
-		fitter = SrcFitterML(sdata, fwhm)
-		fit    = fitter.fit(verbose=False)
-		#cmap = fitter.likgrid(6*utils.arcmin, 80, marg=True)
-		#enmap.write_map("mmap.fits", cmap)
-		#1/0
+	if args.individual:
+		sgroups = [[sdat] for sdat in sdata]
 	else:
-		fitter = SrcFitterMC(sdata, fwhm, nburn=500)
-		fit    = fitter.fit(verbose=True, nsamp=10000)
+		sgroups = [sdata]
+	
+	for gi, sdata in enumerate(sgroups):
+		try:
+			if args.method == "ml":
+				fitter = SrcFitterML(sdata, fwhm)
+				fit    = fitter.fit(verbose=verbosity>0, marg=True)
+			elif args.method == "mc":
+				fitter = SrcFitterMC(sdata, fwhm, nburn=args.burnin)
+				fit    = fitter.fit(verbose=verbosity>0, nsamp=args.nsamp)
+			elif args.method == "mlg":
+				fitter = SrcFitterML(sdata, fwhm)
+				fit    = fitter.fit_grid(verbose=verbosity>0, grid_res=args.grid_res)
+			else:
+				print "Unknown fit method '%s'. Aborting." % (args.method)
+				sys.exit(1)
+		except Exception as e:
+			print "exception", ifile, e.message
+			continue
 
-	# Output summary
-	for i in range(fit.nsrc):
-		ostr = "%s %7.4f %7.4f %7.4f %7.4f %3d %7.4f %7.4f %7.4f %15.7e" % (sdata[i].id,
-			fit.dpos[0]/utils.arcmin, fit.ddpos[0]/utils.arcmin,
-			fit.dpos[1]/utils.arcmin, fit.ddpos[1]/utils.arcmin,
-			sdata[i].sid, fit.amps[i]/1e3, fit.damps[i]/1e3, fit.nsigma, fit.chisq)
-		# Add some convenience data
-		hour  = sdata[i].ctime/3600.%24
-		ostr += " | %5.2f %9.4f %9.4f | %7.4f %2d" % (hour,
-				fit.poss_hor[i,0]/utils.degree, fit.poss_hor[i,1]/utils.degree,
-				fit.time/fit.nsrc, fit.nsrc)
-		print ostr
-		sys.stdout.flush()
-		f.write(ostr + "\n")
-		f.flush()
-	# Build shifted models
-	smap = project_maps([s.map.preflat[0] for s in sdata], fit.poss_cel, shape, wcs)
-	sdiv = project_maps([s.div for s in sdata], fit.poss_cel, shape, wcs)
-	smod = project_maps(fit.models, fit.poss_cel, shape, wcs)
-	smap = enmap.samewcs([smap,smod,smap-smod],smap)
-	# And build scaled coadd. When map is divided by a, div = ivar
-	# is multiplied by a**2. Points in very noisy regions can have
-	# large error bars in the amplitude, and hence might randomly
-	# appear to have a very strong signal. We don't want to let these
-	# dominate, so downweight points with atypically high variance.
-	# FIXME: Need a better approach than this. This fixed some things,
-	# but broke others.
-	#beam_exposure = []
-	#for i, s in enumerate(sdata):
-	#	med_div = np.median(s.div[s.div!=0])
-	#	profile = fit.models[i]/fit.amps[i]
-	#	avg_div = np.sum(s.div*profile)/np.sum(profile)
-	#	beam_exposure.append(avg_div/med_div)
-	#beam_exposure = np.array(beam_exposure)
-	#weight = np.minimum(1,beam_exposure*1.25)**4
-	weight = 1
-	trhs = np.sum(smap*sdiv*(fit.amps*weight)[None,:,None,None],1)
-	tdiv = np.sum(sdiv*(fit.amps*weight)[:,None,None]**2,0)
-	tdiv[tdiv==0] = np.inf
-	tmap = trhs/tdiv
-	# And write them
-	enmap.write_map(args.odir + "/totmap_%s.fits" % sdata[0].id, tmap)
-	for i in range(fit.nsrc):
-		enmap.write_map(args.odir + "/shiftmap_%s_%03d.fits" % (sdata[i].id, sdata[i].sid), smap[:,i])
-		# Output unshifted map too
-		omap = enmap.samewcs([sdata[i].map.preflat[0],fit.models[i],sdata[i].map.preflat[0]-fit.models[i]],sdata[i].map)
-		enmap.write_map(args.odir + "/fitmap_%s_%03d.fits" % (sdata[i].id,sdata[i].sid), omap)
+		# Output summary
+		for i in range(fit.nsrc):
+			ostr = "%s %7.4f %7.4f %7.4f %7.4f %4d %7.4f %7.4f %7.4f %9.5f" % (sdata[i].id,
+				-fit.dpos[0]/utils.arcmin, fit.ddpos[0]/utils.arcmin,
+				-fit.dpos[1]/utils.arcmin, fit.ddpos[1]/utils.arcmin,
+				sdata[i].sid, fit.amps[i]/1e3, fit.damps[i]/1e3, fit.nsigma, fit.chisq/fit.npix)
+			# Add some convenience data
+			hour  = sdata[i].ctime/3600.%24
+			ostr += " | %5.2f %9.4f %9.4f | %7.4f %2d | %9.4f %9.4f" % (hour,
+					fit.poss_hor[i,0]/utils.degree, fit.poss_hor[i,1]/utils.degree,
+					fit.time/fit.nsrc, fit.nsrc, sdata[i].srcpos[0]/utils.degree,
+					sdata[i].srcpos[1]/utils.degree)
+			print ostr
+			sys.stdout.flush()
+			f.write(ostr + "\n")
+			f.flush()
+		if args.minimaps:
+			# Build shifted models
+			smap = project_maps([s.map.preflat[0] for s in sdata], fit.poss_cel, shape, wcs)
+			sdiv = project_maps([s.div for s in sdata], fit.poss_cel, shape, wcs)
+			smod = project_maps(fit.models, fit.poss_cel, shape, wcs)
+			smap = enmap.samewcs([smap,smod,smap-smod],smap)
+			# And build scaled coadd. When map is divided by a, div = ivar
+			# is multiplied by a**2. Points in very noisy regions can have
+			# large error bars in the amplitude, and hence might randomly
+			# appear to have a very strong signal. We don't want to let these
+			# dominate, so downweight points with atypically high variance.
+			# FIXME: Need a better approach than this. This fixed some things,
+			# but broke others.
+			#beam_exposure = []
+			#for i, s in enumerate(sdata):
+			#	med_div = np.median(s.div[s.div!=0])
+			#	profile = fit.models[i]/fit.amps[i]
+			#	avg_div = np.sum(s.div*profile)/np.sum(profile)
+			#	beam_exposure.append(avg_div/med_div)
+			#beam_exposure = np.array(beam_exposure)
+			#weight = np.minimum(1,beam_exposure*1.25)**4
+			weight = 1
+			trhs = np.sum(smap*sdiv*(fit.amps*weight)[None,:,None,None],1)
+			tdiv = np.sum(sdiv*(fit.amps*weight)[:,None,None]**2,0)
+			tdiv[tdiv==0] = np.inf
+			tmap = trhs/tdiv
+			# And write them
+			enmap.write_map(args.odir + "/totmap_%s_%02d.fits" % (sdata[0].id,gi), tmap)
+			for i in range(fit.nsrc):
+				enmap.write_map(args.odir + "/shiftmap_%s_%03d.fits" % (sdata[i].id, sdata[i].sid), smap[:,i])
+				# Output unshifted map too
+				omap = enmap.samewcs([sdata[i].map.preflat[0],fit.models[i],sdata[i].map.preflat[0]-fit.models[i]],sdata[i].map)
+				enmap.write_map(args.odir + "/fitmap_%s_%03d.fits" % (sdata[i].id,sdata[i].sid), omap)
 f.close()

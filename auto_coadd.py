@@ -433,6 +433,8 @@ if args.template is None:
 else:
 	# We will loop over tiles in the area defined by template
 	shape, wcs = read_geometry(args.template)
+	pre = read_geometry(datasets[0].splits[0].map)[0][:-2]
+	shape = pre + shape
 	tshape = np.array([args.tilesize,args.tilesize])
 	ntile  = np.floor((shape[-2:]+tshape-1)/tshape).astype(int)
 	tyx = [(y,x) for y in range(ntile[0]-1,-1,-1) for x in range(ntile[1])]

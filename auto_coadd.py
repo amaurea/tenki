@@ -17,6 +17,7 @@ parser.add_argument(      "--kxrad",      type=float, default=20)
 parser.add_argument(      "--kx-ymax-scale", type=float, default=1)
 parser.add_argument(      "--highpass",   type=float, default=200)
 parser.add_argument(      "--cg-tol",     type=float, default=1e-6)
+parser.add_argument(      "--max-ps",     type=float, default=0)
 parser.add_argument("-F", "--filter",     action="store_true")
 parser.add_argument("-c", "--cont",       action="store_true")
 parser.add_argument("-v", "--verbose",    action="store_true")
@@ -155,6 +156,17 @@ def calc_pbox(shape, wcs, box, n=10):
 	pbox = utils.nint(pbox)
 	return pbox
 
+def make_dummy_tile(shape, wcs, box, pad=0):
+	pbox = calc_pbox(shape, wcs, box)
+	if pad:
+		pbox[0] -= pad
+		pbox[1] += pad
+	shape2, wcs2 = enmap.slice_wcs(shape, wcs, (slice(pbox[0,0],pbox[1,0]),slice(pbox[0,1],pbox[1,1])))
+	shape2 = tuple(pbox[1]-pbox[0])
+	map = enmap.zeros(shape2, wcs2, dtype)
+	div = enmap.zeros(shape2[-2:], wcs2, dtype)
+	return bunch.Bunch(map=map, div=div)
+
 times = np.zeros(5)
 
 def read_data(datasets, box, odir, pad=0, verbose=False, read_cache=False,
@@ -213,6 +225,8 @@ def coadd_tile_data(datasets, box, odir, ps_smoothing=10, pad=0, ref_beam=None,
 	# Load data for this box for each dataset
 	datasets, ffpad = read_data(datasets, box, odir, pad=pad,
 			verbose=verbose, read_cache=read_cache, write_cache=write_cache)
+	# We might not find any data
+	if len(datasets) == 0: return None
 	# Find the smallest beam size of the datasets
 	bmin = np.min([beam_size(dataset.beam) for dataset in datasets])
 
@@ -277,6 +291,10 @@ def coadd_tile_data(datasets, box, odir, ps_smoothing=10, pad=0, ref_beam=None,
 			# mostly taken care of when processing the beams, as long as we don't
 			# let them get too small
 			dset_ps = np.maximum(dset_ps, 1e-7)
+			# Optionally cap the max dset_ps, this is mostly to speed up convergence
+			if args.max_ps:
+				dset_ps = np.minimum(dset_ps, args.max_ps)
+
 			# Our fourier-space inverse noise matrix is based on the inverse noise spectrum
 			iN    = 1/dset_ps
 			#enmap.write_map(opre + "_iN_raw.fits", iN)
@@ -427,6 +445,11 @@ else:
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
 		res  = coadd_tile_data(datasets, box, args.odir, pad=args.pad,
 				ref_beam=ref_beam, dump=False, verbose=args.verbose, cg_tol=args.cg_tol)
+		if res is None:
+			#print "skipping dummy %d %d" % (y,x)
+			#continue
+			print "make dummy %d %d" % (y,x), shape, wcs
+			res = make_dummy_tile(shape, wcs, box, pad=args.pad)
 		enmap.write_map(args.odir + "/map_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}, res.map)
 		enmap.write_map(args.odir + "/div_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}, res.div)
 		#enmap.write_map(args.odir + "/ips_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}, res.ips)

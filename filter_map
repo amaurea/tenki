@@ -11,10 +11,14 @@ parser.add_argument("-F", "--filter", action="append", help="Filter specificatio
 parser.add_argument("-m", "--mode", type=str, default="a")
 parser.add_argument("-s", "--slice", type=str, default=None)
 parser.add_argument("-L", "--limit", type=float, default=0.10)
+parser.add_argument("-e", "--extent-model", type=str, default=None)
 parser.add_argument("-v", action="count")
 args = parser.parse_args()
 
 filter_specs = args.filter or ["b:200:-5"]
+
+if args.extent_model is not None:
+	enmap.extent_model.append(args.extent_model)
 
 m = enmap.read_map(args.imap)
 if args.slice:

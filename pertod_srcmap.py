@@ -47,8 +47,9 @@ for si, src in enumerate(srcs.T):
 # Each task processes tasks independently
 for ti in range(comm.rank, len(tasks), comm.size):
 	si, id = tasks[ti]
+	bid = id.replace(":","_")
 	L.info("Processing src %3d id %s" % (si, id))
-	root   = args.odir + "/src%03d_%s_" % (si,id)
+	root   = args.odir + "/src%03d_%s_" % (si,bid)
 	entry  = filedb.data[id]
 	osys   = "hor:%.6f_%.6f:cel/0_0:hor" % tuple(srcs[:2,si])
 	try:

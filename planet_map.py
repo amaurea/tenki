@@ -33,6 +33,7 @@ if args.tag: prefix += args.tag + "_"
 
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
+	bid   = id.replace(":","_")
 	entry = filedb.data[id]
 	# Read the tod as usual
 	try:
@@ -40,6 +41,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			d = actdata.read(entry)
 		with bench.show("calibrate"):
 			d = actdata.calibrate(d, exclude=["autocut"])
+		if d.ndet == 0 or d.nsamp < 2: raise errors.DataMissing("no data in tod")
 	except errors.DataMissing as e:
 		print "Skipping %s (%s)" % (id, e.message)
 		continue
@@ -47,9 +49,13 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# Very simple white noise model
 	with bench.show("ivar"):
 		tod  = d.tod
+		del d.tod
+		tod -= np.mean(tod,1)[:,None]
+		tod  = tod.astype(dtype)
 		diff = tod[:,1:]-tod[:,:-1]
 		diff = diff[:,:diff.shape[-1]/csize*csize].reshape(d.ndet,-1,csize)
 		ivar = 1/(np.median(np.mean(diff**2,-1),-1)/2**0.5)
+		del diff
 	# Generate planet cut
 	with bench.show("planet cut"):
 		planet_cut = cuts.avoidance_cut(d.boresight, d.point_offset, d.site,
@@ -66,7 +72,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 		del ft, flt, freq
 	with bench.show("atm subtract"):
 		tod -= model
-		tod  = tod.astype(dtype)
+		del model
+		tod  = tod.astype(dtype, copy=False)
 	# Should now be reasonably clean of correlated noise.
 	# Proceed to make simple binned map
 	with bench.show("actscan"):
@@ -93,7 +100,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		idiv = array_ops.eigpow(div, -1, axes=[0,1], lim=1e-5)
 		map  = enmap.map_mul(idiv, rhs)
 	with bench.show("write"):
-		enmap.write_map("%s%s_map.fits" % (prefix, id), map)
-		enmap.write_map("%s%s_rhs.fits" % (prefix, id), rhs)
-		enmap.write_map("%s%s_div.fits" % (prefix, id), div)
-	del scan, pmap, pcut, tod, map, rhs, div, idiv
+		enmap.write_map("%s%s_map.fits" % (prefix, bid), map)
+		enmap.write_map("%s%s_rhs.fits" % (prefix, bid), rhs)
+		enmap.write_map("%s%s_div.fits" % (prefix, bid), div)
+	del d, scan, pmap, pcut, tod, map, rhs, div, idiv, junk

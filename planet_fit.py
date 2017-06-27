@@ -9,6 +9,8 @@ parser.add_argument("--slice",           type=str,   default="")
 parser.add_argument("-d", "--downgrade", type=int,   default=1)
 parser.add_argument("-T", "--transpose", action="store_true")
 parser.add_argument("-L", "--ref-nloop", type=int,   default=2)
+parser.add_argument("-b", "--beam",      type=float, default=1.5)
+parser.add_argument("-i", "--individual", action="store_true")
 args = parser.parse_args()
 
 ref_nloop = args.ref_nloop
@@ -20,6 +22,8 @@ if not args.transpose:
 else:
 	mapfiles = args.ifiles[0::2]
 	divfiles = args.ifiles[1::2]
+
+beam_sigma = args.beam*utils.arcmin*utils.fwhm
 
 def read_map(fname):
 	m = enmap.read_map(fname)
@@ -86,6 +90,10 @@ class SingleFitter:
 		params = optimize.fmin_powell(self.calc_chisq, params, disp=False)
 		return params
 
+def build_gauss(posmap, sigma):
+	r2 = np.sum(posmap**2,0)
+	return np.exp(-0.5*r2/sigma**2)
+
 # Ok, read in the maps
 maps, divs, ids = [], [], []
 for	i, (rfile,dfile) in enumerate(zip(mapfiles, divfiles)):
@@ -102,7 +110,17 @@ rhss = divs[:,None]*maps
 nmap = maps.shape[0]
 ncomp= maps.shape[1]
 
-ref = maps[0]
+ref, refdiv = maps[0], divs[0]
+ref_small = eval("ref"+args.slice)
+refdiv_small = eval("refdiv"+args.slice)
+# Fit gaussian
+fitter = SingleFitter(build_gauss(ref_small.posmap(), beam_sigma)[None], ref_small[:1], refdiv_small)
+p_ref  = fitter.fit(verbose=True)
+print p_ref.shape
+# Don't override amplitude or offset
+p_ref[2:] = [1,0]
+ref_small = apply_params(ref_small, p_ref)
+
 # Choose a reference map. Fit all maps to it. Coadd to find
 # new reference map. Repeat.
 for ri in range(ref_nloop):
@@ -110,7 +128,6 @@ for ri in range(ref_nloop):
 	params = []
 	for mi in range(nmap):
 		print "Map %2d" % mi
-		ref_small = eval("ref"+args.slice)
 		map_small = eval("maps[mi]"+args.slice)
 		div_small = eval("divs[mi]"+args.slice)
 		#fitter = SingleFitter(ref, maps[mi], divs[mi,:1,:1])
@@ -131,7 +148,8 @@ for ri in range(ref_nloop):
 	enmap.write_map(args.odir + "/model_%03d.fits" % ri, ref)
 
 	# Output the individual best fits too
-	smaps = apply_params(maps, params)
-	for id, m in zip(ids, smaps):
-		enmap.write_map(args.odir + "/%s_map_%03d.fits" % (id,ri), m)
-		enmap.write_map(args.odir + "/%s_resid_%03d.fits" % (id,ri), m-ref)
+	if args.individual:
+		smaps = apply_params(maps, params)
+		for id, m in zip(ids, smaps):
+			enmap.write_map(args.odir + "/%s_map_%03d.fits" % (id,ri), m)
+			enmap.write_map(args.odir + "/%s_resid_%03d.fits" % (id,ri), m-ref)

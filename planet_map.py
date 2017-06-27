@@ -33,6 +33,7 @@ if args.tag: prefix += args.tag + "_"
 
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
+	bid   = id.replace(":","_")
 	entry = filedb.data[id]
 	# Read the tod as usual
 	try:
@@ -93,7 +94,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		idiv = array_ops.eigpow(div, -1, axes=[0,1], lim=1e-5)
 		map  = enmap.map_mul(idiv, rhs)
 	with bench.show("write"):
-		enmap.write_map("%s%s_map.fits" % (prefix, id), map)
-		enmap.write_map("%s%s_rhs.fits" % (prefix, id), rhs)
-		enmap.write_map("%s%s_div.fits" % (prefix, id), div)
+		enmap.write_map("%s%s_map.fits" % (prefix, bid), map)
+		enmap.write_map("%s%s_rhs.fits" % (prefix, bid), rhs)
+		enmap.write_map("%s%s_div.fits" % (prefix, bid), div)
 	del scan, pmap, pcut, tod, map, rhs, div, idiv

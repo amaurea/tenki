@@ -1,6 +1,6 @@
 import numpy as np, time, h5py, copy, argparse, os, sys, pipes, shutil, re
 from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, errors, mpi
-from enlib import log, bench, dmap, coordinates, scan as enscan, rangelist, scanutils
+from enlib import log, bench, dmap, coordinates, scan as enscan, scanutils
 from enlib import pointsrcs, bunch
 from enlib.cg import CG
 from enlib.source_model import SourceModel

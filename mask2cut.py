@@ -31,7 +31,7 @@ for ind in myinds:
 	entry = filedb.data[id]
 	# We only need pointing to build this cut
 	try:
-		d = actdata.read(entry, ["point_offsets","boresight","site","layout"])
+		d = actdata.read(entry, ["point_offsets","boresight","site","array_info"])
 		d = actdata.calibrate(d, exclude=["autocut"])
 	except (errors.DataMissing, AttributeError) as e:
 		print "Skipping %s (%s)" % (id, e.message)
@@ -71,7 +71,7 @@ for ind in myinds:
 	mystats.append([ind, float(cut.sum())/cut.size, visible])
 	# Write cuts to output directory
 	if args.persample:
-		files.write_cut("%s/%s.cuts" % (args.odir, id), d.dets, cut, nrow=d.layout.nrow, ncol=d.layout.ncol)
+		files.write_cut("%s/%s.cuts" % (args.odir, id), d.dets, cut, nrow=d.array_info.nrow, ncol=d.array_info.ncol)
 mystats = np.array(mystats)
 stats = utils.allgatherv(mystats, comm)
 if comm.rank == 0:

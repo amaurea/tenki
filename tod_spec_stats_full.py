@@ -56,9 +56,9 @@ utils.mkdir(args.odir)
 prefix = args.odir + "/"
 if args.prefix: prefix += args.prefix + "_"
 
-# Read a single layout to determine max det number
-layout = actdata.read_layout(filedb.data[ids[0]]).layout
-ndet   = layout.ndet
+# Read a single array_info to determine max det number
+array_info = actdata.read_array_info(filedb.data[ids[0]]).array_info
+ndet   = array_info.ndet
 
 def bin(a, nbin, zoom=1, return_inds=False):
 	ps     = a.reshape(-1,a.shape[-1])

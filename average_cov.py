@@ -56,7 +56,7 @@ for ind in range(comm.rank, nlabel, comm.size):
 	del tod
 
 	if corr is None:
-		ndet = d.layout.ndet
+		ndet = d.array_info.ndet
 		corr = np.zeros((nbin,ndet,ndet),dtype=dtype)
 		hits = np.zeros((nbin,ndet,ndet),dtype=int)
 		var  = np.zeros((nbin,ndet))

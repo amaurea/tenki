@@ -27,7 +27,7 @@ config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=hor:Ur
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
-config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
+config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=16,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
@@ -277,6 +277,34 @@ def apply_scan_limits(scans, params):
 			res.append(scan)
 	return res
 
+def build_noise_stats(myscans, comm):
+	ids    = utils.allgatherv([scan.id    for scan in myscans], comm)
+	ndets  = utils.allgatherv([scan.ndet  for scan in myscans], comm)
+	srates = utils.allgatherv([scan.srate for scan in myscans], comm)
+	gdets  = utils.allgatherv(np.concatenate([scan.dets       for scan in myscans]), comm)
+	ivars  = utils.allgatherv(np.concatenate([scan.noise.ivar for scan in myscans]), comm)
+	offs   = utils.cumsum(ndets, endpoint=True)
+	res    = []
+	for i, id in enumerate(ids):
+		o1, o2 = offs[i], offs[i+1]
+		dsens = (ivars[o1:o2]*srates[i])**-0.5
+		asens = (np.sum(ivars[o1:o2])*srates[i])**-0.5
+		dets  = gdets[o1:o2]
+		# We want sorted dets
+		inds  = np.argsort(dets)
+		dets, dsens = dets[inds], dsens[inds]
+		line = {"id": id, "asens": asens, "dsens": dsens, "dets": dets}
+		res.append(line)
+	inds = np.argsort(ids)
+	res = [res[ind] for ind in inds]
+	return res
+
+def write_noise_stats(fname, stats):
+	with open(fname, "w") as f:
+		for line in stats:
+			f.write("%s %6.3f :: " % (line["id"],line["asens"]))
+			f.write(" ".join(["%13s" % ("%d:%7.3f" % (d,s)) for d,s in zip(line["dets"],line["dsens"])]) + "\n")
+
 # UGLY HACK: Handle individual output file mode
 nouter = 1
 if args.individual:
@@ -443,6 +471,9 @@ for out_ind in range(nouter):
 
 	L.info("Initializing RHS")
 	eqsys.calc_b()
+
+	noise_stats = build_noise_stats(myscans, comm)
+	if comm.rank == 0: write_noise_stats(root + "noise.txt", noise_stats)
 
 	#for si, scan in enumerate(myscans):
 	#	tod = np.zeros([scan.ndet, scan.nsamp], dtype)

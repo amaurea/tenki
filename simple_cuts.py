@@ -60,13 +60,13 @@ def measure_quant(tod):
 		res[i] = len(np.unique(tod[i]))
 	return res
 
-def write_cuts(ofile, cuts, layout, dets):
+def write_cuts(ofile, cuts, array_info, dets):
 	with open(ofile, "w") as f:
 		f.write("""format = 'TODCuts'
 format_version = 2
 n_det = %d
 n_samp = %d
-samp_offset = 0\n""" % (layout.ndet, cuts.shape[1]))
+samp_offset = 0\n""" % (array_info.ndet, cuts.shape[1]))
 		for ind, det in enumerate(dets):
 			rstr = " ".join(["(%d,%d)" % tuple(rn) for rn in cuts[ind].ranges])
 			f.write("%4d: %s\n" % (det, rstr))
@@ -76,7 +76,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 	print id
 	entry = filedb.data[id]
 	# Read uncalibrated data
-	d = actdata.read(entry, fields=["tod","layout"], verbose=True)
+	d = actdata.read(entry, fields=["tod","array_info"], verbose=True)
 	dmask = np.zeros(d.ndet, int)
 	quant = measure_quant(d.tod)
 	dmask |= quant < 1000
@@ -86,4 +86,4 @@ for ind in range(comm.rank, len(ids), comm.size):
 	#cuts = cuts_null # cuts_jump + cuts_null
 	# Write cut file
 	dets = np.arange(cuts.shape[0])
-	write_cuts(args.odir + "/%s.cuts" % id, cuts, d.layout, dets)
+	write_cuts(args.odir + "/%s.cuts" % id, cuts, d.array_info, dets)

@@ -63,6 +63,9 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# Subtract atmospheric model
 	with bench.show("atm model"):
 		model= gapfill.gapfill_joneig(tod, planet_cut, inplace=False)
+	# Estimate noise level
+	asens = np.sum(ivar)**-0.5 / d.srate**0.5
+	print asens
 	with bench.show("smooth"):
 		ft   = fft.rfft(model)
 		freq = fft.rfftfreq(model.shape[-1])*d.srate
@@ -99,6 +102,13 @@ for ind in range(comm.rank, len(ids), comm.size):
 	with bench.show("map"):
 		idiv = array_ops.eigpow(div, -1, axes=[0,1], lim=1e-5)
 		map  = enmap.map_mul(idiv, rhs)
+	# Estimate central amplitude
+	c = np.array(map.shape[-2:])/2
+	crad  = 50
+	mcent = map[:,c[0]-crad:c[0]+crad,c[1]-crad:c[1]+crad]
+	mcent = enmap.downgrade(mcent, 4)
+	amp   = np.max(mcent)
+	print "%s amp %7.3f asens %7.3f" % (id, amp/1e6, asens)
 	with bench.show("write"):
 		enmap.write_map("%s%s_map.fits" % (prefix, bid), map)
 		enmap.write_map("%s%s_rhs.fits" % (prefix, bid), rhs)

@@ -15,6 +15,7 @@ config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
 config.default("map_ptsrc_handling", "subadd", "How to handle point sources in the map. Can be 'none' for no special treatment, 'subadd' to subtract from the TOD and readd in pixel space, and 'sim' to simulate a pointsource-only TOD.")
 config.default("map_ptsrc_sys", "cel", "Coordinate system the point source positions are specified in. Default is 'cel'")
 config.default("map_format", "fits", "File format to use when writing maps. Can be 'fits', 'fits.gz' or 'hdf'.")
+config.default("resume", 0, "Interval at which to write the internal CG information to allow for restarting. If 0, this will never be written. Also controls whether existing information on disk will be used for restarting if avialable. If negative, restart information will be written, but not used.")
 
 # Default signal parameters
 config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin", "Default parameters for sky map")
@@ -59,6 +60,7 @@ nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
 tshape= (720,720)
 #tshape= (100,100)
+resume= config.get("resume")
 
 filedb.init()
 db = filedb.data
@@ -541,13 +543,23 @@ for out_ind in range(nouter):
 	x = eqsys.M(eqsys.b)
 	eqsys.write(root, "bin", x)
 
+	utils.mkdir(root + "cgstate")
+	cgpath = root + "cgstate/cgstate%02d.hdf" % comm.rank
+
 	if nmax > 0:
 		L.info("Solving")
 		cg = CG(eqsys.A, eqsys.b, M=eqsys.M, dot=eqsys.dot)
 		dump_steps = [int(w) for w in args.dump.split(",")]
+		# Start from saved cg info if available
+		if resume > 0 and os.path.isfile(cgpath):
+			cg.load(cgpath)
+		assert cg.i == comm.bcast(cg.i), "Inconsistent CG step in mapmaker!"
 		while cg.i < nmax:
 			with bench.mark("cg_step"):
 				cg.step()
+			# Save cg state
+			if resume != 0 and cg.i % np.abs(resume) == 0:
+				cg.save(cgpath)
 			dt = bench.stats["cg_step"]["time"].last
 			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0:
 				x = eqsys.postprocess(cg.x)

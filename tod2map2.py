@@ -490,6 +490,7 @@ for out_ind in range(nouter):
 		# Null-preconditioner common for all types
 		if "prec" in param and param["prec"] == "null":
 			signal.precon = mapmaking.PreconNull()
+			print "Warning: map and cut precon must have compatible units"
 			continue
 		if param["type"] == "cut":
 			signal.precon = mapmaking.PreconCut(signal, myscans)
@@ -500,6 +501,7 @@ for out_ind in range(nouter):
 			elif param["prec"] == "jacobi":
 				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights, noise=False)
 			elif param["prec"] == "hit":
+				print "Warning: map and cut precon must have compatible units"
 				signal.precon = mapmaking.PreconMapHitcount(prec_signal, signal_cut, myscans)
 			else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
 			if "nohor" in param and param["nohor"] != "no":

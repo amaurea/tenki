@@ -15,6 +15,7 @@ config.default("gfilter_jon", False, "Whether to enable Jon's ground filter.")
 config.default("map_ptsrc_handling", "subadd", "How to handle point sources in the map. Can be 'none' for no special treatment, 'subadd' to subtract from the TOD and readd in pixel space, and 'sim' to simulate a pointsource-only TOD.")
 config.default("map_ptsrc_sys", "cel", "Coordinate system the point source positions are specified in. Default is 'cel'")
 config.default("map_format", "fits", "File format to use when writing maps. Can be 'fits', 'fits.gz' or 'hdf'.")
+config.default("resume", 0, "Interval at which to write the internal CG information to allow for restarting. If 0, this will never be written. Also controls whether existing information on disk will be used for restarting if avialable. If negative, restart information will be written, but not used.")
 
 # Default signal parameters
 config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin", "Default parameters for sky map")
@@ -27,7 +28,7 @@ config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=hor:Ur
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
-config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
+config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=16,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
@@ -59,6 +60,7 @@ nmax  = config.get("map_cg_nmax")
 ext   = config.get("map_format")
 tshape= (720,720)
 #tshape= (100,100)
+resume= config.get("resume")
 
 filedb.init()
 db = filedb.data
@@ -277,6 +279,34 @@ def apply_scan_limits(scans, params):
 			res.append(scan)
 	return res
 
+def build_noise_stats(myscans, comm):
+	ids    = utils.allgatherv([scan.id    for scan in myscans], comm)
+	ndets  = utils.allgatherv([scan.ndet  for scan in myscans], comm)
+	srates = utils.allgatherv([scan.srate for scan in myscans], comm)
+	gdets  = utils.allgatherv(np.concatenate([scan.dets       for scan in myscans]), comm)
+	ivars  = utils.allgatherv(np.concatenate([scan.noise.ivar for scan in myscans]), comm)
+	offs   = utils.cumsum(ndets, endpoint=True)
+	res    = []
+	for i, id in enumerate(ids):
+		o1, o2 = offs[i], offs[i+1]
+		dsens = (ivars[o1:o2]*srates[i])**-0.5
+		asens = (np.sum(ivars[o1:o2])*srates[i])**-0.5
+		dets  = gdets[o1:o2]
+		# We want sorted dets
+		inds  = np.argsort(dets)
+		dets, dsens = dets[inds], dsens[inds]
+		line = {"id": id, "asens": asens, "dsens": dsens, "dets": dets}
+		res.append(line)
+	inds = np.argsort(ids)
+	res = [res[ind] for ind in inds]
+	return res
+
+def write_noise_stats(fname, stats):
+	with open(fname, "w") as f:
+		for line in stats:
+			f.write("%s %6.3f :: " % (line["id"],line["asens"]))
+			f.write(" ".join(["%13s" % ("%d:%7.3f" % (d,s)) for d,s in zip(line["dets"],line["dsens"])]) + "\n")
+
 # UGLY HACK: Handle individual output file mode
 nouter = 1
 if args.individual:
@@ -444,6 +474,9 @@ for out_ind in range(nouter):
 	L.info("Initializing RHS")
 	eqsys.calc_b()
 
+	noise_stats = build_noise_stats(myscans, comm)
+	if comm.rank == 0: write_noise_stats(root + "noise.txt", noise_stats)
+
 	#for si, scan in enumerate(myscans):
 	#	tod = np.zeros([scan.ndet, scan.nsamp], dtype)
 	#	imaps  = eqsys.dof.unzip(eqsys.b)
@@ -457,6 +490,7 @@ for out_ind in range(nouter):
 		# Null-preconditioner common for all types
 		if "prec" in param and param["prec"] == "null":
 			signal.precon = mapmaking.PreconNull()
+			print "Warning: map and cut precon must have compatible units"
 			continue
 		if param["type"] == "cut":
 			signal.precon = mapmaking.PreconCut(signal, myscans)
@@ -467,6 +501,7 @@ for out_ind in range(nouter):
 			elif param["prec"] == "jacobi":
 				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights, noise=False)
 			elif param["prec"] == "hit":
+				print "Warning: map and cut precon must have compatible units"
 				signal.precon = mapmaking.PreconMapHitcount(prec_signal, signal_cut, myscans)
 			else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
 			if "nohor" in param and param["nohor"] != "no":
@@ -510,13 +545,23 @@ for out_ind in range(nouter):
 	x = eqsys.M(eqsys.b)
 	eqsys.write(root, "bin", x)
 
+	utils.mkdir(root + "cgstate")
+	cgpath = root + "cgstate/cgstate%02d.hdf" % comm.rank
+
 	if nmax > 0:
 		L.info("Solving")
 		cg = CG(eqsys.A, eqsys.b, M=eqsys.M, dot=eqsys.dot)
 		dump_steps = [int(w) for w in args.dump.split(",")]
+		# Start from saved cg info if available
+		if resume > 0 and os.path.isfile(cgpath):
+			cg.load(cgpath)
+		assert cg.i == comm.bcast(cg.i), "Inconsistent CG step in mapmaker!"
 		while cg.i < nmax:
 			with bench.mark("cg_step"):
 				cg.step()
+			# Save cg state
+			if resume != 0 and cg.i % np.abs(resume) == 0:
+				cg.save(cgpath)
 			dt = bench.stats["cg_step"]["time"].last
 			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0:
 				x = eqsys.postprocess(cg.x)

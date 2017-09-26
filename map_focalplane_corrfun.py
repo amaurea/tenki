@@ -14,6 +14,7 @@ parser.add_argument("--fmax",  type=float, default=10)
 parser.add_argument("--ntod",  type=int,   default=0)
 parser.add_argument("--nmulti",type=int,   default=1)
 parser.add_argument("-v", "--verbose", action="store_true")
+parser.add_argument("-p", "--pairdiff",action="store_true")
 args = parser.parse_args()
 
 filedb.init()
@@ -45,6 +46,22 @@ def project_mat(pix, template, mat=None):
 	res  = utils.bin_multi(rpix, template.shape[-2:], weights=mat)
 	return enmap.samewcs(res, template)
 
+def find_pairs_blind(det_pos, tol=0.2*utils.arcmin):
+	pairs = utils.find_equal_groups(det_pos, tol=tol)
+	# Pair must have exactly two members
+	pairs = [p for p in pairs if len(p) == 2]
+	pairs = np.array(pairs)
+	return pairs
+
+def to_pairdiff(d, pairs):
+	dtod = d.tod[pairs[:,0]]-d.tod[pairs[:,1]]
+	dcuts = {key: d[key][pairs[:,0]]+d[key][pairs[:,1]] for key in ["cut","cut_basic","cut_noiseest"]}
+	d = d.restrict(dets=d.dets[pairs[:,0]])
+	d.tod = dtod
+	for key in dcuts:
+		d[key] = dcuts[key]
+	return d
+
 # Loop through and analyse each tod-group
 for ind in range(comm.rank, len(groups), comm.size):
 	ids     = groups[ind]
@@ -52,11 +69,14 @@ for ind in range(comm.rank, len(groups), comm.size):
 	try:
 		d = actdata.read(entries, verbose=args.verbose)
 		d = actdata.calibrate(d,  verbose=args.verbose, exclude=["autocut"])
+		if args.pairdiff:
+			pairs = find_pairs_blind(d.point_template)
+			d = to_pairdiff(d, pairs)
 		if d.ndet < 2 or d.nsamp < 2: raise errors.DataMissing("No data in tod")
 	except (errors.DataMissing, AssertionError, IndexError) as e:
 		print "Skipping %s (%s)" % (str(ids), e.message)
 		continue
-	print "Processing %s" % (str(ids))
+	print "Processing %s: %4d %6d" % (str(ids), d.ndet, d.nsamp)
 	tod  = d.tod
 	del d.tod
 	tod -= np.mean(tod,1)[:,None]

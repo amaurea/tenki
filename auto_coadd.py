@@ -200,6 +200,8 @@ def read_data(datasets, box, odir, pad=0, verbose=False, read_cache=False,
 			map[~np.isfinite(map)] = 0
 			div = np.maximum(0,np.minimum(div_max,div))
 			div[div<div_unhit] = 0
+			#print "moo"
+			#div = smooth_pix(div, 100)
 			map = np.maximum(-map_max,np.minimum(map_max,map))
 
 			if np.any(div>0): ref_val = np.mean(div[div>0])*args.apod_val

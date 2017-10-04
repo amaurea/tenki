@@ -1,6 +1,6 @@
 import numpy as np, argparse, sys, os
 from enlib import enmap, utils
-from scipy import optimize
+from scipy import optimize, ndimage
 #from matplotlib.pylab import *
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+", help="map map ... div div ...")
@@ -11,8 +11,10 @@ parser.add_argument("-T", "--transpose", action="store_true")
 parser.add_argument("-L", "--ref-nloop", type=int,   default=2)
 parser.add_argument("-b", "--beam",      type=float, default=1.5)
 parser.add_argument("-i", "--individual", action="store_true")
+parser.add_argument("-D", "--deglitch",  action="count", default=1)
 args = parser.parse_args()
 
+deglitch = args.deglitch % 2 == 1
 ref_nloop = args.ref_nloop
 utils.mkdir(args.odir)
 nfile = len(args.ifiles)/2
@@ -65,6 +67,17 @@ def solve(div, rhs):
 	elif rhs.ndim == 4: return rhs/div[:,None]
 	raise NotImplementedError
 
+def remove_offset(m):
+	ny,nx = m.shape[-2:]
+	s = m.shape[:-2]+(-1,)
+	samps = np.concatenate([
+		m[...,:ny/4].reshape(s),
+		m[...,-ny/4:].reshape(s),
+		m[...,ny/4:-ny/4,:nx/4].reshape(s),
+		m[...,ny/4:-ny/4,-nx/4:].reshape(s)],-1)
+	samps = np.ma.array(samps, mask=samps==0)
+	return m - np.asarray(np.ma.median(samps,-1)[...,None,None])
+
 class SingleFitter:
 	def __init__(self, ref, map, div):
 		self.ref = ref
@@ -100,13 +113,12 @@ for	i, (rfile,dfile) in enumerate(zip(mapfiles, divfiles)):
 	print "Reading %s" % rfile
 	map = read_map(rfile)
 	print "Reading %s" % dfile
-	div = read_map(dfile)[0,0]
+	div = read_map(dfile).preflat[0]
 	maps.append(map)
 	divs.append(div)
 	ids.append(os.path.basename(rfile)[:-9])
 maps = enmap.samewcs(np.asarray(maps),maps[0])
 divs = enmap.samewcs(np.asarray(divs),divs[0])
-rhss = divs[:,None]*maps
 nmap = maps.shape[0]
 ncomp= maps.shape[1]
 
@@ -116,7 +128,6 @@ refdiv_small = eval("refdiv"+args.slice)
 # Fit gaussian
 fitter = SingleFitter(build_gauss(ref_small.posmap(), beam_sigma)[None], ref_small[:1], refdiv_small)
 p_ref  = fitter.fit(verbose=True)
-print p_ref.shape
 # Don't override amplitude or offset
 p_ref[2:] = [1,0]
 ref_small = apply_params(ref_small, p_ref)
@@ -135,21 +146,32 @@ for ri in range(ref_nloop):
 		p = fitter.fit(verbose=True)
 		params.append(p)
 	params = np.array(params)
+	rhss  = divs[:,None]*maps
 	mrhss = apply_params(rhss, params, nooff=True)
-	mdivs = apply_params(np.tile(divs[:,None],[1,rhss.shape[-3],1,1]), params, nooff=True)[:,0]
+	mdivs = apply_params(divs, params, nooff=True)
 	mrhs = np.sum(mrhss,0)
 	mdiv = np.sum(mdivs,0)
 	ref  = solve(mdiv, mrhs)
+	# Compute median too. This is more robust to glitches, but not optimally weighted.
+	smaps = apply_params(maps, params)
+	mask  = np.logical_or(np.repeat(mdivs[:,None]==0,smaps.shape[1],1), smaps==0)
+	medmap= enmap.enmap(np.ma.median(np.ma.array(smaps,mask=mask),0),ref.wcs)
+
+	ref     = remove_offset(ref)
+	medmap  = remove_offset(medmap)
 
 	with open(args.odir + "/fit_%03d.txt"%ri, "w") as f:
 		for id, p in zip(ids,params):
 			f.write(("%7.4f %7.4f %7.4f" + " %12.4f"*(params.shape[-1]-3) + " %s\n") %
 					(tuple(p)+(id,)))
-	enmap.write_map(args.odir + "/model_%03d.fits" % ri, ref)
+	enmap.write_map(args.odir + "/tot_map_%03d.fits" % ri, ref)
+	enmap.write_map(args.odir + "/tot_div_%03d.fits" % ri, mdiv)
+	enmap.write_map(args.odir + "/tot_med_%03d.fits" % ri, medmap)
 
 	# Output the individual best fits too
 	if args.individual:
-		smaps = apply_params(maps, params)
-		for id, m in zip(ids, smaps):
-			enmap.write_map(args.odir + "/%s_map_%03d.fits" % (id,ri), m)
-			enmap.write_map(args.odir + "/%s_resid_%03d.fits" % (id,ri), m-ref)
+		for i, id in enumerate(ids):
+			enmap.write_map(args.odir + "/%s_map_%03d.fits" % (id,ri), smaps[i])
+			enmap.write_map(args.odir + "/%s_div_%03d.fits" % (id,ri), mdivs[i])
+			enmap.write_map(args.odir + "/%s_resid_%03d.fits" % (id,ri), smaps[i]-ref)
+	del smaps, mdivs, mrhs, mdiv, ref, mrhss

@@ -105,13 +105,7 @@ if args.restrict is not None:
 	selected = [int(w) for w in args.restrict.split(",")]
 	allowed &= set(selected)
 
-print "allowed"
-print allowed
-print "ids"
-print ids
-
 for ind in range(comm.rank, len(ids), comm.size):
-	print "moo"
 	id    = ids[ind]
 	oid   = id.replace(":","_")
 	oname = "%s/%s.hdf" % (args.odir, oid)
@@ -131,7 +125,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 	if len(sids) == 0:
 		print "%s has 0 srcs: skipping" % id
 		continue
-	print "%s has %d srcs: %s" % (id,len(sids),",".join([str(i) for i in sids]))
+	nsrc = len(sids)
+	print "%s has %d srcs: %s" % (id,nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])]))
 
 	entry = filedb.data[id]
 	try:

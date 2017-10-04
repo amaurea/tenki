@@ -92,7 +92,7 @@ for chunk in range(nchunk):
 		try:
 			# Do not apply time constants. We want raw spectra so that we can
 			# use them to estimate time constants ourselves.
-			d     = actdata.read(entry, fields=["gain","cut","tod","boresight"])
+			d     = actdata.read(entry, fields=["array_info", "tags", "site", "mce_filter", "gain","cut","tod","boresight"])
 			d     = actdata.calibrate(d, exclude=["tod_fourier"]+(["autocut"] if not args.no_autocut else []))
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
 		except (IOError, errors.DataMissing) as e:

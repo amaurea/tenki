@@ -781,8 +781,8 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 		# Output summary
 		for i in range(fit.nsrc):
 			ostr = "%s %7.4f %7.4f %7.4f %7.4f %4d %7.4f %7.4f %7.4f %9.5f" % (sdata[i].id,
-				-fit.dpos[0]/utils.arcmin, fit.ddpos[0]/utils.arcmin,
-				-fit.dpos[1]/utils.arcmin, fit.ddpos[1]/utils.arcmin,
+				(sdata[i].off[0]-fit.dpos[0])/utils.arcmin, fit.ddpos[0]/utils.arcmin,
+				(sdata[i].off[1]-fit.dpos[1])/utils.arcmin, fit.ddpos[1]/utils.arcmin,
 				sdata[i].sid, fit.amps[i]/1e3, fit.damps[i]/1e3, fit.nsigma, fit.chisq/fit.npix)
 			# Add some convenience data
 			hour  = sdata[i].ctime/3600.%24

@@ -85,6 +85,9 @@ for chunk in range(nchunk):
 	dzooms = np.zeros([nctod,ndet,args.nbin_zoom],dtype=dtype)
 	tspecs = np.zeros([5,nctod,args.nbin],dtype=dtype)
 	tcorrs = np.zeros([nctod,args.nbin],dtype=dtype)
+	srates = np.zeros([nctod],dtype=dtype)
+	mce_fsamps = np.zeros([nctod],dtype=dtype)
+	mce_params = np.zeros([nctod,4],dtype=dtype)
 	for ind in range(ind1+comm.rank, ind2, comm.size):
 		i     = ind-ind1
 		id    = ids[ind]
@@ -99,6 +102,9 @@ for chunk in range(nchunk):
 			print "Skipped (%s)" % (e.message)
 			continue
 		print "Processing %s" % id
+		srates[i] = d.srate
+		mce_fsamps[i] = d.mce_fsamp
+		mce_params[i] = d.mce_params[:4]
 		# Compute the power spectrum
 		d.tod = d.tod.astype(dtype)
 		nsamp = d.nsamp
@@ -134,6 +140,9 @@ for chunk in range(nchunk):
 		dzooms = utils.allreduce(dzooms, comm)
 		tspecs = utils.allreduce(tspecs, comm)
 		tcorrs = utils.allreduce(tcorrs, comm)
+		srates = utils.allreduce(srates, comm)
+		mce_fsamps = utils.allreduce(mce_fsamps, comm)
+		mce_params = utils.allreduce(mce_params, comm)
 	ofile  = prefix + "specs%03d.hdf" % chunk
 	if comm.rank == 0:
 		# Get rid of empty tods
@@ -153,4 +162,7 @@ for chunk in range(nchunk):
 			hfile["tspecs"] = tspecs
 			hfile["tcorrs"] = tcorrs
 			hfile["ids"]    = chunk_ids
+			hfile["srates"] = srates
+			hfile["mce_fsamps"] = mce_fsamps
+			hfile["mce_params"] = mce_params
 	del dspecs, dzooms, tspecs, tcorrs

@@ -6,9 +6,10 @@ parser.add_argument("sel")
 parser.add_argument("template")
 parser.add_argument("omap")
 parser.add_argument("--daz",        type=float, default=0.7)
-parser.add_argument("--azdown",     type=float, default=100)
+parser.add_argument("--azdown",     type=int,   default=100)
 parser.add_argument("--chunk-size", type=int,   default=100)
 parser.add_argument("--rad",        type=float, default=0.7)
+parser.add_argument("-W", "--weight", type=str, default="det")
 args = parser.parse_args()
 
 filedb.init()
@@ -115,7 +116,8 @@ for chunk in range(comm.rank, nchunk, comm.size):
 	pix_ranges, weights = [], []
 	with bench.mark("get"):
 		for i in range(i1,i2):
-			pr, w = get_pix_ranges(shape, wcs, box[:,:,i], daz, nt, azdown=args.azdown, ndet=ndets[i])
+			weight = ndets[i] if args.weight == "det" else 1000.0
+			pr, w = get_pix_ranges(shape, wcs, box[:,:,i], daz, nt, azdown=args.azdown, ndet=weight)
 			pix_ranges.append(pr)
 			weights.append(w)
 		pix_ranges = np.concatenate(pix_ranges, 0)

@@ -161,7 +161,7 @@ def make_dummy_tile(shape, wcs, box, pad=0):
 	if pad:
 		pbox[0] -= pad
 		pbox[1] += pad
-	shape2, wcs2 = enmap.slice_wcs(shape, wcs, (slice(pbox[0,0],pbox[1,0]),slice(pbox[0,1],pbox[1,1])))
+	shape2, wcs2 = enmap.slice_geometry(shape, wcs, (slice(pbox[0,0],pbox[1,0]),slice(pbox[0,1],pbox[1,1])))
 	shape2 = tuple(pbox[1]-pbox[0])
 	map = enmap.zeros(shape2, wcs2, dtype)
 	div = enmap.zeros(shape2[-2:], wcs2, dtype)

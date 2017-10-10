@@ -46,14 +46,14 @@ def read_thumb_data(fname):
 	res.off = np.array([float(header["off_x"]),float(header["off_y"])])*utils.arcmin
 	for key in ["bore_az1","bore_az2","bore_el"]:
 		res[key] = float(header[key])*utils.degree
-	res.ctime = float(header[ctime])
+	res.ctime = float(header["ctime"])
 	return res
 
 def convolve(map, fmap):
 	return fft.ifft(fft.fft(map, axes=(-2,-1))*fmap,axes=(-2,-1), normalize=True).real
 
 class Likelihood:
-	def __init__(self, data, beam, dr, prior="uniform"):
+	def __init__(self, data, beam, dr, prior="uniform", verbose=False):
 		self.data = data
 		# Beam setup
 		self.beam = beam
@@ -68,6 +68,7 @@ class Likelihood:
 		# Build fourier-version of correlation
 		self.fcorr  = fft.fft(self.data.corr, axes=(-2,-1))
 		if np.any(self.fcorr==0): raise ValueError("Invalid noise correlations")
+		self.verbose = verbose
 		# Prior
 		self.prior = prior
 		self.i = 0
@@ -133,11 +134,12 @@ class Likelihood:
 		if self.post0 is None and np.isfinite(post): self.post0 = post
 		# Flat sky is good enough for our thumbnail
 		#off_tot = off[::-1] + self.data.off
-		msg = "%5d %8.4f %8.4f" % (self.i, off[0]/utils.arcmin, off[1]/utils.arcmin)
-		for a,da in zip(amp, amp_div):
-			msg += " %7.3f %4.1f" % (a/1e3, a*da**0.5)
-		msg += (" %15.7e" % (self.post0-post) if self.post0 is not None else " inf")
-		print msg
+		if self.verbose:
+			msg = "%5d %8.4f %8.4f" % (self.i, off[0]/utils.arcmin, off[1]/utils.arcmin)
+			for a,da in zip(amp, amp_div):
+				msg += " %7.3f %4.1f" % (a/1e3, a*da**0.5)
+			msg += (" %15.7e" % (self.post0-post) if self.post0 is not None else " inf")
+			print msg
 		self.i += 1
 		return post
 	def diag_plot(self, off):
@@ -273,8 +275,18 @@ def format_stats(stats, data):
 		sid      = data.srcinfo[i]["sid"]
 		afid     = data.srcinfo[i]["amp"]/1e3
 		amp, damp = stats.amp[i]/1e3, stats.damp[i]/1e3
-		msg += "%s | %8.4f %8.4f %8.4f %8.4f %8.4f %8.4f | %4d %8.4f %8.4f %8.4f %5.2f | %8.3f %8.3f\n" % (
-				data.id, dy, dx, dy0, dx0, ddy, ddx, sid, afid, amp, damp, amp/damp)
+		bel      = data.bore_el/utils.degree
+		baz      = 0.5*(data.bore_az1+data.bore_az2)/utils.degree
+		waz      = (data.bore_az2-data.bore_az1)/utils.degree
+		src_ra   = data.srcinfo[i]["ra"]
+		src_dec  = data.srcinfo[i]["dec"]
+		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %5.2f | %7.2f %7.2f %8.4f | %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
+				data.id, sid,
+				dx, dy, ddx, ddy,
+				amp, damp, amp/damp,
+				src_ra, src_dec, afid,
+				baz, bel, waz,
+				dx0, dy0)
 	return msg
 
 # Priors:
@@ -307,7 +319,7 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	ifile = args.ifiles[ind]
 	try:
 		thumb_data = read_thumb_data(ifile)
-		lik = Likelihood(thumb_data, beam, dr, prior=args.prior)
+		lik = Likelihood(thumb_data, beam, dr, prior=args.prior, verbose=verbosity>0)
 	except Exception as e:
 		sys.stderr.write("Exception for %s: %s\n" % (ifile, e.message))
 		continue
@@ -318,7 +330,7 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	if True:
 		likmap  = map_likelihood(lik)
 		pos     = enmap.argmin(likmap)
-		sampler = Sampler(lik, pos, scatter=1e-2*utils.arcmin, verbose=True)
+		sampler = Sampler(lik, pos, scatter=1e-2*utils.arcmin, verbose=verbosity>0)
 		stats   = sampler.build_stats()
 		print format_stats(stats, thumb_data)
 	if False:

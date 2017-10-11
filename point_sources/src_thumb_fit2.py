@@ -52,6 +52,10 @@ def read_thumb_data(fname):
 def convolve(map, fmap):
 	return fft.ifft(fft.fft(map, axes=(-2,-1))*fmap,axes=(-2,-1), normalize=True).real
 
+def mpiwrite(mpifile, msg):
+	mpifile.Write_shared(bytearray(msg))
+	mpifile.Sync()
+
 class Likelihood:
 	def __init__(self, data, beam, dr, prior="uniform", verbose=False):
 		self.data = data
@@ -278,14 +282,15 @@ def format_stats(stats, data):
 		bel      = data.bore_el/utils.degree
 		baz      = 0.5*(data.bore_az1+data.bore_az2)/utils.degree
 		waz      = (data.bore_az2-data.bore_az1)/utils.degree
+		hour     = data.ctime/3600.%24
 		src_ra   = data.srcinfo[i]["ra"]
 		src_dec  = data.srcinfo[i]["dec"]
-		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %5.2f | %7.2f %7.2f %8.4f | %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
+		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %5.2f | %7.2f %7.2f %8.4f | %5.2f %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
 				data.id, sid,
 				dx, dy, ddx, ddy,
 				amp, damp, amp/damp,
 				src_ra, src_dec, afid,
-				baz, bel, waz,
+				hour, baz, bel, waz,
 				dx0, dy0)
 	return msg
 
@@ -314,6 +319,9 @@ def format_stats(stats, data):
 # be too small, thus repeating the overconfidence problem. That happens if the fiducial amplitude
 # is significantly higher than the actual ones.
 
+f = mpi.File.Open(comm, args.odir + "/fits.txt", mpi.MODE_WRONLY | mpi.MODE_CREATE)
+f.Set_atomicity(True)
+
 for ind in range(comm.rank, len(args.ifiles), comm.size):
 	print ind
 	ifile = args.ifiles[ind]
@@ -323,27 +331,34 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	except Exception as e:
 		sys.stderr.write("Exception for %s: %s\n" % (ifile, e.message))
 		continue
+
 	print "Processing %s" % thumb_data.id
 	for si, src in enumerate(thumb_data.srcinfo):
 		print "src %4d ra %8.3f dec %8.3f amp %8.3f" % (src["sid"], src["ra"], src["dec"], src["amp"]/1e3)
-	# Build grid
-	if True:
-		likmap  = map_likelihood(lik)
-		pos     = enmap.argmin(likmap)
-		sampler = Sampler(lik, pos, scatter=1e-2*utils.arcmin, verbose=verbosity>0)
-		stats   = sampler.build_stats()
-		print format_stats(stats, thumb_data)
-	if False:
-		find_minimum(lik)
-	if False:
-		likmap = map_likelihood(lik)
-		enmap.write_map(args.odir + "/grid_%s.fits" % thumb_data.id, likmap)
-	if False:
-		x0  = np.zeros(2)
-		x   = optimize.fmin_powell(lik, x0)
-		off = x*utils.arcmin
-		diag= lik.diag_plot(off)
-		enmap.write_map(args.odir + "/diag_%s.fits" % thumb_data.id, diag)
-	if False:
-		sampler = Sampler(lik, verbose=True)
-		stats   = sampler.build_stats()
+
+	likmap  = map_likelihood(lik)
+	pos     = enmap.argmin(likmap)
+	sampler = Sampler(lik, pos, scatter=1e-2*utils.arcmin, verbose=verbosity>0)
+	stats   = sampler.build_stats()
+	# Output to stdout and to our indiviudal files
+	msg     = format_stats(stats, thumb_data)
+	mpiwrite(f, msg + "\n")
+	print msg
+	sys.stdout.flush()
+
+	#if False:
+	#	find_minimum(lik)
+	#if False:
+	#	likmap = map_likelihood(lik)
+	#	enmap.write_map(args.odir + "/grid_%s.fits" % thumb_data.id, likmap)
+	#if False:
+	#	x0  = np.zeros(2)
+	#	x   = optimize.fmin_powell(lik, x0)
+	#	off = x*utils.arcmin
+	#	diag= lik.diag_plot(off)
+	#	enmap.write_map(args.odir + "/diag_%s.fits" % thumb_data.id, diag)
+	#if False:
+	#	sampler = Sampler(lik, verbose=True)
+	#	stats   = sampler.build_stats()
+
+f.Close()

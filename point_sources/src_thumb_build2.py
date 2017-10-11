@@ -182,13 +182,16 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# set up cuts corresponding to those samples. The easiest way to do this is via
 	# PmatMat.
 	pmaps = []
+	failed = False
 	for sys in syss:
 		pmap = PmatTot(scan, area, sys=sys)
 		err  = np.max(pmap.err[:2])
 		if err > min_accuracy:
+			failed = True
 			print "Pointing model failed for '%s' with error %f. Skipping" % (id, err)
 			break
-	if len(pmaps) < len(syss): continue
+		pmaps.append(pmap)
+	if failed: continue
 
 	## Use joneig gapfilling to remove the atmosphere. This will zero out samples outside our
 	## regions of interest. This does not appear to work as well as I had hoped. The noise is
@@ -258,7 +261,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 	header['off_y'] = d.point_correction[1]/utils.arcmin
 	header['bore_el']  = np.mean(d.boresight[2])/utils.degree
 	header['bore_az1'] = np.min(d.boresight[1])/utils.degree
-	header['bore_az2'] = np.min(d.boresight[1])/utils.degree
+	header['bore_az2'] = np.max(d.boresight[1])/utils.degree
 	header['ctime']    = np.mean(d.boresight[0])
 	map_hdu = fits.PrimaryHDU(omap, header)
 

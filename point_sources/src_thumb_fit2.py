@@ -162,26 +162,6 @@ def map_likelihood(likfun, rmax=5*utils.arcmin, res=0.7*utils.arcmin):
 			map[y,x] = likfun(pos[:,y,x]/utils.arcmin)
 	return map
 
-def find_minimum(likfun, nrun=10, rmax=3*utils.arcmin):
-	poss = []
-	liks = []
-	for i in range(nrun):
-		x0  = np.random.uniform(-rmax,rmax,size=2)/utils.arcmin
-		x   = optimize.fmin_powell(likfun, x0, disp=0)
-		lik = likfun(x)
-		poss.append(x*utils.arcmin)
-		liks.append(lik)
-	poss = np.asarray(poss)
-	liks = np.asarray(liks)
-	# Use the lowest of these
-	pos_mode = poss[np.argmin(liks)]
-	# We can use the scatter as a diagnostic
-	pos_dev  = np.sum(np.var(poss,0))**0.5
-	print pos_mode/utils.arcmin
-	print pos_dev/utils.arcmin
-	print poss/utils.arcmin
-	print liks
-
 # Sampling large-amplitude fixed templates with monte carlo will very easily get
 # stuck in local minima. This is because a 1 sigma fluctuation in noise on top of
 # N-sigma amplitude template will result in a chisquare contribution of (N+1)**2
@@ -272,7 +252,8 @@ class Sampler:
 
 def format_stats(stats, data):
 	msg = ""
-	for i in range(len(stats.amp)):
+	tot_sn = np.sum(stats.amp**2/stats.damp**2)**0.5
+	for i in np.argsort(data.srcinfo["amp"])[::-1]:
 		dy,  dx  = stats.pos/utils.arcmin
 		dy0, dx0 = data.off/utils.arcmin
 		ddy, ddx = stats.dpos/utils.arcmin
@@ -285,11 +266,11 @@ def format_stats(stats, data):
 		hour     = data.ctime/3600.%24
 		src_ra   = data.srcinfo[i]["ra"]
 		src_dec  = data.srcinfo[i]["dec"]
-		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %5.2f | %7.2f %7.2f %8.4f | %5.2f %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
+		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %8.4f %6.2f %6.2f | %7.2f %7.2f | %5.2f %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
 				data.id, sid,
 				dx, dy, ddx, ddy,
-				amp, damp, amp/damp,
-				src_ra, src_dec, afid,
+				afid, amp, damp, amp/damp, tot_sn,
+				src_ra, src_dec,
 				hour, baz, bel, waz,
 				dx0, dy0)
 	return msg
@@ -333,18 +314,30 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 		continue
 
 	print "Processing %s" % thumb_data.id
+	oname = thumb_data.id.replace(":","_")
 	for si, src in enumerate(thumb_data.srcinfo):
 		print "src %4d ra %8.3f dec %8.3f amp %8.3f" % (src["sid"], src["ra"], src["dec"], src["amp"]/1e3)
 
+	# Find out starting point by gridding out the position likelihood coarsly
 	likmap  = map_likelihood(lik)
 	pos     = enmap.argmin(likmap)
+	# Sample to get some statistics
 	sampler = Sampler(lik, pos, scatter=1e-2*utils.arcmin, verbose=verbosity>0)
 	stats   = sampler.build_stats()
+	# But find the ML point exactly, so we don't have to waste too many samples
+	pos_ml  = optimize.fmin_powell(lik, stats.pos/utils.arcmin, disp=0)*utils.arcmin
+	stats.pos = pos_ml
+
 	# Output to stdout and to our indiviudal files
 	msg     = format_stats(stats, thumb_data)
 	mpiwrite(f, msg + "\n")
 	print msg
 	sys.stdout.flush()
+
+	if args.minimaps:
+		diag = lik.diag_plot(stats.pos)
+		enmap.write_map(args.odir + "/diag_%s.fits" % oname, diag)
+		enmap.write_map(args.odir + "/lik_%s.fits" % oname, likmap)
 
 	#if False:
 	#	find_minimum(lik)

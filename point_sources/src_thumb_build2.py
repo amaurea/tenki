@@ -132,9 +132,14 @@ for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
 	oid   = id.replace(":","_")
 	oname = "%s/%s.fits" % (args.odir, oid)
-	if args.cont and os.path.exists(oname):
-		print "%s is done: skipping" % id
-		continue
+	ename = oname + ".empty"
+	if args.cont:
+		if os.path.exists(oname):
+			print "%s is done: skipping" % id
+			continue
+		if os.path.exists(ename):
+			print "%s already failed: skipping" % id
+			continue
 
 	# Check if we hit any of the sources. We first make sure
 	# there's no angle wraps in the bounds, and then move the sources
@@ -151,6 +156,11 @@ for ind in range(comm.rank, len(ids), comm.size):
 	nsrc = len(sids)
 	print "%s has %d srcs: %s" % (id,nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])]))
 
+	def skip(msg):
+		print "%s skipped: %s" % (id, msg)
+		with open(ename, "w")  as f:
+			f.write(msg + "\n")
+
 	entry = filedb.data[id]
 	try:
 		with bench.mark("read"):
@@ -159,7 +169,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			d = actdata.calibrate(d, exclude=["autocut"])
 		if d.ndet < 2 or d.nsamp < 1: raise errors.DataMissing("no data in tod")
 	except errors.DataMissing as e:
-		print "%s skipped: %s" % (id, e.message)
+		skip(e.message)
 		continue
 	tod = d.tod.astype(dtype)
 	del d.tod
@@ -188,10 +198,11 @@ for ind in range(comm.rank, len(ids), comm.size):
 		err  = np.max(pmap.err[:2])
 		if err > min_accuracy:
 			failed = True
-			print "Pointing model failed for '%s' with error %f. Skipping" % (id, err)
 			break
 		pmaps.append(pmap)
-	if failed: continue
+	if failed:
+		skip("Pointing model failed: %s" % err)
+		continue
 
 	## Use joneig gapfilling to remove the atmosphere. This will zero out samples outside our
 	## regions of interest. This does not appear to work as well as I had hoped. The noise is
@@ -225,9 +236,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# Mask unexposed sources
 	hit = np.sum(divs>0,(1,2)) > divs.shape[1]*divs.shape[2]*0.25
 	if np.sum(hit) == 0:
-		print "%s skipped: %s" % (id, "No sources actually hit")
-		with open(oname + ".empty", "w")  as f:
-			f.write(" ".join(["%d" % h for h in hit])+"\n")
+		skip("No sources actually hit")
 		continue
 	sids  = sids[hit]
 	nsrc  = len(sids)
@@ -245,7 +254,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			corrs[i] += corr[i]
 			chits[i] += 1
 	if np.any(chits==0):
-		print "%s skipped: failed to measure correlations" % id
+		skip("Failed to measure correlations")
 		continue
 	corrs /= chits[:,None,None]
 	del tod

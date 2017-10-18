@@ -21,6 +21,7 @@ parser.add_argument("-s", "--restrict",  type=str,   default=None)
 parser.add_argument("-m", "--minimaps",  action="store_true")
 parser.add_argument("-c", "--cont",      action="store_true")
 parser.add_argument("-C", "--cols",      type=str, default="0:1:2")
+parser.add_argument(      "--nref",      type=int, default=2)
 args = parser.parse_args()
 
 # The joneig approach requires the mask to be as small as possible, especially in the scan
@@ -39,7 +40,7 @@ filedb.init()
 ids  = filedb.scans[args.sel]
 comm = mpi.COMM_WORLD
 dtype= np.float32
-nref = 2
+nref = args.nref
 min_accuracy = 1.0 # 1 pixel
 
 utils.mkdir(args.odir)

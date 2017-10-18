@@ -8,7 +8,7 @@ parser.add_argument("ofile")
 args = parser.parse_args()
 
 file_db = filedb.setup_filedb()
-scan_db = todinfo.read(args.tagfile)
+scan_db = todinfo.read(args.tagfile, vars={"root":config.get("root")})
 comm    = mpi.COMM_WORLD
 
 # We want to process *all* tods, not just selected ones. Could also

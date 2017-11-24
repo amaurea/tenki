@@ -1,4 +1,5 @@
 import numpy as np, argparse, os, imp, time
+from scipy import ndimage
 from enlib import enmap, retile, utils, bunch, cg, fft, mpi
 parser = argparse.ArgumentParser()
 parser.add_argument("config")
@@ -13,21 +14,25 @@ parser.add_argument("-p", "--pad",        type=int,   default=240)
 parser.add_argument("-a", "--apod-val",   type=float, default=2e-1)
 parser.add_argument("-A", "--apod-alpha", type=float, default=5)
 parser.add_argument("-E", "--apod-edge",  type=float, default=120)
-parser.add_argument(      "--kxrad",      type=float, default=20)
+parser.add_argument(      "--kxrad",      type=float, default=90)
 parser.add_argument(      "--kx-ymax-scale", type=float, default=1)
 parser.add_argument(      "--highpass",   type=float, default=200)
 parser.add_argument(      "--cg-tol",     type=float, default=1e-6)
 parser.add_argument(      "--max-ps",     type=float, default=0)
-parser.add_argument("-F", "--filter",     action="store_true")
+parser.add_argument("-M", "--mode",       type=str,   default="weight")
 parser.add_argument("-c", "--cont",       action="store_true")
 parser.add_argument("-v", "--verbose",    action="store_true")
+parser.add_argument("-i", "--maxiter",    type=int,   default=100)
+parser.add_argument(      "--ncomp",      type=int,   default=3)
+parser.add_argument("-s", "--slice",      type=str,   default=None)
 args = parser.parse_args()
 
 enmap.extent_model.append("intermediate")
 
 sel   = "&".join(["(" + w + ")" for w in utils.split_outside(args.sel, ",")])
-dtype = np.float32
+dtype = np.float64
 comm  = mpi.COMM_WORLD
+ncomp = args.ncomp
 utils.mkdir(args.odir)
 
 # Set up configuration
@@ -92,7 +97,9 @@ def setup_beam(params, nl=50000):
 def beam_ratio(beam1, beam2): return beam1 - beam2
 
 def beam_size(beam):
-	return np.where(beam < np.exp(-1))[0]
+	"""Returns the l where the beam has fallen by one sigma. The beam should
+	be given in the logarithmic form."""
+	return np.where(beam > -1)[0][-1]
 
 def eval_beam(beam, l, raw=False):
 	res = utils.interpol(beam, l[None], order=1, mask_nan=False)
@@ -126,14 +133,46 @@ def smooth_pix(map, pixrad):
 	map   = enmap.ifft(fmap).real
 	return map
 
-def read_map(fname, pbox, cname, write_cache=True, read_cache=True):
+#def smooth_div(div, pixrad=100):
+#	# Smoothing away high div regions is ok. It just doesn't give us
+#	# quite as much weight as we should have gotten. Smoothing away low-
+#	# div regions is bad, as it can give far too much weight to bad regions.
+#	# Hence this compromise.
+#	return np.minimum(div, np.maximum(0,smooth_pix(div, pixrad)))
+
+#def smooth_div(div, pixrad=100, tol=1e-3):
+#	# We don't want small regions of super-low noise to be given
+#	# too much weight, as the noise model can't handle that. So
+#	# smooth the inverse instead
+#	mask = div > 0
+#	if np.sum(mask) == 0: return div
+#	ref  = np.median(div[mask])
+#	idiv = 1/np.maximum(div,  ref*tol)
+#	idiv = smooth_pix(idiv, pixrad)
+#	div  = 1/np.maximum(idiv, ref*tol)
+#	div *= mask
+#	return div
+
+#def smooth_div(div, pixrad=100, medsize=2):
+#	# We don't want small regions of super-low noise to be given
+#	# too much weight, as the noise model can't handle that. So
+#	# smooth the inverse instead
+#	div  = np.minimum(enmap.samewcs(ndimage.median_filter(div, medsize),div),div)
+#	#div  = smooth_pix(div, pixrad)
+#	#div *= mask
+#	return div
+
+def read_map(fname, pbox, name=None, cache_dir=None, dtype=None, read_cache=False):
 	if os.path.isdir(fname):
 		fname = fname + "/tile%(y)03d_%(x)03d.fits"
-	if read_cache and os.path.isfile(cname):
-		map = enmap.read_map(cname).astype(dtype)
+	if read_cache:
+		map = enmap.read_map(cache_dir + "/" + name)
+		if dtype is not None: map = map.astype(dtype)
 	else:
 		map = retile.read_area(fname, pbox).astype(dtype)
-		if write_cache: enmap.write_map(cname, map)
+		if dtype is not None: map = map.astype(dtype)
+		if cache_dir is not None and name is not None:
+			enmap.write_map(cache_dir + "/" + name, map)
 	#if map.ndim == 3: map = map[:1]
 	return map
 
@@ -141,7 +180,7 @@ def map_fft(x): return enmap.fft(x)
 def map_ifft(x): return enmap.ifft(x).real
 
 def calc_pbox(shape, wcs, box, n=10):
-	nphi = utils.nint(360/wcs.wcs.cdelt[1])
+	nphi = utils.nint(np.abs(360/wcs.wcs.cdelt[0]))
 	dec = np.linspace(box[0,0],box[1,0],n)
 	ra  = np.linspace(box[0,1],box[1,1],n)
 	y   = enmap.sky2pix(shape, wcs, [dec,dec*0+box[0,1]])[0]
@@ -161,299 +200,338 @@ def make_dummy_tile(shape, wcs, box, pad=0):
 	if pad:
 		pbox[0] -= pad
 		pbox[1] += pad
-	shape2, wcs2 = enmap.slice_geometry(shape, wcs, (slice(pbox[0,0],pbox[1,0]),slice(pbox[0,1],pbox[1,1])))
-	shape2 = tuple(pbox[1]-pbox[0])
+	shape2, wcs2 = enmap.slice_geometry(shape, wcs, (slice(pbox[0,0],pbox[1,0]),slice(pbox[0,1],pbox[1,1])), nowrap=True)
+	shape2 = shape[:-2]+tuple(pbox[1]-pbox[0])
 	map = enmap.zeros(shape2, wcs2, dtype)
 	div = enmap.zeros(shape2[-2:], wcs2, dtype)
 	return bunch.Bunch(map=map, div=div)
 
-times = np.zeros(5)
+def robust_ref(div,tol=1e-5):
+	ref = np.median(div[div>0])
+	ref = np.median(div[div>ref*tol])
+	return ref
 
-def read_data(datasets, box, odir, pad=0, verbose=False, read_cache=False,
-		write_cache=False, div_max=100, div_unhit=1e-7, map_max=1e8):
-	odatasets = []
-	for dataset in datasets:
-		dataset = dataset.copy()
-		pbox = calc_pbox(dataset.shape, dataset.wcs, box)
-		#pbox = np.round(enmap.sky2pix(dataset.shape, dataset.wcs, box.T).T).astype(int)
-		pbox[0] -= pad
-		pbox[1] += pad
-		psize = pbox[1]-pbox[0]
-		ffpad = np.array([fft.fft_len(s, direction="above")-s for s in psize])
-		pbox[1] += ffpad
+def add_missing_comps(map, ncomp, rms_factor=1e3):
+	map  = map.preflat
+	if len(map) == ncomp: return map
+	omap = enmap.zeros((ncomp,)+map.shape[-2:], map.wcs, map.dtype)
+	omap[:len(map)] = map
+	omap[len(map):] = np.random.standard_normal((len(map),)+map.shape[-2:])*np.std(map)*rms_factor
+	return omap
 
-		dataset.pbox = pbox
-		osplits = []
-		for split in dataset.splits:
-			split = split.copy()
-			if verbose: print "Reading %s" % split.map
-			try:
-				map = read_map(split.map, pbox, odir + "/" + os.path.basename(split.map), read_cache=read_cache, write_cache=write_cache)
-				div = read_map(split.div, pbox, odir + "/" + os.path.basename(split.div), read_cache=read_cache, write_cache=write_cache).preflat[0]
-			except IOError: continue
-			map *= dataset.gain
-			div *= dataset.gain**-2
-			# Sanitize div and map, so that they don't contain unreasonable
-			# values. After this, the rest of the code doesn't need to worry
-			# about that.
-			div[~np.isfinite(div)] = 0
-			map[~np.isfinite(map)] = 0
-			div = np.maximum(0,np.minimum(div_max,div))
-			div[div<div_unhit] = 0
-			#print "moo"
-			#div = smooth_pix(div, 100)
-			map = np.maximum(-map_max,np.minimum(map_max,map))
+def common_geometry(geos, ncomp=None):
+	shapes = np.array([shape[-2:] for shape,wcs in geos])
+	assert np.all(shapes == shapes[0]), "Inconsistent map shapes"
+	if ncomp is None:
+		ncomps = np.array([shape[-3] for shape,wcs in geos if len(shape)>2])
+		assert np.all(ncomps == ncomps[0]), "Inconsistent map ncomp"
+		ncomp = ncomps[0]
+	return (ncomp,)+tuple(shapes[0]), geos[0][1]
 
-			if np.any(div>0): ref_val = np.mean(div[div>0])*args.apod_val
-			else: ref_val = 1.0
-			apod  = np.minimum(div/ref_val,1.0)**args.apod_alpha
-			apod  = apod.apod(args.apod_edge)
-			#opre  = odir + "/" + os.path.basename(split.map)[:-5]
-			#enmap.write_map(opre + "_apod.fits", apod)
-			#enmap.write_map(opre + "_amap.fits", apod*map)
-			#enmap.write_map(opre + "_adiv.fits", apod*div)
-			div  *= apod
-			if np.all(div==0): continue
-			split.data = bunch.Bunch(map=map, div=div, H=div**0.5, empty=np.all(div>0))
-			osplits.append(split)
-		if len(osplits) < 2: continue
-		dataset.splits = osplits
-		odatasets.append(dataset)
-	return odatasets, ffpad
+def filter_div(div):
+	"""Downweight very thin stripes in the div - they tend to be problematic single detectors"""
+	return enmap.samewcs(ndimage.minimum_filter(div, size=2), div)
 
-def coadd_tile_data(datasets, box, odir, ps_smoothing=10, pad=0, ref_beam=None,
-		cg_tol=1e-6, dump=False, verbose=False, read_cache=False, write_cache=False,
-		div_max_tol=100, div_div_tol=1e-10):
-	# Load data for this box for each dataset
-	datasets, ffpad = read_data(datasets, box, odir, pad=pad,
-			verbose=verbose, read_cache=read_cache, write_cache=write_cache)
-	# We might not find any data
-	if len(datasets) == 0: return None
-	# Find the smallest beam size of the datasets
-	bmin = np.min([beam_size(dataset.beam) for dataset in datasets])
+class AutoCoadder:
+	def __init__(self, datasets, ffpad=0, ncomp=None):
+		self.datasets = datasets
+		self.ffpad    = ffpad
+		self.shape, self.wcs = common_geometry([split.data.map.geometry for dataset in datasets for split in dataset.splits], ncomp=ncomp)
+		self.dtype    = datasets[0].splits[0].data.map.dtype
+		self.set_slice()
+	@staticmethod
+	def read(datasets, box, pad=0, verbose=False, cache_dir=None, dtype=None, div_unhit=1e-7, read_cache=False, ncomp=None):
+		odatasets = []
+		for dataset in datasets:
+			dataset = dataset.copy()
+			pbox = calc_pbox(dataset.shape, dataset.wcs, box)
+			#pbox = np.round(enmap.sky2pix(dataset.shape, dataset.wcs, box.T).T).astype(int)
+			pbox[0] -= pad
+			pbox[1] += pad
+			psize = pbox[1]-pbox[0]
+			ffpad = np.array([fft.fft_len(s, direction="above")-s for s in psize])
+			pbox[1] += ffpad
 
-	# Subtract mean map from each split to get noise maps. Our noise
-	# model is HNH, where H is div**0.5 and N is the mean 2d noise spectrum
-	# after some smoothing
-	rhs, tot_div = None, None
-	tot_iN, tot_udiv = None, 0
-	for dataset in datasets:
-		nsplit = 0
-		dset_map, dset_div = None, None
-		for split in dataset.splits:
-			if dset_map is None:
-				dset_map = split.data.map*0
-				dset_div = split.data.div*0
-			dset_map += split.data.map * split.data.div
-			dset_div += split.data.div
-		# Form the mean map for this dataset
-		dset_map[:,dset_div>0] /= dset_div[dset_div>0]
-		if tot_div is None: tot_div = dset_div*0
-		tot_div += dset_div
-		tshape, twcs, tdtype = dset_map.shape, dset_div.wcs, dset_div.dtype
-		# Then use it to build the diff maps and noise spectra
-		dset_ps = None
-		for split in dataset.splits:
-			if split.data.empty: continue
-			diff  = split.data.map - dset_map
-			wdiff = diff * split.data.H
-			# What is the healthy area of wdiff? Wdiff should have variance
-			# 1 or above. This tells us how to upweight the power spectrum
-			# to take into account missing regions of the diff map.
-			ndown = 10
-			wvar  = enmap.downgrade(wdiff**2,ndown)
-			goodfrac = np.sum(wvar > 1e-3)/float(wvar.size)
-			if goodfrac < 0.1: goodfrac = 0
-			#opre  = odir + "/" + os.path.basename(split.map)[:-5]
-			#enmap.write_map(opre + "_diff.fits", diff)
-			#enmap.write_map(opre + "_wdiff.fits", wdiff)
-			#enmap.write_map(opre + "_wvar.fits", wvar)
-			ps    = np.abs(map_fft(wdiff))**2
-			#enmap.write_map(opre + "_ps1.fits", ps)
-			# correct for unhit areas, which can't be whitened
-			#print "A", dataset.name, np.median(ps[ps>0]), medloop(ps), goodfrac
-			with utils.nowarn():
-				ps   /= goodfrac
-			#print "B", dataset.name, np.median(ps[ps>0]), medloop(ps), goodfrac
-			#enmap.write_map(opre + "_ps2.fits", ps)
-			#enmap.write_map(opre + "_ps2d.fits", ps)
-			if dset_ps is None: dset_ps = enmap.zeros(ps.shape, ps.wcs, ps.dtype)
-			dset_ps += ps
-			nsplit += 1
-		if nsplit < 2: continue
-		# With n splits, mean map has var 1/n, so diff has var (1-1/n) + (n-1)/n = 2*(n-1)/n
-		# Hence tot-ps has var 2*(n-1)
-		dset_ps /= 2*(nsplit-1)
-		#enmap.write_map(opre + "_ps2d_tot.fits", dset_ps)
-		dset_ps  = smooth_pix(dset_ps, ps_smoothing)
-		#enmap.write_map(opre + "_ps2d_smooth.fits", dset_ps)
-		if np.all(np.isfinite(dset_ps)):
-			# Super-low values of the spectrum are not realistic. These appear
-			# due to beam/pixel smoothing in the planck maps. This will be
-			# mostly taken care of when processing the beams, as long as we don't
-			# let them get too small
-			dset_ps = np.maximum(dset_ps, 1e-7)
-			# Optionally cap the max dset_ps, this is mostly to speed up convergence
-			if args.max_ps:
-				dset_ps = np.minimum(dset_ps, args.max_ps)
+			dataset.pbox = pbox
+			osplits = []
+			for split in dataset.splits:
+				split = split.copy()
+				if verbose: print "Reading %s" % split.map
+				try:
+					map = read_map(split.map, pbox, name=os.path.basename(split.map), cache_dir=cache_dir,dtype=dtype, read_cache=read_cache)
+					div = read_map(split.div, pbox, name=os.path.basename(split.div), cache_dir=cache_dir,dtype=dtype, read_cache=read_cache).preflat[0]
+				except IOError: continue
+				map *= dataset.gain
+				div *= dataset.gain**-2
+				div[~np.isfinite(div)] = 0
+				map[~np.isfinite(map)] = 0
+				div[div<div_unhit] = 0
+				if np.all(div==0): continue
+				split.data = bunch.Bunch(map=map, div=div, empty=np.all(div==0))
+				osplits.append(split)
+			if len(osplits) < 2: continue
+			dataset.splits = osplits
+			odatasets.append(dataset)
+		if len(odatasets) == 0: return None
+		return AutoCoadder(odatasets, ffpad, ncomp=ncomp)
 
-			# Our fourier-space inverse noise matrix is based on the inverse noise spectrum
-			iN    = 1/dset_ps
-			#enmap.write_map(opre + "_iN_raw.fits", iN)
-		else:
-			print "Setting weight of dataset %s to zero" % dataset.name
-			#print np.all(np.isfinite(dset_ps)), np.all(dset_ps>0)
-			iN    = enmap.zeros(dset_ps.shape, dset_ps.wcs, dset_ps.dtype)
-
-		# Add any fourier-space masks to this
-		ly, lx   = enmap.laxes(tshape, twcs)
-		lr       = (ly[:,None]**2 + lx[None,:]**2)**0.5
-		if dataset.highpass:
-			kxmask   = butter(lx, args.kxrad,   -3)
-			kxmask   = 1-(1-kxmask[None,:])*(np.abs(ly)<bmin*args.kx_ymax_scale)[:,None]
-			highpass = butter(lr, args.highpass,-10)
-			filter   = highpass * kxmask
-			#print "filter weighting", dataset.name
-			del kxmask, highpass
-		else:
-			filter   = 1
-
-		if not args.filter: iN *= filter
-
-		# We should deconvolve the relative beam from the maps,
-		# but that's numerically nasty. But it can be handled
-		# inversely. We want (BiNB + ...)x = (BiNB iB m + ...)
-		# where iB is the beam deconvolution operation in map space.
-		# Instead of actually doing that operation, we can compute two
-		# inverse noise matrixes: iN_A = BiNB for the left hand
-		# side and iN_b = BiN for the right hand side. That way we
-		# avoid dividing by any huge numbers.
-
-		# Add the relative beam
-		iN_A = iN.copy()
-		iN_b = iN.copy()
-		if ref_beam is not None:
-			rel_beam  = beam_ratio(dataset.beam, ref_beam)
-			bspec     = eval_beam(rel_beam, lr)
-			iN_A     *= bspec**2
-			iN_b     *= bspec
-		#moo = iN*0+filter
-		#enmap.write_map(opre + "_filter.fits", moo)
-		# Add filter to noise model if we're downweighting
-		# rather than filtering.
-		dataset.iN_A  = iN_A
-		dataset.iN_b  = iN_b
-		dataset.filter = filter
-		#print "A", opre
-		#enmap.write_map(opre + "_iN_A.fits", iN_A)
-		#enmap.write_map(opre + "_iN.fits", iN)
-
-	# Cap to avoid single crazy pixels
-	tot_div  = np.maximum(tot_div,np.median(tot_div[tot_div>0])*0.01)
-	tot_idiv = tot_div*0
-	tot_idiv[tot_div>div_div_tol] = 1/tot_div[tot_div>div_div_tol]
-
-	# Build the right-hand side. The right-hand side is
-	# sum(HNHm)
-	if rhs is None: rhs = enmap.zeros(tshape, twcs, tdtype)
-	for dataset in datasets:
-		i=0
-		for split in dataset.splits:
-			if split.data.empty: continue
-			#print "MOO", dataset.name, np.max(split.data.map), np.min(split.data.map), np.max(split.data.div), np.min(split.data.div)
-			w   = split.data.H*split.data.map
-			fw  = map_fft(w)
-			fw *= dataset.iN_b
-			if args.filter: fw *= dataset.filter
-			w   = map_ifft(fw)*split.data.H
-			#enmap.write_map(odir + "/%s_%02d_rhs.fits" % (dataset.name, i), w)
-			rhs += w
-			i += 1
-	del w, iN, iN_A, iN_b, filter
-
-	# Now solve the equation
-	def A(x):
-		global times
-		m   = enmap.samewcs(x.reshape(rhs.shape), rhs)
-		res = m*0
-		times[:] = 0
-		ntime = 0
+	def analyze(self, ref_beam=None, mode="weight", map_max=1e8, div_tol=20, apod_val=0.2, apod_alpha=5, apod_edge=120,
+			beam_tol=1e-4, ps_spec_tol=0.5, ps_smoothing=10, filter_kxrad=20, filter_highpass=200, filter_kx_ymax_scale=1):
+		# Find the typical noise levels. We will use this to decide where
+		# divs and beams etc. can be truncated to improve convergence.
+		datasets = self.datasets
+		ncomp = max([split.data.map.preflat.shape[0] for dataset in datasets for split in dataset.splits])
 		for dataset in datasets:
 			for split in dataset.splits:
+				split.ref_div = robust_ref(split.data.div)
+				# Avoid single, crazy pixels
+				split.data.div = np.minimum(split.data.div, split.ref_div*div_tol)
+				split.data.div = filter_div(split.data.div)
+				split.data.map = np.maximum(-map_max, np.minimum(map_max, split.data.map))
+				# Expand map to ncomp components
+				split.data.map = add_missing_comps(split.data.map, ncomp)
+				# Build apodization
+				apod = np.minimum(split.data.div/(split.ref_div*apod_val), 1.0)**apod_alpha
+				apod = apod.apod(apod_edge)
+				split.data.div *= apod
+				split.data.H   = split.data.div**0.5
+			dataset.ref_div = np.sum([split.ref_div for split in dataset.splits])
+		tot_ref_div = np.sum([dataset.ref_div for dataset in datasets])
+
+		ly, lx   = enmap.laxes(self.shape, self.wcs)
+		lr       = (ly[:,None]**2 + lx[None,:]**2)**0.5
+		bmin = np.min([beam_size(dataset.beam) for dataset in datasets])
+		# Deconvolve all the relative beams. These should ideally include pixel windows.
+		# This could matter for planck
+		if ref_beam is not None:
+			for dataset in datasets:
+				rel_beam  = beam_ratio(dataset.beam, ref_beam)
+				# Avoid division by zero
+				bspec     = np.maximum(eval_beam(rel_beam, lr), 1e-10)
+				# We don't want to divide by tiny numbers, so we will cap the relative
+				# beam. The goal is just to make sure that the deconvolved noise ends up
+				# sufficiently high that anything beyond that is negligible. This will depend
+				# on the div ratios between the different datasets. We can stop deconvolving
+				# when beam*my_div << (tot_div-my_div). But deconvolving even by a factor
+				# 1000 leads to strange numberical errors
+				bspec = np.maximum(bspec, beam_tol*(tot_ref_div/dataset.ref_div-1))
+				#print beam_tol, tot_ref_div, dataset.ref_div, beam_tol*(tot_ref_div/dataset.ref_div-1)
+				bspec_dec = np.maximum(bspec, 0.1)
+				#enmap.write_map(args.odir + "/moo_bspec_%s.fits" % dataset.name, bspec)
+				for split in dataset.splits:
+					split.data.map = map_ifft(map_fft(split.data.map)/bspec_dec)
+				# In theory we don't need to worry about the beam any more by this point.
+				# But the pixel window might be unknown or missing. So we save the beam so
+				# we can make sure the noise model makes sense
+				dataset.bspec = bspec
+				# We classify this as a low-resolution dataset if we did an appreciable amount of
+				# deconvolution
+				dataset.lowres = np.min(bspec) < 0.5
+
+		# Can now build the noise model and rhs for each dataset.
+		# The noise model is N = HCH, where H = div**0.5 and C is the mean 2d noise spectrum
+		# of the whitened map, after some smoothing.
+		for dataset in datasets:
+			nsplit = 0
+			dset_map, dset_div = None, None
+			for split in dataset.splits:
+				if dset_map is None:
+					dset_map = split.data.map*0
+					dset_div = split.data.div*0
+				dset_map += split.data.map * split.data.div
+				dset_div += split.data.div
+			# Form the mean map for this dataset
+			dset_map[:,dset_div>0] /= dset_div[dset_div>0]
+			# Then use it to build the diff maps and noise spectra
+			dset_ps = None
+			#i=0
+			for split in dataset.splits:
 				if split.data.empty: continue
-				t = [time.time()]
-				w  = split.data.H*m; t.append(time.time())
-				fw = map_fft(w);     t.append(time.time())
-				fw*= dataset.iN_A;   t.append(time.time())
-				w  = map_ifft(fw);   t.append(time.time())
-				w *= split.data.H;   t.append(time.time())
+				diff  = split.data.map - dset_map
+				wdiff = diff * split.data.H
+				#enmap.write_map(args.odir + "/moo_wdiff_%s_%d.fits" % (dataset.name, i), wdiff)
+				#i+=1
+				# What is the healthy area of wdiff? Wdiff should have variance
+				# 1 or above. This tells us how to upweight the power spectrum
+				# to take into account missing regions of the diff map.
+				ndown = 10
+				wvar  = enmap.downgrade(wdiff**2,ndown)
+				goodfrac = np.sum(wvar > 1e-3)/float(wvar.size)
+				if goodfrac < 0.1: goodfrac = 0
+				ps    = np.abs(map_fft(wdiff))**2
+				#enmap.write_map(args.odir + "/moo_ps_%s_%d.fits" % (dataset.name, i), ps)
+				# correct for unhit areas, which can't be whitened
+				with utils.nowarn(): ps   /= goodfrac
+				if dset_ps is None:
+					dset_ps = enmap.zeros(ps.shape, ps.wcs, ps.dtype)
+				dset_ps += ps
+				nsplit += 1
+			if nsplit < 2: continue
+			# With n splits, mean map has var 1/n, so diff has var (1-1/n) + (n-1)/n = 2*(n-1)/n
+			# Hence tot-ps has var 2*(n-1)
+			dset_ps /= 2*(nsplit-1)
+			dset_ps  = smooth_pix(dset_ps, ps_smoothing)
+			#enmap.write_map(args.odir + "/moo_totps_%s.fits" % (dataset.name), dset_ps)
+			# Use the beam we saved from earlier to make sure we don't have a remaining
+			# pixel window giving our high-l parts too high weight. If everything has
+			# been correctly deconvolved, we expect high-l dset_ps to go as
+			# 1/beam**2. The lower ls will realistically be no lower than this either.
+			# So we can simply take the max
+			dset_ps_ref = np.min(np.maximum(dset_ps, dataset.bspec**-2*ps_spec_tol*0.1))
+			dset_ps = np.maximum(dset_ps, dset_ps_ref*dataset.bspec**-2 * ps_spec_tol)
+			#enmap.write_map(args.odir + "/moo_decps_%s.fits" % (dataset.name), dset_ps)
+			# Our fourier-space inverse noise matrix is the inverse of this
+			if np.all(np.isfinite(dset_ps)):
+				iN = 1/dset_ps
+			else:
+				iN = enmap.zeros(dset_ps.shape, dset_ps.wcs, dset_ps.dtype)
+
+			# Add any fourier-space masks to this
+			if dataset.highpass:
+				kxmask   = butter(lx, filter_kxrad,   -5)
+				kxmask   = 1-(1-kxmask[None,:])*(np.abs(ly)<bmin*filter_kx_ymax_scale)[:,None]
+				highpass = butter(lr, filter_highpass,-10)
+				filter   = highpass * kxmask
+				#enmap.write_map(args.odir + "/filter_%s.fits" % dataset.name, np.fft.fftshift(filter))
+				del kxmask, highpass
+			else:
+				filter   = 1
+			if mode != "filter": iN *= filter
+			dataset.iN     = iN
+			dataset.filter = filter
+
+			#enmap.write_map(args.odir + "/moo_%s_iN.fits"  % dataset.name, dataset.iN)
+			#for i, split in enumerate(dataset.splits):
+			#	enmap.write_map(args.odir + "/moo_%s_%d_div.fits" % (dataset.name,i), split.data.div)
+
+		# Build the preconditioner
+		self.tot_div = enmap.ndmap(np.sum([split.data.div for dataset in datasets for split in dataset.splits],0), self.wcs)
+		self.tot_idiv = self.tot_div.copy()
+		self.tot_idiv[self.tot_idiv>0] **=-1
+		self.mode = mode
+		# Find the part of the sky hit by high-res data
+		self.highres_mask = enmap.zeros(self.shape[-2:], self.wcs, np.bool)
+		for dataset in datasets:
+			if dataset.lowres: continue
+			for split in dataset.splits:
+				self.highres_mask |= split.data.div > 0
+
+	def set_slice(self, slice=None):
+		self.slice = slice
+		if slice is None: slice = ""
+		for dataset in self.datasets:
+			# Clear existing selection
+			for split in dataset.splits: split.active = False
+			# Activate new selection
+			inds = np.arange(len(dataset.splits))
+			inds = eval("inds" + slice)
+			for ind in inds:
+				dataset.splits[ind].active = True
+
+	def calc_rhs(self):
+		# Build the right-hand side. The right-hand side is sum(HNHm)
+		rhs = enmap.zeros(self.shape, self.wcs, self.dtype)
+		for dataset in self.datasets:
+			#print "moo", dataset.name, "iN" in dataset, id(dataset)
+			for split in dataset.splits:
+				if split.data.empty or not split.active: continue
+				w   = split.data.H*split.data.map
+				fw  = map_fft(w)
+				#print dataset.name
+				fw *= dataset.iN
+				if self.mode == "filter": fw *= dataset.filter
+				w   = map_ifft(fw)*split.data.H
+				rhs += w
+		# Apply resolution mask
+		rhs *= self.highres_mask
+		self.rhs = rhs
+	def A(self, x):
+		m   = enmap.enmap(x.reshape(self.shape), self.wcs, copy=False)
+		res = m*0
+		for dataset in self.datasets:
+			for split in dataset.splits:
+				if split.data.empty or not split.active: continue
+				w   = split.data.H*m
+				w   = map_ifft(map_fft(w)*dataset.iN)
+				w  *= split.data.H
 				res += w
-				for i in range(1,len(t)): times[i-1] += t[i]-t[i-1]
-				ntime += 1
-				#w  = enmap.harm2map(dataset.iN_A*enmap.map2harm(w))
-				#w *= split.data.H
-				#res += w
-				del w
-		times /= ntime
+		# Apply resolution mask
+		res *= self.highres_mask
 		return res.reshape(-1)
-	def M(x):
-		m   = enmap.samewcs(x.reshape(rhs.shape), rhs)
-		res = m * tot_idiv
+	def M(self, x):
+		m   = enmap.enmap(x.reshape(self.shape), self.wcs, copy=False)
+		res = m * self.tot_idiv
 		return res.reshape(-1)
-	solver = cg.CG(A, rhs.reshape(-1), M=M)
-	for i in range(1000):
-		t1 = time.time()
-		solver.step()
-		t2 = time.time()
-		if verbose:
-			print "%5d %15.7e %5.2f: %4.2f %4.2f %4.2f %4.2f %4.2f" % (solver.i, solver.err, t2-t1, times[0], times[1], times[2], times[3], times[4]), np.std(solver.x)
-		if dump and solver.i in [1,2,5,10,20,50] + range(100,10000,100):
-			m = enmap.samewcs(solver.x.reshape(rhs.shape), rhs)
-			enmap.write_map(odir + "/step%04d.fits" % solver.i, m)
-		if solver.err < cg_tol:
-			if dump:
-				m = enmap.samewcs(solver.x.reshape(rhs.shape), rhs)
-				enmap.write_map(odir + "/step_final.fits", m)
-			break
-	tot_map = enmap.samewcs(solver.x.reshape(rhs.shape), rhs)
-	# Get rid of the fourier padding
-	ny,nx = tot_map.shape[-2:]
-	tot_map = tot_map[...,:ny-ffpad[0],:nx-ffpad[1]]
-	tot_div = tot_div[...,:ny-ffpad[0],:nx-ffpad[1]]
-	return bunch.Bunch(map=tot_map, div=tot_div)
+	def solve(self, maxiter=100, cg_tol=1e-7, verbose=False, dump_dir=None):
+		if np.sum(self.highres_mask) == 0: return None
+		solver = cg.CG(self.A, self.rhs.reshape(-1), M=self.M)
+		for i in range(maxiter):
+			t1 = time.time()
+			solver.step()
+			t2 = time.time()
+			if verbose:
+				print "%5d %15.7e %5.2f" % (solver.i, solver.err, t2-t1)
+			if dump_dir is not None and solver.i in [1,2,5,10,20,50] + range(100,10000,100):
+				m = enmap.ndmap(solver.x.reshape(self.shape), self.wcs)
+				enmap.write_map(dump_dir + "/step%04d.fits" % solver.i, m)
+			if solver.err < cg_tol:
+				if dump_dir is not None:
+					m = enmap.ndmap(solver.x.reshape(self.shape), self.wcs)
+					enmap.write_map(dump_dir + "/step_final.fits", m)
+				break
+		tot_map = self.highres_mask*solver.x.reshape(self.shape)
+		tot_div = self.highres_mask*self.tot_div
+		# Get rid of the fourier padding
+		ny,nx = tot_map.shape[-2:]
+		tot_map = tot_map[...,:ny-self.ffpad[0],:nx-self.ffpad[1]]
+		tot_div = tot_div[...,:ny-self.ffpad[0],:nx-self.ffpad[1]]
+		return bunch.Bunch(map=tot_map, div=tot_div)
 
 if args.template is None:
 	# Process a single box
 	box  = np.array([[float(w) for w in fromto.split(":")] for fromto in args.box.split(",")]).T*utils.degree
 	utils.mkdir(args.odir)
-	res  = coadd_tile_data(datasets, box, args.odir, pad=args.pad,
-			ref_beam=ref_beam, dump=True, verbose=True, read_cache=args.cont,
-			write_cache=True, cg_tol=args.cg_tol)
-	enmap.write_map(args.odir + "/map.fits", res.map)
-	enmap.write_map(args.odir + "/div.fits", res.div)
-	#enmap.write_map(args.odir + "/ips.fits", res.ips)
+	coadder = AutoCoadder.read(datasets, box, pad=args.pad, verbose=True, dtype=dtype,
+			cache_dir=args.odir, read_cache=args.cont)
+	coadder.analyze(ref_beam, mode=args.mode,
+			apod_val=args.apod_val, apod_alpha=args.apod_alpha, apod_edge=args.apod_edge,
+			filter_kxrad=args.kxrad, filter_kx_ymax_scale=args.kx_ymax_scale, filter_highpass=args.highpass)
+	if args.slice: coadder.set_slice(args.slice)
+	coadder.calc_rhs()
+	res = coadder.solve(verbose=True, cg_tol=args.cg_tol, dump_dir=args.odir, maxiter=args.maxiter)
+	if res is None: print "No data found"
+	else:
+		enmap.write_map(args.odir + "/map.fits", res.map)
+		enmap.write_map(args.odir + "/div.fits", res.div)
 else:
 	# We will loop over tiles in the area defined by template
 	shape, wcs = read_geometry(args.template)
-	pre = read_geometry(datasets[0].splits[0].map)[0][:-2]
+	#pre   = read_geometry(datasets[0].splits[0].map)[0][:-2]
+	pre   = (ncomp,)
 	shape = pre + shape
 	tshape = np.array([args.tilesize,args.tilesize])
 	ntile  = np.floor((shape[-2:]+tshape-1)/tshape).astype(int)
 	tyx = [(y,x) for y in range(ntile[0]-1,-1,-1) for x in range(ntile[1])]
 	for i in range(comm.rank, len(tyx), comm.size):
 		y, x = tyx[i]
-		if args.cont and os.path.isfile(args.odir + "/map_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}): continue
-		print "%3d %3d %3d" % (comm.rank, y, x)
+		if args.cont and os.path.isfile(args.odir + "/map_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}):
+			print "%3d skipping %3d %3d" % (comm.rank, y, x)
+			continue
+		print "%3d processing %3d %3d" % (comm.rank, y, x)
 		tpos = np.array(tyx[i])
 		pbox = np.array([tpos*tshape,np.minimum((tpos+1)*tshape,shape[-2:])])
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
-		res  = coadd_tile_data(datasets, box, args.odir, pad=args.pad,
-				ref_beam=ref_beam, dump=False, verbose=args.verbose, cg_tol=args.cg_tol)
-		if res is None:
-			#print "skipping dummy %d %d" % (y,x)
-			#continue
-			print "make dummy %d %d" % (y,x), shape, wcs
+		# Set up the coadder
+		coadder = AutoCoadder.read(datasets, box, pad=args.pad, verbose=True, dtype=dtype, ncomp=ncomp)
+		if coadder is not None:
+			coadder.analyze(ref_beam, mode=args.mode,
+					apod_val=args.apod_val, apod_alpha=args.apod_alpha, apod_edge=args.apod_edge,
+					filter_kxrad=args.kxrad, filter_kx_ymax_scale=args.kx_ymax_scale, filter_highpass=args.highpass)
+			if args.slice: coadder.set_slice(args.slice)
+			coadder.calc_rhs()
+			res = coadder.solve(verbose=True, cg_tol=args.cg_tol, maxiter=args.maxiter,
+					dump_dir = args.odir if comm.rank==0 else None)
+		if coadder is None or res is None:
 			res = make_dummy_tile(shape, wcs, box, pad=args.pad)
 		enmap.write_map(args.odir + "/map_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}, res.map)
 		enmap.write_map(args.odir + "/div_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}, res.div)
-		#enmap.write_map(args.odir + "/ips_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}, res.ips)

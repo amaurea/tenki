@@ -28,7 +28,7 @@ config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=hor:Ur
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
-config.default("filter_scan_default",  "use=no,name=scan,value=1,naz=8,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
+config.default("filter_scan_default",  "use=no,name=scan,value=1,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
@@ -61,6 +61,7 @@ ext   = config.get("map_format")
 tshape= (720,720)
 #tshape= (100,100)
 resume= config.get("resume")
+output_srcmodel = False
 
 filedb.init()
 db = filedb.data
@@ -181,7 +182,9 @@ if read_ntot == 0:
 	sys.exit(1)
 read_ndets= utils.allgatherv([len(scan.dets) for scan in myscans], comm)
 read_nsamp= utils.allgatherv([scan.cut.size-scan.cut.sum() for scan in myscans], comm)
-read_dets = utils.uncat(utils.allgatherv(np.concatenate([scan.dets for scan in myscans]),comm), read_ndets)
+read_dets = utils.uncat(utils.allgatherv(
+	np.concatenate([scan.dets for scan in myscans]) if len(myscans) > 0 else np.zeros(0,int)
+	,comm), read_ndets)
 # Save accept list
 if comm.rank == 0:
 	with open(root + "accept.txt", "w") as f:
@@ -196,7 +199,7 @@ try:
 			ofile.write(("#%29s" + " %15s"*len(autokeys)+"\n") % (("id",)+tuple(autokeys)))
 			for id, acut in zip(read_ids, autocuts):
 				ofile.write(("%30s" + " %7.3f %7.3f"*len(autokeys) + "\n") % ((id,)+tuple(1e-6*acut.reshape(-1))))
-except AttributeError:
+except (AttributeError, IndexError):
 	pass
 # Output sample stats
 if comm.rank == 0:
@@ -370,11 +373,11 @@ for out_ind in range(nouter):
 	filters2= []
 	for param in filter_params:
 		if param["name"] == "scan":
-			naz, nt, mode, niter = int(param["naz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
+			daz, nt, mode, niter = int(param["daz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
 			nhwp = int(param["nhwp"])
 			weighted = int(param["weighted"])
 			if mode == 0: continue
-			filter = mapmaking.FilterPickup(naz=naz, nt=nt, nhwp=nhwp, niter=niter)
+			filter = mapmaking.FilterPickup(daz=daz, nt=nt, nhwp=nhwp, niter=niter)
 			if mode >= 2:
 				for sparam, signal in matching_signals(param, signal_params, signals):
 					if sparam["type"] == "map" or sparam["type"] == "bmap":
@@ -383,7 +386,7 @@ for out_ind in range(nouter):
 						prec_ptp = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
 					else:
 						raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
-					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, naz=naz, nt=nt, weighted=weighted>0))
+					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, daz=daz, nt=nt, weighted=weighted>0))
 		elif param["name"] == "common":
 			mode = int(param["value"])
 			if mode == 0: continue
@@ -443,10 +446,10 @@ for out_ind in range(nouter):
 			else: params = pointsrcs.read(param["params"])
 			params = pointsrcs.src2param(params)
 			params = params.astype(np.float64)
-			print "FIXME: how to handle per-source beams? Forcing to relative for now"
-			params[:,5:7] = 1
-			params[:,7]   = 0
+			# Ignore any per-source beam information. It's not supported.
+			params[:,5:7] = 1; params[:,7]   = 0
 			filter = mapmaking.FilterAddSrcs(myscans, params, sys=param["sys"], mul=-float(param["mul"]))
+			output_srcmodel = True
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 		# Add to normal filters of post-noise-model filters based on parameters
@@ -537,6 +540,42 @@ for out_ind in range(nouter):
 
 	L.info("Writing preconditioners")
 	mapmaking.write_precons(signals, root)
+
+	L.info("Computing crosslink map")
+	for param, signal in zip(signal_params, signals):
+		if param["type"] in ["map","bmap","fmap"]:
+			cmap  = enmap.zeros((1,)+signal.area.shape, signal.area.wcs, signal.area.dtype)
+		elif param["type"] in ["dmap"]:
+			geom  = signal.area.geometry.copy()
+			geom.pre = (1,)+geom.pre
+			cmap  = dmap.zeros(geom)
+		else: continue
+		mapmaking.calc_crosslink_map(cmap, signal, signal_cut, myscans, weights)
+		signal.write(root, "crosslink", cmap[0])
+		del cmap
+
+	# Map-space source model computation only works in systems that have a
+	# non-time-dependent transformation to cel. It also assumes that every
+	# tod has the same point source parameters. Here, we will assume that
+	# this applies to the "sky" component, and only this component.
+	if output_srcmodel:
+		for param, signal in zip(signal_params, signals):
+			if param["name"] != "sky": continue
+			L.info("Computing point source map")
+			if param["type"] in ["map","bmap","fmap"]:
+				if comm.rank == 0:
+					srcmap = pointsrcs.sim_srcs(signal.area.shape, signal.area.wcs,
+							myscans[0].pointsrcs, myscans[0].beam, dtype=signal.area.dtype)
+					signal.write(root, "srcs", srcmap)
+					del srcmap
+			elif param["type"] in ["dmap"]:
+				geom  = signal.area.geometry.copy()
+				srcmap  = dmap.zeros(geom)
+				for tile in srcmap.tiles:
+					pointsrcs.sim_srcs(tile.shape, tile.wcs, myscans[0].pointsrcs,
+							myscans[0].beam, omap=tile)
+				signal.write(root, "srcs", srcmap)
+				del srcmap
 
 	L.info("Writing RHS")
 	eqsys.write(root, "rhs", eqsys.b)

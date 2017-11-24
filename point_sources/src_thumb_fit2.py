@@ -4,23 +4,21 @@ from enlib import utils, mpi, fft, enmap, bunch, coordinates
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("odir")
-parser.add_argument("-B", "--beam",    type=str,   default="1.3")
-parser.add_argument("-m", "--method",  type=str,   default="mlg")
-parser.add_argument("-b", "--burnin",  type=int,   default=120)
-parser.add_argument("-t", "--thin",    type=int,   default=3)
-parser.add_argument("-n", "--nsamp",   type=int,   default=200)
-parser.add_argument("-v", "--verbose", action="count", default=0)
-parser.add_argument("-q", "--quiet",   action="count", default=0)
-parser.add_argument("-g", "--grid-res",type=float, default=0.5*utils.arcmin)
-parser.add_argument("-M", "--minimaps",action="store_true")
-parser.add_argument("-c", "--cont-from",type=str,  default=None)
-parser.add_argument("-i", "--individual",action="store_true")
-parser.add_argument("-p", "--prior",   type=str,   default="semifix")
+parser.add_argument("-B", "--beam",      type=str,   default="1.3")
+parser.add_argument("-m", "--method",    type=str,   default="mlg")
+parser.add_argument("-n", "--nsamp",     type=int,   default=1000)
+parser.add_argument("-v", "--verbose",   action="count", default=0)
+parser.add_argument("-q", "--quiet",     action="count", default=0)
+parser.add_argument("-g", "--grid-res",  type=float, default=0.5)
+parser.add_argument("-M", "--minimaps",  action="store_true")
+parser.add_argument("-p", "--prior",      type=str,   default="semifix")
+parser.add_argument("-N", "--num-walker", type=int,   default=10)
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
 utils.mkdir(args.odir)
-verbosity = args.verbose - args.quiet
+verbosity  = args.verbose - args.quiet
+num_walker = args.num_walker
 
 # Set up beam
 try:
@@ -162,6 +160,18 @@ def map_likelihood(likfun, rmax=5*utils.arcmin, res=0.7*utils.arcmin):
 			map[y,x] = likfun(pos[:,y,x]/utils.arcmin)
 	return map
 
+def draw_positions(loglikmap, nwalker):
+	lik  = np.exp(-0.5*(loglikmap-np.min(loglikmap)))
+	lik /= np.sum(lik)
+	cum  = np.cumsum(lik.reshape(-1))
+	ipos = np.searchsorted(cum, np.random.uniform(0,1,size=nwalker))
+	ipos = np.array(np.unravel_index(ipos, lik.shape),dtype=float)
+	# We now have an integer pixel position. Scatter us randomly
+	# inside it
+	ipos += np.random.uniform(-0.5,0.5,size=(2,nwalker))
+	pos   = lik.pix2sky(ipos).T
+	return pos
+
 # Sampling large-amplitude fixed templates with monte carlo will very easily get
 # stuck in local minima. This is because a 1 sigma fluctuation in noise on top of
 # N-sigma amplitude template will result in a chisquare contribution of (N+1)**2
@@ -175,9 +185,9 @@ def map_likelihood(likfun, rmax=5*utils.arcmin, res=0.7*utils.arcmin):
 # minimum, and then sample around that.
 
 class Sampler:
-	def __init__(self, likfun, x0, npoint=3, scatter=1.0*utils.arcmin, stepscale=2.0, nsamp=200, burn_frac=0.5, verbose=False):
+	def __init__(self, likfun, x0, stepscale=2.0, nsamp=200, burn_frac=0.5, verbose=False):
 		self.likfun  = likfun
-		self.points  = x0 + np.random.uniform(-scatter,scatter,size=(npoint,2))
+		self.points  = pos
 		self.likvals = [likfun.full(p/utils.arcmin) for p in self.points]
 		self.next_points  = self.points.copy()
 		self.next_likvals = list(self.likvals)
@@ -319,14 +329,15 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 		print "src %4d ra %8.3f dec %8.3f amp %8.3f" % (src["sid"], src["ra"], src["dec"], src["amp"]/1e3)
 
 	# Find out starting point by gridding out the position likelihood coarsly
-	likmap  = map_likelihood(lik)
-	pos     = enmap.argmin(likmap)
+	likmap  = map_likelihood(lik, res=args.grid_res*utils.arcmin)
+	pos     = draw_positions(likmap, num_walker)
+	print pos/utils.arcmin
 	# Sample to get some statistics
-	sampler = Sampler(lik, pos, scatter=1e-2*utils.arcmin, verbose=verbosity>0)
+	sampler = Sampler(lik, pos, nsamp=args.nsamp, verbose=verbosity>0)
 	stats   = sampler.build_stats()
 	# But find the ML point exactly, so we don't have to waste too many samples
 	pos_ml  = optimize.fmin_powell(lik, stats.pos/utils.arcmin, disp=0)*utils.arcmin
-	stats.pos = pos_ml
+	stats.pos_ml = pos_ml
 
 	# Output to stdout and to our indiviudal files
 	msg     = format_stats(stats, thumb_data)

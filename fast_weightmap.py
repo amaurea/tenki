@@ -133,6 +133,7 @@ omap = utils.allreduce(omap, comm)
 if comm.rank == 0:
 	pixarea = omap.pixsizemap() / utils.arcmin**2
 	omap   /= pixarea
+	omap[~np.isfinite(omap)] = 0
 	omap    = smooth_tophat(omap, rad)
 	omap[omap<1e-3] = 0
 	enmap.write_map(args.omap, omap)

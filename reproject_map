@@ -10,6 +10,7 @@ parser.add_argument("-n", "--ncomp", type=int, default=None, help="The number of
 parser.add_argument("-H", "--hdu",   type=int, default=None, help="The HDU to read the map from. 0 by default.")
 parser.add_argument("-r", "--rot",   type=str, default=None, help="Coordinate transformation to perform while interpolation. By default no rotation is performed. Takes the form isys,osys, where either can be cel, gal or ecl for celestial (equatorial), galactic or ecliptic coordinates respectively. For example -r gal,cel would transform from an input map in galactic coordinates to an output map in equatorial coordinates.")
 parser.add_argument("-O", "--order", type=int, default=3, help="Interpolation order. Defaults to bicubic spline interpolation (3)."),
+parser.add_argument("-l", "--lmax",  type=int, default=None)
 parser.add_argument("-v",      action="count", default=1, help="Increase verbosity.")
 parser.add_argument("-q",      action="count", default=0, help="Decrease verbosity.")
 parser.add_argument("--nopol", action="store_true", help="Do not perform any polarization rotation.")
@@ -82,7 +83,7 @@ else:
 	with printer.time("prepare SHT", 1):
 		pol   = ncomp == 3 and not args.nopol
 		nside = healpy.npix2nside(imap.shape[1])
-		lmax  = 3*nside
+		lmax  = args.lmax or 3*nside
 		minfo = sharp.map_info_healpix(nside)
 		ainfo = sharp.alm_info(lmax)
 		sht   = sharp.sht(minfo, ainfo)

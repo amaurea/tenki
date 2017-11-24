@@ -9,8 +9,9 @@ parser.add_argument("area")
 parser.add_argument("sel")
 parser.add_argument("odir")
 parser.add_argument("tag", nargs="?")
-parser.add_argument("-R", "--dist", type=float, default=0.2)
+parser.add_argument("-R", "--dist",    type=float, default=0.2)
 parser.add_argument("-e", "--equator", action="store_true")
+parser.add_argument("-c", "--cont",    action="store_true")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -35,6 +36,10 @@ for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
 	bid   = id.replace(":","_")
 	entry = filedb.data[id]
+	oname = "%s%s_map.fits" % (prefix, bid)
+	if args.cont and os.path.isfile(oname):
+		print "Skipping %s (already done)" % (id)
+		continue
 	# Read the tod as usual
 	try:
 		with bench.show("read"):
@@ -65,7 +70,6 @@ for ind in range(comm.rank, len(ids), comm.size):
 		model= gapfill.gapfill_joneig(tod, planet_cut, inplace=False)
 	# Estimate noise level
 	asens = np.sum(ivar)**-0.5 / d.srate**0.5
-	print asens
 	with bench.show("smooth"):
 		ft   = fft.rfft(model)
 		freq = fft.rfftfreq(model.shape[-1])*d.srate
@@ -108,6 +112,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 	mcent = map[:,c[0]-crad:c[0]+crad,c[1]-crad:c[1]+crad]
 	mcent = enmap.downgrade(mcent, 4)
 	amp   = np.max(mcent)
+	print amp, asens
 	print "%s amp %7.3f asens %7.3f" % (id, amp/1e6, asens)
 	with bench.show("write"):
 		enmap.write_map("%s%s_map.fits" % (prefix, bid), map)

@@ -35,8 +35,8 @@ comm  = mpi.COMM_WORLD
 ncomp = args.ncomp
 utils.mkdir(args.odir)
 
-config  = jointmap.read_config(args.config)
-datsets = jointmap.get_datasets(config, args.sel)
+config   = jointmap.read_config(args.config)
+datasets = jointmap.get_datasets(config, args.sel)
 # Get the reference beam, which is the biggest beam at each l
 ref_beam = datasets[0].beam
 for dataset in datasets[1:]:
@@ -52,6 +52,7 @@ if args.template is None:
 			apod_val=args.apod_val, apod_alpha=args.apod_alpha, apod_edge=args.apod_edge,
 			filter_kxrad=args.kxrad, filter_kx_ymax_scale=args.kx_ymax_scale, filter_highpass=args.highpass)
 	if args.slice: coadder.set_slice(args.slice)
+	coadder.calc_precon()
 	coadder.calc_rhs()
 	res = coadder.solve(verbose=True, cg_tol=args.cg_tol, dump_dir=args.odir, maxiter=args.maxiter)
 	if res is None: print "No data found"
@@ -82,6 +83,7 @@ else:
 					apod_val=args.apod_val, apod_alpha=args.apod_alpha, apod_edge=args.apod_edge,
 					filter_kxrad=args.kxrad, filter_kx_ymax_scale=args.kx_ymax_scale, filter_highpass=args.highpass)
 			if args.slice: coadder.set_slice(args.slice)
+			coadder.calc_precon()
 			coadder.calc_rhs()
 			res = coadder.solve(verbose=True, cg_tol=args.cg_tol, maxiter=args.maxiter,
 					dump_dir = args.odir if comm.rank==0 else None)

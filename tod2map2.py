@@ -8,6 +8,7 @@ from enact import actscan, nmat_measure, filedb, todinfo
 
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
+config.default("hwp_resample", False, "Whether to resample the TOD to make the HWP equispaced")
 config.default("map_cg_nmax", 500, "Max number of CG steps to perform in map-making")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("task_dist", "size", "How to assign scans to each mpi task. Can be 'plain' for comm.rank:n:comm.size-type assignment, 'size' for equal-total-size assignment. The optimal would be 'time', for equal total time for each, but that's not implemented currently.")
@@ -32,6 +33,7 @@ config.default("filter_scan_default",  "use=no,name=scan,value=1,daz=3,nt=10,nhw
 config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
+config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
 config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
 
 config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
@@ -171,7 +173,7 @@ filter_params = setup_params("filter", ["scan","sub"], {"use":"no"})
 L.info("Reading %d scans" % len(filelist))
 myinds = np.arange(len(filelist))[comm.rank::comm.size]
 myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
-		db, dets=args.dets, downsample=config.get("downsample"))
+		db, dets=args.dets, downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
 
 # Collect scan info. This currently fails if any task has empty myinds
 read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]
@@ -228,7 +230,7 @@ else:
 # would require lots of code.
 L.info("Rereading shuffled scans")
 myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
-		db, dets=args.dets, downsample=config.get("downsample"))
+		db, dets=args.dets, downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
 
 # I would like to be able to do on-the-fly nmat computation.
 # However, preconditioners depend on the noise matrix.
@@ -391,6 +393,9 @@ for out_ind in range(nouter):
 			mode = int(param["value"])
 			if mode == 0: continue
 			filter = mapmaking.FilterCommonBlockwise()
+		elif param["name"] == "hwp":
+			nmode = int(param["value"])
+			filter = mapmaking.FilterHWPNotch(nmode)
 		elif param["name"] == "sub":
 			if "map" not in param: raise ValueError("-F sub needs a map file to subtract. e.g. -F sub:2,map=foo.fits")
 			mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])

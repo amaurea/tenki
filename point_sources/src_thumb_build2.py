@@ -7,8 +7,9 @@ from astropy.io import fits
 from enlib import utils, config, mpi, errors, sampcut, gapfill, cg
 from enlib import pmat, coordinates, enmap, bench, bunch
 from enact import filedb, actdata, actscan, nmat_measure
-config.default("pmat_accuracy", 10.0, "Factor by which to lower accuracy requirement in pointing interpolation. 1.0 corresponds to 1e-3 pixels and 0.1 arc minute in polangle")
+config.default("pmat_accuracy", 20.0, "Factor by which to lower accuracy requirement in pointing interpolation. 1.0 corresponds to 1e-3 pixels and 0.1 arc minute in polangle")
 config.default("pmat_interpol_max_size", 1000000, "Maximum mesh size in pointing interpolation. Worst-case time and memory scale at most proportionally with this.")
+config.default("gapfill", "linear", "TOD gapfill method. Can be 'copy', 'linear' or 'cubic'")
 parser = config.ArgumentParser(os.environ["HOME"] + "./enkirc")
 parser.add_argument("srclist")
 parser.add_argument("sel")
@@ -136,10 +137,10 @@ for ind in range(comm.rank, len(ids), comm.size):
 	ename = oname + ".empty"
 	if args.cont:
 		if os.path.exists(oname):
-			print "%s is done: skipping" % id
+			print "%5d/%d %s is done: skipping" % (ind+1, len(ids), id)
 			continue
 		if os.path.exists(ename):
-			print "%s already failed: skipping" % id
+			print "%5d/%d %s already failed: skipping" % (ind+1, len(ids), id)
 			continue
 
 	# Check if we hit any of the sources. We first make sure
@@ -152,10 +153,10 @@ for ind in range(comm.rank, len(ids), comm.size):
 	sids      = np.where(utils.point_in_polygon(srcpos.T, poly.T))[0]
 	sids      = np.array(sorted(list(set(sids)&allowed)))
 	if len(sids) == 0:
-		print "%s has 0 srcs: skipping" % id
+		print "%5d/%d %s has 0 srcs: skipping" % (ind+1, len(ids), id)
 		continue
 	nsrc = len(sids)
-	print "%s has %d srcs: %s" % (id,nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])]))
+	print "%5d/%d %s has %d srcs: %s" % (ind+1, len(ids), id,nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])]))
 
 	def skip(msg):
 		print "%s skipped: %s" % (id, msg)
@@ -164,9 +165,9 @@ for ind in range(comm.rank, len(ids), comm.size):
 
 	entry = filedb.data[id]
 	try:
-		with bench.mark("read"):
+		with bench.show("read"):
 			d = actdata.read(entry)
-		with bench.mark("calib"):
+		with bench.show("calib"):
 			d = actdata.calibrate(d, exclude=["autocut"])
 		if d.ndet < 2 or d.nsamp < 1: raise errors.DataMissing("no data in tod")
 	except errors.DataMissing as e:
@@ -195,7 +196,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 	pmaps = []
 	failed = False
 	for sys in syss:
-		pmap = PmatTot(scan, area, sys=sys)
+		with bench.show("PmatTot"):
+			pmap = PmatTot(scan, area, sys=sys)
 		err  = np.max(pmap.err[:2])
 		if err > min_accuracy:
 			failed = True
@@ -222,43 +224,45 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# hD m = C" hD" rhs
 	# lik = (w - hC hD Pa)**2, w = hC hD hD" C" hD" rhs = hC" hD" rhs
 
-	rhss  = enmap.zeros((nsrc,)+shape, wcs, dtype)
-	divs  = enmap.zeros((nsrc,)+shape, wcs, dtype)
-	work  = enmap.zeros((3,)   +shape, wcs, dtype)
-	nmat.apply(tod)
-	for i, pmap in enumerate(pmaps):
-		pmaps[i].backward(tod, work, mmul=0)
-		rhss[i] += work[0]
-	tod[:] = 1.0
-	nmat.white(tod)
-	for i, pmap in enumerate(pmaps):
-		pmaps[i].backward(tod, work, mmul=0)
-		divs[i] += work[0]
-	# Mask unexposed sources
-	hit = np.sum(divs>0,(1,2)) > divs.shape[1]*divs.shape[2]*0.25
-	if np.sum(hit) == 0:
-		skip("No sources actually hit")
-		continue
-	sids  = sids[hit]
-	nsrc  = len(sids)
-	rhss  = rhss[hit]
-	divs  = divs[hit]
-	pmaps = [p for i,p in enumerate(pmaps) if hit[i]]
+	with bench.show("rhs"):
+		rhss  = enmap.zeros((nsrc,)+shape, wcs, dtype)
+		divs  = enmap.zeros((nsrc,)+shape, wcs, dtype)
+		work  = enmap.zeros((3,)   +shape, wcs, dtype)
+		nmat.apply(tod)
+		for i, pmap in enumerate(pmaps):
+			pmaps[i].backward(tod, work, mmul=0)
+			rhss[i] += work[0]
+		tod[:] = 1.0
+		nmat.white(tod)
+		for i, pmap in enumerate(pmaps):
+			pmaps[i].backward(tod, work, mmul=0)
+			divs[i] += work[0]
+		# Mask unexposed sources
+		hit = np.sum(divs>0,(1,2)) > divs.shape[1]*divs.shape[2]*0.25
+		if np.sum(hit) == 0:
+			skip("No sources actually hit")
+			continue
+		sids  = sids[hit]
+		nsrc  = len(sids)
+		rhss  = rhss[hit]
+		divs  = divs[hit]
+		pmaps = [p for i,p in enumerate(pmaps) if hit[i]]
 
-	corrs  = enmap.zeros((nsrc,)+shape, wcs, dtype)
-	chits  = np.zeros(nsrc)
-	ref_pixs = find_ref_pixs(divs)
-	for i in range(nref):
-		corr = measure_corr(pmaps, nmat, divs, tod, ref_pixs[i])
-		for i in range(nsrc):
-			if corr[i, 0,0] < 0.1: continue
-			corrs[i] += corr[i]
-			chits[i] += 1
-	if np.any(chits==0):
-		skip("Failed to measure correlations")
-		continue
-	corrs /= chits[:,None,None]
-	del tod
+	with bench.show("measure corr"):
+		corrs  = enmap.zeros((nsrc,)+shape, wcs, dtype)
+		chits  = np.zeros(nsrc)
+		ref_pixs = find_ref_pixs(divs)
+		for i in range(nref):
+			corr = measure_corr(pmaps, nmat, divs, tod, ref_pixs[i])
+			for i in range(nsrc):
+				if corr[i, 0,0] < 0.1: continue
+				corrs[i] += corr[i]
+				chits[i] += 1
+		if np.any(chits==0):
+			skip("Failed to measure correlations")
+			continue
+		corrs /= chits[:,None,None]
+		del tod
 
 	# Write as enmap + fits table
 	omap = enmap.samewcs([rhss, divs, corrs], rhss)

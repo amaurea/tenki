@@ -1,10 +1,13 @@
-import numpy as np, time, h5py, copy, argparse, os, sys, pipes, shutil, re
-from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, errors, mpi
+import numpy as np, time, copy, argparse, os, sys, pipes, shutil, re
+from enlib import utils
+with utils.nowarn(): import h5py
+from enlib import enmap, pmat, fft, config, array_ops, mapmaking, nmat, errors, mpi
 from enlib import log, bench, dmap, coordinates, scan as enscan, scanutils
 from enlib import pointsrcs, bunch
 from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import actscan, nmat_measure, filedb, todinfo
+from enact import actdata
 
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
@@ -35,6 +38,10 @@ config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sk
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
 config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
+
+config.default("crossmap", True,  "Whether to output the crosslinking map")
+config.default("icovmap",  True, "Whether to output the inverse correlation map")
+config.default("icovstep",    3, "Physical degree interval between inverse correlation measurements in icovmap")
 
 config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
 
@@ -546,18 +553,34 @@ for out_ind in range(nouter):
 	L.info("Writing preconditioners")
 	mapmaking.write_precons(signals, root)
 
-	L.info("Computing crosslink map")
 	for param, signal in zip(signal_params, signals):
-		if param["type"] in ["map","bmap","fmap"]:
-			cmap  = enmap.zeros((1,)+signal.area.shape, signal.area.wcs, signal.area.dtype)
-		elif param["type"] in ["dmap"]:
-			geom  = signal.area.geometry.copy()
-			geom.pre = (1,)+geom.pre
-			cmap  = dmap.zeros(geom)
-		else: continue
-		mapmaking.calc_crosslink_map(cmap, signal, signal_cut, myscans, weights)
-		signal.write(root, "crosslink", cmap[0])
-		del cmap
+		if config.get("crossmap"):
+			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
+			L.info("Computing crosslink map")
+			cmap = mapmaking.calc_crosslink_map2(signal, signal_cut, myscans, weights)
+			signal.write(root, "crosslink", cmap)
+			del cmap
+		if config.get("icovmap"):
+			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
+			L.info("Computing icov map")
+			shape, wcs = signal.area.shape, signal.area.wcs
+			# corner=False to avoid WCS breakdown at the very edge for maps spanning 360 degrees
+			box  = np.sort(enmap.box(shape, wcs, corner=False),0)
+			step = config.get("icovstep")*utils.degree
+			pos  = []
+			for dec in np.arange(box[0,0]+step/2, box[1,0]-step/4, step):
+				rstep = step/np.cos(dec)
+				for ra in np.arange(box[0,1]+rstep/2, box[1,1]-rstep/4, rstep):
+					pos.append(enmap.sky2pix(shape, wcs, [dec,ra]))
+			pos = np.floor(pos).astype(int)
+			if pos.size == 0:
+				L.debug("Error computing icov pixel positions. Skipping icov")
+				continue
+			icov = mapmaking.calc_icov_map(signal, myscans, pos, weights)
+			signal.write(root, "icov", icov)
+			if comm.rank == 0:
+				np.savetxt(root + signal.name + "_icov_pix.txt", pos, "%6d %6d")
+			del icov
 
 	# Map-space source model computation only works in systems that have a
 	# non-time-dependent transformation to cel. It also assumes that every

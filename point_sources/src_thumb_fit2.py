@@ -310,8 +310,9 @@ def format_stats(stats, data):
 # be too small, thus repeating the overconfidence problem. That happens if the fiducial amplitude
 # is significantly higher than the actual ones.
 
-f = mpi.File.Open(comm, args.odir + "/fits.txt", mpi.MODE_WRONLY | mpi.MODE_CREATE)
-f.Set_atomicity(True)
+f = open(args.odir + "/fits_%03d.txt" % comm.rank, "w")
+#f = mpi.File.Open(comm, args.odir + "/fits.txt", mpi.MODE_WRONLY | mpi.MODE_CREATE)
+#f.Set_atomicity(True)
 
 for ind in range(comm.rank, len(args.ifiles), comm.size):
 	print ind
@@ -341,7 +342,9 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 
 	# Output to stdout and to our indiviudal files
 	msg     = format_stats(stats, thumb_data)
-	mpiwrite(f, msg + "\n")
+	f.write(msg + "\n")
+	f.flush()
+	#mpiwrite(f, msg + "\n")
 	print msg
 	sys.stdout.flush()
 
@@ -365,4 +368,4 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	#	sampler = Sampler(lik, verbose=True)
 	#	stats   = sampler.build_stats()
 
-f.Close()
+f.close()

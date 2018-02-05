@@ -1,5 +1,5 @@
 import numpy as np, argparse, os
-from enlib import enmap, utils, powspec, jointmap, bunch
+from enlib import enmap, utils, powspec, jointmap, bunch, mpi
 parser = argparse.ArgumentParser()
 parser.add_argument("config")
 parser.add_argument("sel",  nargs="?", default=None)
@@ -9,6 +9,7 @@ parser.add_argument("-m", "--mode",   type=str,   default="pstrc")
 parser.add_argument("-s", "--scale",  type=float, default=1.0)
 parser.add_argument("-t", "--tsize",  type=int,   default=360)
 parser.add_argument("-p", "--pad",    type=int,   default=60)
+parser.add_argument("-c", "--cont",   action="store_true")
 args = parser.parse_args()
 
 config  = jointmap.read_config(args.config)
@@ -17,6 +18,7 @@ tsize   = args.tsize # pixels
 pad     = args.pad   # pixels
 dtype   = np.float64
 ncomp   = 1
+comm    = mpi.COMM_WORLD
 utils.mkdir(args.odir)
 
 # Get the set of bounding boxes, after normalizing them
@@ -48,14 +50,14 @@ def parse_bounds(bstr):
 
 def get_filtered_tile(mapinfo, box, mode="ptsrc", scale=1.0, dump_dir=None, verbose=False):
 	if not overlaps_any(box, boxes): return None
-	mapset = mapinfo.read(box, pad=pad, dtype=dtype)
+	mapset = mapinfo.read(box, pad=pad, dtype=dtype, verbose=verbose)
 	if mapset is None: return None
 	jointmap.sanitize_maps(mapset)
 	jointmap.build_noise_model(mapset)
 	if len(mapset.datasets) == 0: return None
 	jointmap.setup_background_cmb(mapset, cl_bg)
 	jointmap.setup_beams(mapset)
-	if   mode == "pstrc":
+	if   mode == "ptsrc":
 		jointmap.setup_profiles_ptsrc(mapset)
 	elif mode == "sz":
 		jointmap.setup_profiles_sz(mapset, scale)
@@ -80,7 +82,7 @@ def get_filtered_tile(mapinfo, box, mode="ptsrc", scale=1.0, dump_dir=None, verb
 bounds = parse_bounds(args.area)
 if bounds is None:
 	# Tiled, so read geometry
-	shape, wcs = jointmap.read_geometry(args.template)
+	shape, wcs = jointmap.read_geometry(args.area)
 	shape  = shape[-2:]
 	tshape = np.array([args.tsize,args.tsize])
 	ntile  = np.floor((shape[-2:]+tshape-1)/tshape).astype(int)
@@ -95,9 +97,9 @@ if bounds is None:
 		tpos = np.array(tyx[i])
 		pbox = np.array([tpos*tshape,np.minimum((tpos+1)*tshape,shape[-2:])])
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
-		res  = get_filtered_tile(mapinfo, box, args.mode, args.scale)
-		omap = res.snmap if res is not None else make_dummy_tile(shape, wcs, box, pad=pad).map
-		enmap.write_map(ofile, dummy)
+		res  = get_filtered_tile(mapinfo, box, args.mode, args.scale, verbose=False)
+		omap = res.snmap if res is not None else jointmap.make_dummy_tile(shape, wcs, box, pad=pad, dtype=dtype).map
+		enmap.write_map(ofile, omap)
 else:
 	# Single arbitrary tile
 	if not overlaps_any(bounds, boxes):

@@ -37,7 +37,7 @@ utils.mkdir(args.odir)
 
 config   = jointmap.read_config(args.config)
 datasets = jointmap.get_datasets(config, args.sel)
-# Get the reference beam, which is the biggest beam at each l
+# Get the reference beam, which is the highest beam at each l
 ref_beam = datasets[0].beam
 for dataset in datasets[1:]:
 	ref_beam = np.maximum(ref_beam, dataset.beam)

@@ -7,7 +7,7 @@ parser.add_argument("sel",  nargs="?", default=None)
 parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("-t", "--tsize",  type=int,   default=480)
-parser.add_argument("-p", "--pad",    type=int,   default=120)
+parser.add_argument("-p", "--pad",    type=int,   default=240)
 parser.add_argument("-c", "--cont",   action="store_true")
 args = parser.parse_args()
 
@@ -55,6 +55,7 @@ def get_coadded_tile(mapinfo, box, dump_dir=None, verbose=False):
 	if len(mapset.datasets) == 0: return None
 	jointmap.setup_background_cmb(mapset, cl_bg)
 	jointmap.setup_beams(mapset)
+	jointmap.setup_target_beam(mapset)
 
 	coadder = jointmap.Coadder(mapset)
 	rhs     = coadder.calc_rhs()
@@ -87,7 +88,7 @@ if bounds is None:
 		tpos = np.array(tyx[i])
 		pbox = np.array([tpos*tshape,np.minimum((tpos+1)*tshape,shape[-2:])])
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
-		res  = get_coadded_tile(mapinfo, box, args.mode, args.scale, verbose=False)
+		res  = get_coadded_tile(mapinfo, box, verbose=False)
 		if res is None: res = jointmap.make_dummy_tile(shape, wcs, box, pad=pad, dtype=dtype)
 		enmap.write_map(ofile_map, res.map)
 		enmap.write_map(ofile_div, res.div)
@@ -96,6 +97,6 @@ else:
 	if not overlaps_any(bounds, boxes):
 		print "No data in selected region"
 	else:
-		res = get_coadded_tile(mapinfo, bounds, args.mode, args.scale, args.odir, verbose=True)
+		res = get_coadded_tile(mapinfo, bounds, args.odir, verbose=True)
 		enmap.write_map(args.odir + "/map.fits", res.map)
 		enmap.write_map(args.odir + "/div.fits", res.div)

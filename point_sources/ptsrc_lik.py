@@ -1,4 +1,4 @@
-import numpy as np, argparse, os
+import numpy as np, argparse, os, time
 from enlib import enmap, utils, powspec, jointmap, bunch, mpi
 from scipy import interpolate, ndimage
 parser = argparse.ArgumentParser()
@@ -61,7 +61,7 @@ def spec_2d_to_1d(spec2d):
 	return np.exp(interpolate.splev(np.arange(0, lmax), spline))
 
 
-def get_filtered_tile(mapinfo, box, signals=["ptsrc","sz"], dump_dir=None, verbose=False):
+def eval_tile(mapinfo, box, signals=["ptsrc","sz"], dump_dir=None, verbose=False):
 	if not overlaps_any(box, boxes): return None
 	# Read the data and set up the noise model
 	if verbose: print "Reading data"
@@ -75,41 +75,20 @@ def get_filtered_tile(mapinfo, box, signals=["ptsrc","sz"], dump_dir=None, verbo
 	jointmap.setup_beams(mapset)
 	jointmap.setup_background_cmb(mapset, cl_bg)
 
-	# Compute the mu maps. This is a heavy step, but once done they can be
-	# used to quicly compute filtered maps for different signal profiles
-	if verbose: print "Computing mu"
-	signal_filter = jointmap.SignalFilter(mapset)
-	rhs     = signal_filter.calc_rhs()
-	mu      = signal_filter.calc_mu(rhs, dump_dir=dump_dir, verbose=verbose)
+	# Analyze this tile
+	finder = jointmap.SourceSZFinder(mapset)
+	cand_classes = finder.find_candidates(10)
+	for cands in cand_classes[1:]:
+		#cands = bunch.Bunch(pix=[[200,500]], pos=[[1,1]], sn=[0], npix=[0], n=1)
+		for ci in range(cands.n)[3:]:
+			lik   = finder.get_likelihood(cands.pix[ci], cands.name)
+			ml    = lik.maximize(verbose=True)
+			stats = lik.explore(ml.x, verbose=True, nsamp=50)
+			stats.posterior = ml.posterior
+			print "Final stats"
+			print lik.format_sample(stats)
+			print "cand %2d had S/N %5.1f. Fid pos: %6.2f %6.2f. Assuming 10 uK noise: %6.2f" % (ci, cands.sn[ci], cands.pos[ci,0]/utils.degree, cands.pos[ci,1]/utils.degree, cands.sn[ci]*10)
 
-	# Handle each signal
-	res = bunch.Bunch(rhs=rhs, mu=mu, signals=[])
-	for si, signal in enumerate(signals):
-		toks = signal.split(":")
-		signame, params = toks[0], toks[1:]
-		if   signame == "ptsrc":
-			jointmap.setup_profiles_ptsrc(mapset)
-		elif signame == "sz":
-			scale = 0.5 if len(params) == 0 else float(params[0])
-			jointmap.setup_profiles_sz(mapset, scale)
-		else: raise ValueError("Unknown signal '%s'" % signal)
-		if verbose: print "Computing %s" % signal
-
-		# Actually produce the filtered map
-		alpha  = signal_filter.calc_alpha(mu)
-		dalpha = signal_filter.calc_dalpha_empirical(alpha)
-		snmap  = jointmap.div_nonan(alpha, dalpha)
-
-		# Try to find candidate positions
-		if verbose:
-			cands  = jointmap.find_candidates(snmap, edge=mapset.apod_edge)
-			print "Candidates"
-			for i in range(len(cands.sn)):
-				print "%3d %6.1f %6.1f %8.3f %8.3f %8.3f %3d" % (i+1, cands.pix[i,0], cands.pix[i,1], cands.pos[i,0]/utils.degree, cands.pos[i,1]/utils.degree, cands.sn[i], cands.npix[i])
-
-		res.signals.append(bunch.Bunch(
-			snmap=snmap, alpha=alpha, dalpha=dalpha, name=signal.replace(":","_"),
-		))
 	return res
 
 # We have two modes, depending on what args.area is.
@@ -137,7 +116,7 @@ if bounds is None:
 		tpos = np.array(tyx[i])
 		pbox = np.array([tpos*tshape,np.minimum((tpos+1)*tshape,shape[-2:])])
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
-		res  = get_filtered_tile(mapinfo, box, signals, verbose=False)
+		res  = eval_tile(mapinfo, box, signals, verbose=False)
 		for si, tag in enumerate(tags):
 			if res is not None:
 				snmap = res.signals[si].snmap
@@ -149,7 +128,7 @@ else:
 	if not overlaps_any(bounds, boxes):
 		print "No data in selected region"
 	else:
-		res = get_filtered_tile(mapinfo, bounds, signals, verbose=True)
+		res = eval_tile(mapinfo, bounds, signals, verbose=True)
 		for i, sig in enumerate(res.signals):
 			enmap.write_map(args.odir + "/%s_snmap.fits"  % sig.name, sig.snmap)
 			enmap.write_map(args.odir + "/%s_alpha.fits"  % sig.name, sig.alpha)

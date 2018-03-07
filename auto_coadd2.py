@@ -59,10 +59,11 @@ def get_coadded_tile(mapinfo, box, dump_dir=None, verbose=False):
 
 	coadder = jointmap.Coadder(mapset)
 	rhs     = coadder.calc_rhs()
-	map     = coadder.calc_coadd(rhs, dump_dir=dump_dir, verbose=verbose)
+	map     = coadder.calc_coadd(rhs, dump_dir=dump_dir, verbose=verbose)#, maxiter=1)
 	div     = coadder.tot_div
+	#C       = 1/mapset.datasets[0].iN
 
-	res = bunch.Bunch(rhs=rhs, map=map, div=div)
+	res = bunch.Bunch(rhs=rhs, map=map, div=div)#, C=C)
 	return res
 
 # We have two modes, depending on what args.area is.
@@ -100,3 +101,4 @@ else:
 		res = get_coadded_tile(mapinfo, bounds, args.odir, verbose=True)
 		enmap.write_map(args.odir + "/map.fits", res.map)
 		enmap.write_map(args.odir + "/div.fits", res.div)
+		#enmap.write_map(args.odir + "/C.fits",   res.C)

@@ -13,6 +13,7 @@ parser.add_argument("-p", "--pad",       type=int,   default=60)
 parser.add_argument("-v", "--verbose",               action="count", default=3)
 parser.add_argument("-q", "--quiet",                 action="count", default=0)
 parser.add_argument("-c", "--cont",                  action="store_true")
+parser.add_argument("-P", "--npass",     type=int,   default=3)
 parser.add_argument("--output-full-model",           action="store_true")
 args = parser.parse_args()
 
@@ -82,7 +83,7 @@ def eval_tile(mapinfo, box, signals=["ptsrc","sz"], dump_dir=None, verbosity=1):
 
 	# Analyze this tile. It's best to loop manually, as that lets us
 	# output maps gradually
-	finder  = jointmap.SourceSZFinder2(mapset, snmin=4)
+	finder  = jointmap.SourceSZFinder3(mapset, snmin=4, npass=args.npass)
 	info    = finder.analyze(verbosity=verbosity-2)
 	return info
 

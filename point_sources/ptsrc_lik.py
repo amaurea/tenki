@@ -13,12 +13,13 @@ parser.add_argument("-t", "--tsize",     type=int,   default=360)
 parser.add_argument("-p", "--pad",       type=int,   default=60)
 parser.add_argument("-a", "--apod-edge", type=int,   default=30)
 parser.add_argument("-S", "--nsigma",    type=float, default=4)
-parser.add_argument("-l", "--lmin",      type=float, default=0)
+parser.add_argument("-l", "--lmin",      type=float, default=1000)
 parser.add_argument("--debug-tile",      type=str,   default=None)
 parser.add_argument("--nmax",            type=int,   default=None)
 parser.add_argument("-v", "--verbose",               action="count", default=3)
 parser.add_argument("-q", "--quiet",                 action="count", default=0)
 parser.add_argument("-c", "--cont",                  action="store_true")
+parser.add_argument("-P", "--npass",     type=int,   default=3)
 parser.add_argument("--output-full-model",           action="store_true")
 args = parser.parse_args()
 
@@ -118,7 +119,7 @@ def eval_tile(mapinfo, box, signals=["ptsrc","sz"], dump_dir=None, verbosity=1):
 
 	# Analyze this tile. It's best to loop manually, as that lets us
 	# output maps gradually
-	finder  = jointmap.SourceSZFinder2(mapset, snmin=args.nsigma, nmax=args.nmax)
+	finder  = jointmap.SourceSZFinder3(mapset, snmin=args.nsigma, npass=args.npass)
 	info    = finder.analyze(verbosity=verbosity-2)
 	info.ffpad = mapset.ffpad
 	return info
@@ -137,7 +138,11 @@ def output_tile(prefix, info):
 	else:
 		enmap.write_map(prefix + "model.fits", info.model[ffpad_slice])
 	# Output total catalogue
-	table.Table(info.catalogue).write(prefix + "catalogue.fits", overwrite=True)
+	apod_slice  = (slice(args.apod_edge,-args.apod_edge), slice(args.apod_edge,-args.apod_edge))
+	shape, wcs = enmap.slice_geometry(info.model.shape, info.model.wcs, ffpad_slice[-2:])
+	shape, wcs = enmap.slice_geometry(shape, wcs, apod_slice)
+	box        = enmap.box(shape, wcs)
+	jointmap.write_catalogue(prefix + "catalogue.fits", info.catalogue, box)
 
 # We have two modes, depending on what args.area is.
 # 1. area is an enmap. Will loop over tiles in that area, and output padded tiles

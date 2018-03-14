@@ -236,6 +236,7 @@ else:
 # need to serialize and unserialize lots of data, which
 # would require lots of code.
 L.info("Rereading shuffled scans")
+del myscans # scans do take up some space, even without the tod being read in
 myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
 		db, dets=args.dets, downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
 

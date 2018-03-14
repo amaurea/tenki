@@ -88,6 +88,6 @@ else:
 			res = coadder.solve(verbose=True, cg_tol=args.cg_tol, maxiter=args.maxiter,
 					dump_dir = args.odir if comm.rank==0 else None)
 		if coadder is None or res is None:
-			res = make_dummy_tile(shape, wcs, box, pad=args.pad)
+			res = jointmap.make_dummy_tile(shape, wcs, box, pad=args.pad)
 		enmap.write_map(args.odir + "/map_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}, res.map)
 		enmap.write_map(args.odir + "/div_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}, res.div)

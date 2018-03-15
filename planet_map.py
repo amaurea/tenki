@@ -12,7 +12,6 @@ parser.add_argument("tag", nargs="?")
 parser.add_argument("-R", "--dist",    type=float, default=0.2)
 parser.add_argument("-e", "--equator", action="store_true")
 parser.add_argument("-c", "--cont",    action="store_true")
-parser.add_argument("-m", "--model",   type=str, default="joneig")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -32,30 +31,6 @@ if args.equator: sys += "/0_0"
 utils.mkdir(args.odir)
 prefix = args.odir + "/"
 if args.tag: prefix += args.tag + "_"
-
-def gapfill_nmat(tod, cut, srate, nit=4, npass=1, inplace=False, verbose=False):
-	tod   = np.asarray(tod)
-	if not inplace: tod = tod.copy()
-	with bench.show("gapfill linear", verbose):
-		gapfill.gapfill_linear(tod, cut)
-	for p in range(npass):
-		with bench.show("build nmat %d" % p, verbose):
-			ft    = fft.rfft(tod) * tod.shape[1]**-0.5
-			inmat = nmat_measure.detvecs_jon(ft, srate)
-			nmat  = inmat.calc_inverse()
-			del ft
-		for it in range(nit):
-			with bench.show("copy %d %d" % (p, it)):
-				work = tod.copy()
-			with bench.show("forward %d %d" % (p, it)):
-				inmat.apply(work)
-			with bench.show("gapfill constant %d %d" % (p, it)):
-				gapfill.gapfill_constant(work, cut)
-			with bench.show("backward %d %d" % (p, it)):
-				nmat.apply(work)
-			with bench.show("insert %d %d" % (p, it)):
-				cut.insert_sampes(tod, cut.extract_samples(work))
-	return tod
 
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
@@ -92,10 +67,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 				args.planet, R)
 	# Subtract atmospheric model
 	with bench.show("atm model"):
-		if args.model == "joneig":
-			model = gapfill.gapfill_joneig(tod, planet_cut, inplace=False)
-		elif args.model == "nmat":
-			model = gapfill_nmat(tod, planet_cut, d.srate, inplace=False, verbose=True)
+		model = gapfill.gapfill_joneig(tod, planet_cut, inplace=False)
 	# Estimate noise level
 	asens = np.sum(ivar)**-0.5 / d.srate**0.5
 	with bench.show("smooth"):

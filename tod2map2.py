@@ -519,6 +519,8 @@ for out_ind in range(nouter):
 			elif param["prec"] == "hit":
 				print "Warning: map and cut precon must have compatible units"
 				signal.precon = mapmaking.PreconMapHitcount(prec_signal, signal_cut, myscans)
+			elif param["prec"] == "tod":
+				signal.precon = mapmaking.PreconMapTod(prec_signal, signal_cut, myscans, weights)
 			else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
 			if "nohor" in param and param["nohor"] != "no":
 				prior_weight = signal.precon.div[0,0]

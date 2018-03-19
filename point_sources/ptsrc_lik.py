@@ -10,8 +10,8 @@ parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("-s", "--signals",   type=str,   default="ptsrc,sz")
 parser.add_argument("-t", "--tsize",     type=int,   default=360)
-parser.add_argument("-p", "--pad",       type=int,   default=120)
-parser.add_argument("-a", "--apod-edge", type=int,   default=60)
+parser.add_argument("-p", "--pad",       type=int,   default=60)
+parser.add_argument("-a", "--apod-edge", type=int,   default=30)
 parser.add_argument("-S", "--nsigma",    type=float, default=4)
 parser.add_argument("-l", "--lmin",      type=float, default=1000)
 parser.add_argument("--debug-tile",      type=str,   default=None)
@@ -176,9 +176,9 @@ if bounds is None:
 		try:
 			info = eval_tile(mapinfo, box, signals, verbosity=verbosity)
 			output_tile(prefix, info)
-		except (np.linalg.LinAlgError, MemoryError) as e:
+		#except (np.linalg.LinAlgError, MemoryError) as e:
+		except Exception as e:
 			print "%3d error while processing %3d %3d: '%s'. Skipping" % (comm.rank, y, x, e.message)
-			raise
 			continue
 		t2   = time.time()
 		if verbosity >= 1:

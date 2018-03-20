@@ -24,11 +24,11 @@ config.default("resume", 0, "Interval at which to write the internal CG informat
 # Default signal parameters
 config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin", "Default parameters for sky map")
 config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin", "Default parameters for ground map")
-config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=hor:Sun,prec=bin,lim_Sun_min_el=0", "Default parameters for sun map")
-config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=hor:Moon,prec=bin,lim_Moon_min_el=0", "Default parameters for moon map")
-config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=hor:Jupiter,prec=bin,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
-config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=hor:Saturn,prec=bin,lim_Saturn_min_el=0", "Default parameters for saturn map")
-config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=hor:Uranus,prec=bin,lim_Uranus_min_el=0", "Default parameters for uranus map")
+config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=sidelobe:Sun,prec=bin,lim_Sun_min_el=0", "Default parameters for sun map")
+config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=bore:Moon,prec=bin,lim_Moon_min_el=0", "Default parameters for moon map")
+config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=bore:Jupiter,prec=bin,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
+config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=bore:Saturn,prec=bin,lim_Saturn_min_el=0", "Default parameters for saturn map")
+config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=bore:Uranus,prec=bin,lim_Uranus_min_el=0", "Default parameters for uranus map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
@@ -567,17 +567,11 @@ for out_ind in range(nouter):
 			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
 			L.info("Computing icov map")
 			shape, wcs = signal.area.shape, signal.area.wcs
-			# corner=False to avoid WCS breakdown at the very edge for maps spanning 360 degrees
-			box  = np.sort(enmap.box(shape, wcs, corner=False),0)
-			step = config.get("icovstep")*utils.degree
-			pos  = []
-			for dec in np.arange(box[0,0]+step/2, box[1,0]-step/4, step):
-				rstep = step/np.cos(dec)
-				for ra in np.arange(box[0,1]+rstep/2, box[1,1]-rstep/4, rstep):
-					pos.append(enmap.sky2pix(shape, wcs, [dec,ra]))
-			pos = np.floor(pos).astype(int)
+			# Use equidistant pixel spacing for robustness in non-cylindrical coordinates
+			step = utils.nint(np.abs(config.get("icovstep")/wcs.wcs.cdelt[::-1]))
+			pos  = np.mgrid[step[-2]/2:shape[-2]:step[-1],step[-1]/2:shape[-1]:step[-1]].reshape(2,-1).T
 			if pos.size == 0:
-				L.debug("Error computing icov pixel positions. Skipping icov")
+				L.debug("Not enough pixels to compute icov for step size %f. Skipping icov" % config.get("icovstep"))
 				continue
 			icov = mapmaking.calc_icov_map(signal, myscans, pos, weights)
 			signal.write(root, "icov", icov)

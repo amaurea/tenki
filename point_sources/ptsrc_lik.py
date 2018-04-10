@@ -13,6 +13,7 @@ parser.add_argument("-t", "--tsize",     type=int,   default=360)
 parser.add_argument("-p", "--pad",       type=int,   default=60)
 parser.add_argument("-a", "--apod-edge", type=int,   default=30)
 parser.add_argument("-S", "--nsigma",    type=float, default=4)
+parser.add_argument("--model-nsigma",    type=float, default=4)
 parser.add_argument("-l", "--lmin",      type=float, default=1000)
 parser.add_argument("--debug-tile",      type=str,   default=None)
 parser.add_argument("--nmax",            type=int,   default=None)
@@ -119,7 +120,7 @@ def eval_tile(mapinfo, box, signals=["ptsrc","sz"], dump_dir=None, verbosity=1):
 
 	# Analyze this tile. It's best to loop manually, as that lets us
 	# output maps gradually
-	finder  = jointmap.SourceSZFinder3(mapset, snmin=args.nsigma, npass=args.npass)
+	finder  = jointmap.SourceSZFinder3(mapset, signals=signals, snmin=args.nsigma, npass=args.npass, model_snmin=args.model_nsigma)
 	info    = finder.analyze(verbosity=verbosity-2)
 	info.ffpad = mapset.ffpad
 	return info

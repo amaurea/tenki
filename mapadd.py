@@ -3,6 +3,7 @@ from enlib import enmap, log, mpi, utils
 parser = argparse.ArgumentParser()
 parser.add_argument("imaps", nargs="+")
 parser.add_argument("omap")
+parser.add_argument("-m", "--mean",    action="store_true")
 parser.add_argument("-v", "--verbose", action="store_true")
 args = parser.parse_args()
 
@@ -17,6 +18,7 @@ def add_maps(imaps, omap):
 	for mif in imaps[1:]:
 		if args.verbose: print "Reading %s" % mif
 		m += nonan(enmap.read_map(mif))
+	if args.mean: m /= len(imaps)
 	if args.verbose: "Writing %s" % omap
 	enmap.write_map(omap, m)
 def get_tilenames(dir):

@@ -25,10 +25,10 @@ config.default("resume", 0, "Interval at which to write the internal CG informat
 config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin", "Default parameters for sky map")
 config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin", "Default parameters for ground map")
 config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=sidelobe:Sun,prec=bin,lim_Sun_min_el=0", "Default parameters for sun map")
-config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=bore:Moon,prec=bin,lim_Moon_min_el=0", "Default parameters for moon map")
-config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=bore:Jupiter,prec=bin,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
-config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=bore:Saturn,prec=bin,lim_Saturn_min_el=0", "Default parameters for saturn map")
-config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=bore:Uranus,prec=bin,lim_Uranus_min_el=0", "Default parameters for uranus map")
+config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=sidelobe:Moon,prec=bin,lim_Moon_min_el=0", "Default parameters for moon map")
+config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=sidelobe:Jupiter,prec=bin,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
+config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=sidelobe:Saturn,prec=bin,lim_Saturn_min_el=0", "Default parameters for saturn map")
+config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelobe:Uranus,prec=bin,lim_Uranus_min_el=0", "Default parameters for uranus map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
@@ -41,7 +41,8 @@ config.default("filter_common_default", "use=no,name=common,value=1", "Default p
 
 config.default("crossmap", True,  "Whether to output the crosslinking map")
 config.default("icovmap",  True, "Whether to output the inverse correlation map")
-config.default("icovstep",    3, "Physical degree interval between inverse correlation measurements in icovmap")
+config.default("icovstep",    6, "Physical degree interval between inverse correlation measurements in icovmap")
+config.default("icovyskew",   1, "Number of degrees in the y direction (dec) to shift by per step in x (ra)")
 
 config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
 
@@ -57,6 +58,7 @@ parser.add_argument("-S", "--signal", action="append",    help="Signals to solve
 parser.add_argument("-F", "--filter", action="append")
 parser.add_argument("--group-tods", action="store_true")
 parser.add_argument("--individual", action="store_true")
+parser.add_argument("--tod-debug",  action="store_true")
 args = parser.parse_args()
 
 if args.dump_config:
@@ -383,7 +385,7 @@ for out_ind in range(nouter):
 	filters2= []
 	for param in filter_params:
 		if param["name"] == "scan":
-			daz, nt, mode, niter = int(param["daz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
+			daz, nt, mode, niter = float(param["daz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
 			nhwp = int(param["nhwp"])
 			weighted = int(param["weighted"])
 			if mode == 0: continue
@@ -569,10 +571,16 @@ for out_ind in range(nouter):
 			shape, wcs = signal.area.shape, signal.area.wcs
 			# Use equidistant pixel spacing for robustness in non-cylindrical coordinates
 			step = utils.nint(np.abs(config.get("icovstep")/wcs.wcs.cdelt[::-1]))
-			pos  = np.mgrid[step[-2]/2:shape[-2]:step[-1],step[-1]/2:shape[-1]:step[-1]].reshape(2,-1).T
+			pos  = np.mgrid[0.5:shape[-2]/step[-2],0.5:shape[-1]/step[-1]].reshape(2,-1).T
 			if pos.size == 0:
 				L.debug("Not enough pixels to compute icov for step size %f. Skipping icov" % config.get("icovstep"))
 				continue
+			# Apply the y skew
+			yskew     = utils.nint(config.get("icovyskew")/wcs.wcs.cdelt[1])
+			pos[:,0] += pos[:,1] * yskew * 1.0 / step[0]
+			# Go from grid indices to pixels
+			pos       = (pos*step % shape[-2:]).astype(int)
+			print pos.shape, pos.dtype
 			icov = mapmaking.calc_icov_map(signal, myscans, pos, weights)
 			signal.write(root, "icov", icov)
 			if comm.rank == 0:
@@ -630,6 +638,8 @@ for out_ind in range(nouter):
 			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0:
 				x = eqsys.postprocess(cg.x)
 				eqsys.write(root, "map%04d" % cg.i, x)
+				if args.tod_debug:
+					eqsys.A(cg.x, debug_file = root + "tod_debug%04d.hdf" % cg.i)
 			bench.stats.write(benchfile)
 			ptime = bench.stats["M"]["time"].last
 			L.info("CG step %5d %15.7e %6.1f %6.3f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans)), ptime))

@@ -1,0 +1,72 @@
+#!/usr/bin/env python
+# Script for quickly submitting tod2map runs
+# Format: submit_map nsplit patch,patch,... tag,tag,... tag,tag,... 
+import argparse, os, subprocess
+from enlib import utils, config, enmap
+parser = argparse.ArgumentParser()
+parser.add_argument("sel")
+parser.add_argument("odir")
+parser.add_argument("-n", "--nsplit", type=int,   default=4)
+parser.add_argument("-p", "--patch",  type=str,   default=None)
+parser.add_argument("-N", "--nnode",  type=int,   default=1)
+parser.add_argument("-T", "--tblock", type=float, default=4)
+parser.add_argument("-d", "--dry-run", action="store_true")
+parser.add_argument("-s", "--sky",    type=str,   default="sky")
+parser.add_argument("--split-mode",   type=str,   default="jon")
+args, unknown = parser.parse_known_args()
+
+config.init()
+root = config.get("root")
+
+utils.mkdir(args.odir)
+rundir = args.odir + "/runs"
+utils.mkdir(rundir)
+
+tag_map = {"+":"", "~":"no", ">":"_gt_", "<":"_lt_"}
+def remap(toks, tag_map):
+	toks = list(toks)
+	for key in tag_map:
+		for i, tok in enumerate(toks):
+			toks[i] = tok.replace(key, tag_map[key])
+	return toks
+
+# Sel format is normal, except there can be :-separated parts, which will
+# be iterated over
+toks = utils.split_outside(args.sel,",")
+alts = [utils.split_outside(tok,":") for tok in toks]
+
+def get_patch_file(toks, override=None):
+	if override is not None: return override
+	pfmt = root + "/area/%s.fits"
+	for tok in toks:
+		fname = pfmt % tok
+		if os.path.isfile(fname): return fname
+	raise ValueError("Can infer patch file")
+
+for toks in utils.list_combination_iter(alts):
+	for i in range(args.nsplit):
+		if args.split_mode == "jon":
+			osel = ",".join(toks) + ",int32(jon/%f)%%%d==%d" % (args.tblock,args.nsplit,i)
+		elif args.split_mode == "baz":
+			osel = ",".join(toks) + ",int32(((baz+180)%%360-180+200)/400.*%d)==%d" % (args.nsplit,i)
+		else: raise ValueError(args.split_mode)
+		otag = "_".join(remap(toks, tag_map)) + "_%dway_%d" % (args.nsplit, i)
+		#otag = "_".join(tok.replace("+","").replace("~","no") for tok in toks) + "_%dway_%d" % (args.nsplit,i)
+		patch_file = get_patch_file(toks, args.patch)
+		shape, wcs = enmap.read_map_geometry(patch_file)
+		npix = shape[-2]*shape[-1]
+		map_type = "map" if npix < 2e7 else "dmap"
+		batch = """#!/bin/bash
+#SBATCH --nodes %(nnode)d --ntasks-per-node=10 --cpus-per-task=8 --time=24:00:00
+#SBATCH --job-name %(name)s
+cd "%(cdir)s"
+OMP_NUM_THREADS=8 mpirun -bind-to none -ppn 10 python ~/local/tenki/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s""" % {
+		"nnode": args.nnode, "name": otag, "cdir": os.getcwd(),
+		"patch": patch_file, "map_type": map_type, "osel": osel,
+		"sky": args.sky,
+		"otag": otag, "odir": args.odir, "extra_args": " ".join(unknown)}
+		runfile = rundir + "/%s.txt" % otag
+		with open(runfile, "w") as f:
+			f.write(batch + "\n")
+		if not args.dry_run:
+			subprocess.call(["sbatch",runfile])

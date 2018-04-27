@@ -9,16 +9,22 @@ parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-a", "--apod",    type=str, default=None)
 parser.add_argument("-e", "--edge",    type=int, default=0)
 parser.add_argument("-t", "--trim",    type=int, default=0, help="Amount to trim maps that need to be interplated by, in pixels on each side.")
-parser.add_argument("-c", "--cont",    action="store_true")
-parser.add_argument("--fslice", type=str, default="")
+parser.add_argument("--fslice",        type=str, default="")
+parser.add_argument("-c", "--cont",          action="store_true")
 parser.add_argument("-M", "--allow-missing", action="store_true")
+parser.add_argument("-T", "--transpose",     action="store_true")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
 
-n = len(args.imaps_and_hits)
-imaps = args.imaps_and_hits[:n/2]
-ihits = args.imaps_and_hits[n/2:]
+n = len(args.imaps_and_hits)/2
+if not args.transpose:
+	imaps = args.imaps_and_hits[:n]
+	ihits = args.imaps_and_hits[n:]
+else:
+	imaps = args.imaps_and_hits[0::2]
+	ihits = args.imaps_and_hits[1::2]
+
 imaps = eval("imaps" + args.fslice)
 ihits = eval("ihits" + args.fslice)
 

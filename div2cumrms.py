@@ -8,7 +8,7 @@ parser.add_argument("-t", "--thin", type=int, default=1000)
 parser.add_argument("-A", "--area-model", type=str, default="exact", help="How to model pixel area. exact: Compute shape of each pixel. average: Use a single average number for all")
 args = parser.parse_args()
 
-div = enmap.read_map(args.div)
+div = enmap.read_fits(args.div)
 if args.downgrade:
 	div  = enmap.downgrade(div, args.downgrade)
 	div *= args.downgrade**2

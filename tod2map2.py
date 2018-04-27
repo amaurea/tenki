@@ -183,6 +183,7 @@ L.info("Reading %d scans" % len(filelist))
 myinds = np.arange(len(filelist))[comm.rank::comm.size]
 myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
 		db, dets=args.dets, downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
+myinds = np.array(myinds, int)
 
 # Collect scan info. This currently fails if any task has empty myinds
 read_ids  = [filelist[ind] for ind in utils.allgatherv(myinds, comm)]

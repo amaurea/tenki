@@ -56,6 +56,7 @@ def get_pix_ranges(shape, wcs, horbox, daz, nt=4, azdown=1, ndet=1.0):
 	nphi = np.abs(utils.nint(360/wcs.wcs.cdelt[0]))
 	# Find the pixel coordinates of first az sweep
 	naz  = utils.nint(np.abs(az2-az1)/daz)/azdown
+	if naz <= 0: return None, None
 	ahor = np.zeros([3,naz])
 	ahor[0] = utils.ctime2mjd(t1)
 	ahor[1] = np.linspace(az1,az2,naz)
@@ -118,8 +119,10 @@ for chunk in range(comm.rank, nchunk, comm.size):
 		for i in range(i1,i2):
 			weight = ndets[i] if args.weight == "det" else 1000.0
 			pr, w = get_pix_ranges(shape, wcs, box[:,:,i], daz, nt, azdown=args.azdown, ndet=weight)
+			if pr is None: continue
 			pix_ranges.append(pr)
 			weights.append(w)
+		if len(pix_ranges) == 0: continue
 		pix_ranges = np.concatenate(pix_ranges, 0)
 		weights    = np.concatenate(weights, 0)
 	with bench.mark("add"):

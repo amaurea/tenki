@@ -10,6 +10,7 @@ from enact import filedb, actdata, actscan, nmat_measure
 config.default("pmat_accuracy", 20.0, "Factor by which to lower accuracy requirement in pointing interpolation. 1.0 corresponds to 1e-3 pixels and 0.1 arc minute in polangle")
 config.default("pmat_interpol_max_size", 1000000, "Maximum mesh size in pointing interpolation. Worst-case time and memory scale at most proportionally with this.")
 config.default("gapfill", "linear", "TOD gapfill method. Can be 'copy', 'linear' or 'cubic'")
+config.set("pmat_cut_type", "full", "Controls the degrees of freedom for the cut pmat. Using 'full' is stronly adviced to avoid unreasonable slowdown for src_thumb_build2")
 parser = config.ArgumentParser(os.environ["HOME"] + "./enkirc")
 parser.add_argument("srclist")
 parser.add_argument("sel")

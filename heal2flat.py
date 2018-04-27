@@ -11,6 +11,7 @@ parser.add_argument("-r", "--rot", type=str, default=None)
 parser.add_argument("-l", "--lmax",type=int, default=0)
 parser.add_argument("--rot-method",type=str, default="alm")
 parser.add_argument("-u", "--unit", type=float, default=1)
+parser.add_argument("--oslice",    type=str, default=None)
 args = parser.parse_args()
 
 log_level = log.verbosity2level(args.verbosity)
@@ -97,5 +98,7 @@ for tfile in args.templates:
 		oname = args.odir + "/" + os.path.basename(tfile)
 	else:
 		oname = args.ofile
+	if args.oslice:
+		res = eval("res"+args.oslice)
 	L.info("Writing " + oname)
 	enmap.write_map(oname, res)

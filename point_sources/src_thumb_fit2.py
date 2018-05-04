@@ -1,4 +1,4 @@
-import numpy as np, os, time, h5py, astropy.io.fits, sys, argparse, copy, warnings
+import numpy as np, os, time, h5py, astropy.io.fits, sys, argparse, copy, warnings, glob
 from scipy import optimize, stats, ndimage
 from enlib import utils, mpi, fft, enmap, bunch, coordinates
 parser = argparse.ArgumentParser()
@@ -19,6 +19,8 @@ comm = mpi.COMM_WORLD
 utils.mkdir(args.odir)
 verbosity  = args.verbose - args.quiet
 num_walker = args.num_walker
+
+ifiles = [fname for iglob in args.ifiles for fname in glob.glob(iglob)]
 
 # Set up beam
 try:
@@ -314,9 +316,9 @@ f = open(args.odir + "/fits_%03d.txt" % comm.rank, "w")
 #f = mpi.File.Open(comm, args.odir + "/fits.txt", mpi.MODE_WRONLY | mpi.MODE_CREATE)
 #f.Set_atomicity(True)
 
-for ind in range(comm.rank, len(args.ifiles), comm.size):
+for ind in range(comm.rank, len(ifiles), comm.size):
 	print ind
-	ifile = args.ifiles[ind]
+	ifile = ifiles[ind]
 	try:
 		thumb_data = read_thumb_data(ifile)
 		lik = Likelihood(thumb_data, beam, dr, prior=args.prior, verbose=verbosity>0)

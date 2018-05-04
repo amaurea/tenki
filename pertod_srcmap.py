@@ -15,6 +15,8 @@ parser.add_argument("srcs")
 parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("--nmax", type=int, default=10)
+parser.add_argument("-s", "--src", type=int, default=None, help="Only analyze given source")
+parser.add_argument("-c", "--cont", action="store_true")
 args = parser.parse_args()
 
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
@@ -41,7 +43,13 @@ tasks = []
 filedb.init()
 db = filedb.scans.select(filedb.scans[args.sel])
 for si, src in enumerate(srcs.T):
+	if args.src and si != args.src: continue
 	for id in db["hits([%.6f,%6f])" % tuple(src[:2])]:
+		if args.cont:
+			bid = id.replace(":","_")
+			root   = args.odir + "/src%03d_%s_" % (si,bid)
+			ofile  = root + "main_map.fits"
+			if os.path.isfile(ofile): continue
 		tasks.append((si,id))
 
 # Each task processes tasks independently

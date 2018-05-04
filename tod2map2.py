@@ -34,7 +34,7 @@ config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=1,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
-config.default("filter_src_default",   "use=no,name=src,value=1,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
+config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
 config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
@@ -72,7 +72,6 @@ ext   = config.get("map_format")
 tshape= (720,720)
 #tshape= (100,100)
 resume= config.get("resume")
-output_srcmodel = False
 
 filedb.init()
 db = filedb.data
@@ -384,6 +383,7 @@ for out_ind in range(nouter):
 	L.info("Initializing filters")
 	filters = []
 	filters2= []
+	src_filters = []
 	for param in filter_params:
 		if param["name"] == "scan":
 			daz, nt, mode, niter = float(param["daz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
@@ -458,14 +458,15 @@ for out_ind in range(nouter):
 					raise NotImplementedError("FIXME: Implement per tod buddy subtraction with dmaps")
 		elif param["name"] == "src":
 			if param["value"] == 0: continue
-			if "params" not in param: params = myscans[0].pointsrcs
-			else: params = pointsrcs.read(param["params"])
-			params = pointsrcs.src2param(params)
-			params = params.astype(np.float64)
-			# Ignore any per-source beam information. It's not supported.
-			params[:,5:7] = 1; params[:,7]   = 0
-			filter = mapmaking.FilterAddSrcs(myscans, params, sys=param["sys"], mul=-float(param["mul"]))
-			output_srcmodel = True
+			if "params" not in param: srcs = myscans[0].pointsrcs
+			else: srcs = pointsrcs.read(param["params"])
+			# Restrict to chosen amplitude
+			if "snr" in srcs.dtype.names:
+				srcs = srcs[srcs.snr >= float(param["snr"])]
+			srcparam = pointsrcs.src2param(srcs)
+			srcparam = srcparam.astype(np.float64)
+			filter = mapmaking.FilterAddSrcs(myscans, srcparam, sys=param["sys"], mul=-float(param["mul"]))
+			src_filters.append(filter)
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 		# Add to normal filters of post-noise-model filters based on parameters
@@ -563,7 +564,7 @@ for out_ind in range(nouter):
 		if config.get("crossmap"):
 			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
 			L.info("Computing crosslink map")
-			cmap = mapmaking.calc_crosslink_map2(signal, signal_cut, myscans, weights)
+			cmap = mapmaking.calc_crosslink_map(signal, signal_cut, myscans, weights)
 			signal.write(root, "crosslink", cmap)
 			del cmap
 		if config.get("icovmap"):
@@ -587,29 +588,12 @@ for out_ind in range(nouter):
 			if comm.rank == 0:
 				np.savetxt(root + signal.name + "_icov_pix.txt", pos, "%6d %6d")
 			del icov
-
-	# Map-space source model computation only works in systems that have a
-	# non-time-dependent transformation to cel. It also assumes that every
-	# tod has the same point source parameters. Here, we will assume that
-	# this applies to the "sky" component, and only this component.
-	if output_srcmodel:
-		for param, signal in zip(signal_params, signals):
-			if param["name"] != "sky": continue
+		if src_filters:
+			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
 			L.info("Computing point source map")
-			if param["type"] in ["map","bmap","fmap"]:
-				if comm.rank == 0:
-					srcmap = pointsrcs.sim_srcs(signal.area.shape, signal.area.wcs,
-							myscans[0].pointsrcs, myscans[0].beam, dtype=signal.area.dtype)
-					signal.write(root, "srcs", srcmap)
-					del srcmap
-			elif param["type"] in ["dmap"]:
-				geom  = signal.area.geometry.copy()
-				srcmap  = dmap.zeros(geom)
-				for tile in srcmap.tiles:
-					pointsrcs.sim_srcs(tile.shape, tile.wcs, myscans[0].pointsrcs,
-							myscans[0].beam, omap=tile)
-				signal.write(root, "srcs", srcmap)
-				del srcmap
+			srcmap = mapmaking.calc_ptsrc_map(signal, signal_cut, myscans, src_filters)
+			signal.write(root, "srcs", srcmap)
+			del srcmap
 
 	L.info("Writing RHS")
 	eqsys.write(root, "rhs", eqsys.b)

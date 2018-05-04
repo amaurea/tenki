@@ -14,12 +14,12 @@
 from __future__ import division, print_function
 import numpy as np, time, h5py, astropy.io.fits, os, sys
 from scipy import optimize
-from enlib import utils, mpi, errors, fft, mapmaking, config
-from enlib import pmat, coordinates, enmap, bench, bunch, nmat
+from enlib import utils, mpi, errors, fft, mapmaking, config, jointmap, pointsrcs
+from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill
 from enact import filedb, actdata, actscan, nmat_measure
 
 config.set("downsample", 1, "Amount to downsample tod by")
-config.set("gapfill", "joneig", "Gapfiller to use. Can be 'linear' or 'joneig'")
+config.set("gapfill", "linear", "Gapfiller to use. Can be 'linear' or 'joneig'")
 config.default("pmat_interpol_pad", 10.0, "Number of arcminutes to pad the interpolation coordinate system by")
 config.default("pmat_interpol_max_size", 1000000, "Maximum mesh size in pointing interpolation. Worst-case time and memory scale at most proportionally with this.")
 
@@ -43,24 +43,14 @@ args = parser.parse_args()
 
 def getdef(val, default): return val if val is not None else default
 
-def read_srcs(fname, cols=None):
-	toks = fname.split(":")
-	fname, rest = toks[0], toks[1:]
-	if cols is None:
-		if len(rest) == 0: cols = [0,1,2]
-		else: cols = [int(w) for w in toks[0].split(",")]
-	if fname.endswith(".fits"):
-		data = astropy.io.fits.open(fname)[1].data
-		return np.array([data.ra*utils.degree,data.dec*utils.degree,data.sn])
-	else:
-		data = np.loadtxt(fname, usecols=cols).T
-		data[:2] *= utils.degree
-		return data
+def read_srcs(fname):
+	data = pointsrcs.read(fname)
+	return np.array([data.ra*utils.degree, data.dec*utils.degree,data.I])
 
 filedb.init()
 ids     = filedb.scans[args.sel]
 comm    = mpi.COMM_WORLD
-dtype   = np.float32
+dtype   = np.float64
 ndir    = 1
 verbose = args.verbose - args.quiet
 R       = args.radius*utils.arcmin
@@ -82,13 +72,21 @@ elif args.mode == "planet":
 	minamp = 0.0
 	planet = args.srcdb_or_planet.capitalize()
 	# Coordinates are in relative to the planet itself, so it's fiducially at 0,0
-	srcdata= np.array([0,0,10e6])[:,None]
+	srcdata= np.array([0,0,100e3])[:,None]
 	src_sys= "hor:%s/0_0" % planet
 	bounds = None
 	prune_unreliable_srcs = False
 else:
 	print("Unknown mode '%s'" % args.mode)
 	sys.exit(1)
+
+# How to handle cut samples. We want these samples to not
+# contribute to chisq, so either d - Pa should be zero for
+# cut samples, or at least (d-Pa)'N"(d-Pa) should be insensitive
+# to them. If d - Pa is always zero, then that's equivalent to
+# replacing N" with MN"M, where M is a cut mask that zeros out
+# the cut samples. This is better than putting it in the pointing
+# matrix, as it doesn't mess up model = Pa
 
 class PmatTot:
 	def __init__(self, data, srcpos, ndir=1, perdet=False):
@@ -100,8 +98,10 @@ class PmatTot:
 		if perdet:
 			self.params = np.tile(self.params[:,:,None,:],(1,1,data.ndet,1))
 		scan = actscan.ACTScan(data.entry, d=data)
-		self.psrc = pmat.PmatPtsrc(scan, self.params, sys=src_sys)
-		self.pcut = pmat.PmatCut(scan)
+		with bench.show("PmatPtsrc"):
+			self.psrc = pmat.PmatPtsrc(scan, self.params, sys=src_sys)
+		with bench.show("PmatCut"):
+			self.pcut = pmat.PmatCut(scan)
 		# Extract basic offset
 		self.off0 = data.point_correction
 		self.off  = self.off0*1
@@ -113,13 +113,9 @@ class PmatTot:
 	def forward(self, tod, amps, pmul=1):
 		params = self.params.copy()
 		params[...,2]   = amps
-		junk = np.zeros(self.pcut.njunk,tod.dtype)
 		self.psrc.forward(tod, params, pmul=pmul)
-		self.pcut.forward(tod, junk)
 	def backward(self, tod, amps=None, pmul=1):
 		params = self.params.copy()
-		junk = np.zeros(self.pcut.njunk,tod.dtype)
-		self.pcut.backward(tod, junk)
 		self.psrc.backward(tod, params, pmul=pmul)
 		if amps is None: amps = params[...,2]
 		else: amps[:] = params[...,2]
@@ -135,10 +131,13 @@ class NmatTot:
 		nmat.apply_window(data.tod, window, inverse=True)
 		self.model, self.window = model, window
 		self.ivar = self.nmat.ivar
+		self.cut  = data.cut
 	def apply(self, tod):
+		gapfill.gapfill(tod, self.cut, inplace=True)
 		nmat.apply_window(tod, self.window)
 		self.nmat.apply(tod)
 		nmat.apply_window(tod, self.window)
+		gapfill.gapfill(tod, self.cut, inplace=True)
 		return tod
 
 class PmatThumbs:
@@ -158,7 +157,7 @@ class PmatThumbs:
 		self.pmats = []
 		for i, pos in enumerate(srcpos.T):
 			if planet: sys = src_sys
-			else:      sys = ["icrs",np.array([[pos[0]],[pos[1]],[0],[0]])]
+			else:      sys = ["icrs",[np.array([[pos[0]],[pos[1]],[0],[0]]),False]]
 			self.pmats.append(pmat.PmatMap(scan, area, sys=sys))
 		self.shape = (len(srcpos.T),3)+shape
 		self.wcs   = wcs
@@ -181,6 +180,10 @@ class ThumbMapper:
 		div = div[:,0]
 		self.pthumb, self.pcut, self.nmat = pthumb, pcut, nmat
 		self.div = div
+		with utils.nowarn():
+			self.idiv = 1/self.div
+			self.idiv[~np.isfinite(self.idiv)] = 0
+			print(self.idiv)
 	def map(self, tod):
 		junk = np.zeros(self.pcut.njunk,tod.dtype)
 		rhs  = enmap.zeros(self.pthumb.shape, self.pthumb.wcs, tod.dtype)
@@ -188,24 +191,36 @@ class ThumbMapper:
 		self.nmat.apply(tod)
 		self.pcut.backward(tod, junk)
 		self.pthumb.backward(tod, rhs)
-		rhs /= self.div[:,None]
+		rhs *= self.idiv[:,None]
 		return rhs
 
+# For fixed amplitude, our chisquare is
+# chisq = (d-Pa)'N"(d-Pa) = d'N"d + (Pa)'N"(Pa) - 2d'N"Pa
+#       = d'N"d - 2*(Pa)'N"(d-Pa/2)
+# The derivative of this with respect to position is
+# dchisq = -2*d(Pa)'N"(d-Pa/2) + (Pa')N"dPa = 
+
 class Likelihood:
-	def __init__(self, data, srcpos, srcamp, perdet=False):
+	def __init__(self, data, srcpos, srcamp, perdet=False, thumbs=False):
 		# Set up fiducial source model. These source parameters
 		# are not the same as those we will be optimizing.
-		self.P = PmatTot(data, srcpos, perdet=perdet)
-		self.N = NmatTot(data)
+		with bench.show("PmatTot"):
+			self.P = PmatTot(data, srcpos, perdet=perdet)
+		with bench.show("NmatTot"):
+			self.N = NmatTot(data)
 		self.tod  = data.tod # might only need the one below
-		self.Nd   = self.N.apply(self.tod.copy())
+		with bench.show("Nmat apply"):
+			self.Nd   = self.N.apply(self.tod.copy())
 		self.i    = 0
 		# Initial values
 		self.amp0   = srcamp[:,None]
 		self.off0   = self.P.off0
 		self.chisq0 = None
 		# These are for internal mapmaking
-		self.thumb_mapper = ThumbMapper(data, srcpos, self.P.pcut, self.N.nmat, perdet=perdet)
+		self.thumb_mapper = None
+		if thumbs:
+			with bench.show("ThumbMapper"):
+				self.thumb_mapper = ThumbMapper(data, srcpos, self.P.pcut, self.N.nmat, perdet=perdet)
 		self.amp_unit, self.off_unit = 1e3, utils.arcmin
 	#def zip(self, off, amps): return np.concatenate([off/self.off_unit, amps[:,0]/self.amp_unit],0)
 	#def unzip(self, x): return x[:2]*self.off_unit, x[2:,None]*self.amp_unit
@@ -225,34 +240,82 @@ class Likelihood:
 	def calc_chisq_fixamp(self, off):
 		self.P.set_offset(off)
 		amps = self.amp0
-		Nr = self.tod.copy()
-		self.P.forward(Nr, amps, pmul=-1)
+		r = self.tod.copy()
+		self.P.forward(r, amps, pmul=-1)
+		Nr = r.copy()
 		self.N.apply(Nr)
-		PNPa = self.P.backward(Nr)
-		return -np.sum(PNPa*amps), amps, amps*0
+		chisq = np.sum(r*Nr)
+		return chisq, amps, amps*0
+	def calc_chisq_fixamp(self, off):
+		# We want (d-Pa)'N"(d-Pa), but this suffers from poor accuracy because
+		# so many noisy numbers are summed. We don't need d'N"d, so the terms
+		# we care about are chisq = a'P'N"Pa - 2d'N"Pa = -2(Pa)'N"(d-Pa/2)
+		self.P.set_offset(off)
+		Nr = self.tod.copy()
+		self.P.forward(Nr, -self.amp0/2, pmul=1, tmul=1)
+		self.N.apply(Nr)
+		PNr = self.P.backward(Nr)
+		chisq = -2 * np.sum(self.amp0*PNr)
+		return chisq, self.amp0, self.amp0*0
+	def calc_chisq_fixamp(self, off):
+		print("amp0",self.amp0)
+		self.P.set_offset(off)
+		r = self.tod.copy()
+		self.P.forward(r, -self.amp0)
+		Nr = r.copy()
+		self.N.apply(Nr)
+		chisq = np.sum(r*Nr)
+		self.r = r
+		self.Nr = Nr
+		return chisq, self.amp0, self.amp0*0
 	def calc_chisq_fitamp(self, off):
 		self.P.set_offset(off)
 		ahat, aicov = self.fit_amp()
-		return -np.sum(ahat**2*aicov), ahat, aicov
+		chisq = -np.sum(ahat**2*aicov)
+		# Prior
+		prior = 0
+		positivity = (ahat*aicov**0.5).reshape(-1)
+		for p in positivity:
+			prior -= 2*jointmap.log_prob_gauss_positive_single(p)
+		chisq += prior
+		return chisq, ahat, aicov
 	def chisq_wrapper(self, method="fitamp", thumb_path=None, thumb_interval=0, verbose=True):
 		if method == "fitamp": fun = self.calc_chisq_fitamp
 		else:                  fun = self.calc_chisq_fixamp
 		def wrapper(off, full=False):
 			t1 = time.time()
-			chisq, amps, aicov = fun(self.unzip(off))
+			off = self.unzip(off)
+			chisq, amps, aicov = fun(off)
 			t2 = time.time()
-			if thumb_path and thumb_interval and self.i % thumb_interval == 0:
+			if self.thumb_mapper and thumb_path and thumb_interval and self.i % thumb_interval == 0:
 				tod2 = self.tod*0
 				self.P.forward(tod2, amps, pmul=1)
+				with h5py.File(thumb_path % self.i + ".hdf", "w") as hfile:
+					hfile["data"] = self.tod[5]
+					hfile["model"] = tod2[5]
+					hfile["r"] = self.r[5]
+					hfile["Nr"] = self.Nr[5]
+				#print("tod resid",  np.sum(self.tod**2)-np.sum((self.tod-tod2)**2))
+				#r = self.tod-tod2
+				#Nr = r.copy()
+				#self.N.apply(Nr)
+				#Nd = self.tod.copy()
+				#self.N.apply(Nd)
+				#print("tod resid2", np.sum(self.tod*Nd)-np.sum(r*Nr))
+				#print("chisq consistency", np.sum(r*Nr)-chisq)
+				#r2 = self.tod.copy()
+				#self.P.forward(r2, -amps)
 				data   = self.thumb_mapper.map(self.tod.copy())
 				model  = self.thumb_mapper.map(tod2)
 				resid  = data-model
+				print("map resid", np.sum(data**2)-np.sum(resid**2))
 				thumbs = enmap.samewcs([data,model,resid],data)
 				enmap.write_map(thumb_path % self.i, thumbs)
 				del tod2, thumbs
 			if self.chisq0 is None: self.chisq0 = chisq
 			if verbose:
-				msg = "%4d %6.3f %6.3f" % (self.i,off[0],off[1])
+				doff = (off - self.off0)/utils.arcmin
+				msg = "%4d %6.3f %6.3f" % (self.i,doff[0],doff[1])
 				famps, faicov = amps.reshape(-1), aicov.reshape(-1)
 				for i in range(len(famps)):
 					nsigma = (famps[i]**2*faicov[i])**0.5
@@ -329,11 +392,12 @@ for ind in range(comm.rank, len(ids), comm.size):
 
 	# Read the data
 	entry = filedb.data[id]
+	print(entry.beam)
 	try:
 		data = actdata.read(entry, exclude=["tod"], verbose=verbose)
-		#data.restrict(dets=data.dets[:12])
 		data+= actdata.read_tod(entry)
-		data = actdata.calibrate(data, exclude=["autocut"], verbose=verbose)
+		data = actdata.calibrate(data, verbose=verbose)
+		#data.restrict(dets=data.dets[:100])
 		# Avoid planets while building noise model
 		if planet is not None:
 			data.cut_noiseest *= actdata.cuts.avoidance_cut(data.boresight, data.point_offset, data.site, planet, R)
@@ -351,17 +415,15 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# Find out which sources are reliable, so we don't waste time on bad ones
 	if prune_unreliable_srcs:
 		_, aicov = L.fit_amp()
-		print(aicov.shape, amps[sids].shape)
-		print(amps[sids], aicov**0.5)
 		good = amps[sids]**2*aicov[:,0] > 1
 		sids = [sid for sid,g in zip(sids,good) if g]
 		nsrc = len(sids)
 		print("Restricted to %d srcs: %s" % (nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
 	if nsrc == 0: continue
-	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet)
+	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=True)
 	# And minimize chisq
 	x0 = L.zip(L.off0)
-	#likfun = L.chisq_wrapper(method="fitamp", thumb_path=args.odir + "/thumb%03d.fits", thumb_interval=1)
+	likfun = L.chisq_wrapper(method="fixamp", thumb_path=args.odir + "/thumb%03d.fits", thumb_interval=1)
 	pos    = optimize.fmin_powell(likfun,x0)
 	chisq, oamps, oaicov = likfun(pos, full=True)
 
@@ -372,6 +434,9 @@ for ind in range(comm.rank, len(ids), comm.size):
 		ofile["amps"] = oamps
 		ofile["aicov"] = oaicov
 		ofile["ivar"] = L.N.ivar
+
+	1/0
+	#FIXME
 
 	# Our likelihood is
 	# (d-Pa)'N"(d-Pa)

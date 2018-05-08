@@ -30,7 +30,8 @@ parser.add_argument("sel")
 parser.add_argument("odir")
 parser.add_argument("-R", "--radius",    type=float, default=12)
 parser.add_argument("-r", "--res",       type=float, default=0.1)
-parser.add_argument("-m", "--minimaps",  action="store_true")
+parser.add_argument("-m", "--method",    type=str,   default="fixamp")
+parser.add_argument("-M", "--minimaps",  action="store_true")
 parser.add_argument("-c", "--cont",      action="store_true")
 parser.add_argument("-s", "--srcs",      type=str,   default=None)
 parser.add_argument("-A", "--minamp",    type=float, default=None)
@@ -80,13 +81,30 @@ else:
 	print("Unknown mode '%s'" % args.mode)
 	sys.exit(1)
 
-# How to handle cut samples. We want these samples to not
-# contribute to chisq, so either d - Pa should be zero for
-# cut samples, or at least (d-Pa)'N"(d-Pa) should be insensitive
-# to them. If d - Pa is always zero, then that's equivalent to
-# replacing N" with MN"M, where M is a cut mask that zeros out
-# the cut samples. This is better than putting it in the pointing
-# matrix, as it doesn't mess up model = Pa
+### How to handle cuts.
+#
+# 1. Solve for cuts like we solve for amplitudes. For each
+#    solver step, we linearly solve for the cut values.
+#    d = [Pamp Pcut] [amp, junk] + n, which has the solution
+#    [amp, junk] = (P'N"P)"P'N"d. amp and junk have no sample
+#    overlap, but they are still coupled via N". Solving this
+#    would be slow.
+# 2. Don't solve for the cuts, just simulate the effect they
+#    have. If we did linear gapfilling, then we can model
+#    our data as d = gapfill(Pa + n). Gapfilling is a linear
+#    operation, so this is d = G(Pa + n). The solution for
+#    amp is  a = (P'G'(GNG')"GP)"P'G'(GNG')"d. GP is simple,
+#    P'G' should also be doable, but (GNG')" is hard.
+#    GNG represents the noise properties of the gapfilled TOD.
+#    This will be nasty and nonstationary, but we usually just
+#    approximate it as stationary and gaussian, and that is actually
+#    what we usually mean by N. So we rename GNG' -> N. This leaves
+#    us with a = [P'G'N"GP]"P'G'N"d.
+#    The only new thing to implement here is G', e.g. the tranpose of
+#    gapfilling. With zero gapfilling this is simple (G'=G). But
+#    zero gapfilling messes up the GNG' -> N approximation too much.
+#    For linear gapfilling G' = 0 for cut samples, ncut/w for context
+#    samples and 1 for other samples. Should implement this.
 
 class PmatTot:
 	def __init__(self, data, srcpos, ndir=1, perdet=False):
@@ -107,6 +125,7 @@ class PmatTot:
 		self.off  = self.off0*1
 		self.el   = np.mean(data.boresight[2,::100])
 		self.point_template = data.point_template
+		self.cut = data.cut
 	def set_offset(self, off):
 		self.off = off*1
 		self.psrc.scan.offsets[:,1:] = actdata.offset_to_dazel(self.point_template + off, [0,self.el])
@@ -114,8 +133,10 @@ class PmatTot:
 		params = self.params.copy()
 		params[...,2]   = amps
 		self.psrc.forward(tod, params, pmul=pmul)
+		sampcut.gapfill_linear(self.cut, tod, inplace=True)
 	def backward(self, tod, amps=None, pmul=1):
 		params = self.params.copy()
+		tod = sampcut.gapfill_linear(self.cut, tod, inplace=False, transpose=True)
 		self.psrc.backward(tod, params, pmul=pmul)
 		if amps is None: amps = params[...,2]
 		else: amps[:] = params[...,2]
@@ -133,11 +154,13 @@ class NmatTot:
 		self.ivar = self.nmat.ivar
 		self.cut  = data.cut
 	def apply(self, tod):
-		gapfill.gapfill(tod, self.cut, inplace=True)
+		#gapfill.gapfill(tod, self.cut, inplace=True)
+		#sampcut.gapfill_const(self.cut, tod, 0, inplace=True)
 		nmat.apply_window(tod, self.window)
 		self.nmat.apply(tod)
 		nmat.apply_window(tod, self.window)
-		gapfill.gapfill(tod, self.cut, inplace=True)
+		#sampcut.gapfill_const(self.cut, tod, 0, inplace=True)
+		#gapfill.gapfill(tod, self.cut, inplace=True)
 		return tod
 
 class PmatThumbs:
@@ -238,27 +261,17 @@ class Likelihood:
 		div[div==0] = 1
 		return rhs/div, div
 	def calc_chisq_fixamp(self, off):
-		self.P.set_offset(off)
-		amps = self.amp0
-		r = self.tod.copy()
-		self.P.forward(r, amps, pmul=-1)
-		Nr = r.copy()
-		self.N.apply(Nr)
-		chisq = np.sum(r*Nr)
-		return chisq, amps, amps*0
-	def calc_chisq_fixamp(self, off):
 		# We want (d-Pa)'N"(d-Pa), but this suffers from poor accuracy because
 		# so many noisy numbers are summed. We don't need d'N"d, so the terms
 		# we care about are chisq = a'P'N"Pa - 2d'N"Pa = -2(Pa)'N"(d-Pa/2)
 		self.P.set_offset(off)
 		Nr = self.tod.copy()
-		self.P.forward(Nr, -self.amp0/2, pmul=1, tmul=1)
+		self.P.forward(Nr, -self.amp0/2, pmul=1)
 		self.N.apply(Nr)
 		PNr = self.P.backward(Nr)
 		chisq = -2 * np.sum(self.amp0*PNr)
 		return chisq, self.amp0, self.amp0*0
 	def calc_chisq_fixamp(self, off):
-		print("amp0",self.amp0)
 		self.P.set_offset(off)
 		r = self.tod.copy()
 		self.P.forward(r, -self.amp0)
@@ -290,11 +303,11 @@ class Likelihood:
 			if self.thumb_mapper and thumb_path and thumb_interval and self.i % thumb_interval == 0:
 				tod2 = self.tod*0
 				self.P.forward(tod2, amps, pmul=1)
-				with h5py.File(thumb_path % self.i + ".hdf", "w") as hfile:
-					hfile["data"] = self.tod[5]
-					hfile["model"] = tod2[5]
-					hfile["r"] = self.r[5]
-					hfile["Nr"] = self.Nr[5]
+				#with h5py.File(thumb_path % self.i + ".hdf", "w") as hfile:
+				#	hfile["data"] = self.tod[5]
+				#	hfile["model"] = tod2[5]
+				#	hfile["r"] = self.r[5]
+				#	hfile["Nr"] = self.Nr[5]
 				#print("tod resid",  np.sum(self.tod**2)-np.sum((self.tod-tod2)**2))
 				#r = self.tod-tod2
 				#Nr = r.copy()
@@ -392,7 +405,6 @@ for ind in range(comm.rank, len(ids), comm.size):
 
 	# Read the data
 	entry = filedb.data[id]
-	print(entry.beam)
 	try:
 		data = actdata.read(entry, exclude=["tod"], verbose=verbose)
 		data+= actdata.read_tod(entry)
@@ -405,7 +417,6 @@ for ind in range(comm.rank, len(ids), comm.size):
 	except errors.DataMissing as e:
 		print("%s skipped: %s" % (id, e))
 		continue
-	print("tod shape: [%d,%d]" % data.tod.shape)
 	# Prepeare our samples
 	#data.tod -= np.mean(data.tod,1)[:,None]
 	data.tod -= data.tod[:,None,0].copy()
@@ -420,10 +431,10 @@ for ind in range(comm.rank, len(ids), comm.size):
 		nsrc = len(sids)
 		print("Restricted to %d srcs: %s" % (nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
 	if nsrc == 0: continue
-	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=True)
+	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=False)
 	# And minimize chisq
 	x0 = L.zip(L.off0)
-	likfun = L.chisq_wrapper(method="fixamp", thumb_path=args.odir + "/thumb%03d.fits", thumb_interval=1)
+	likfun = L.chisq_wrapper(method=args.method, thumb_path=args.odir + "/thumb%03d.fits", thumb_interval=1)
 	pos    = optimize.fmin_powell(likfun,x0)
 	chisq, oamps, oaicov = likfun(pos, full=True)
 

@@ -1,4 +1,4 @@
-import numpy as np, argparse, glob, re, os, shutil
+import numpy as np, argparse, glob, re, os, shutil, sys
 from enlib import enmap, utils, retile, bunch, mpi
 parser = argparse.ArgumentParser()
 parser.add_argument("idir")
@@ -91,11 +91,11 @@ def add_mono(ifiles, ofile, slice=None):
 	enmap.write_map(tfile, omap)
 	shutil.move(tfile, ofile)
 
-def coadd_mono(imapfiles, idivfiles, omapfile, odivfile):
+def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
 	if args.cont and os.path.exists(omapfile): return
 	omap, odiv = None, None
 	tmapfile = omapfile + ".tmp"
-	tdivfile = odivfile + ".tmp"
+	if odivfile: tdivfile = odivfile + ".tmp"
 	for imapfile, idivfile in zip(imapfiles, idivfiles):
 		imap = read_map(imapfile)
 		idiv = read_map(idivfile, slice=".preflat[0]")
@@ -105,9 +105,9 @@ def coadd_mono(imapfiles, idivfiles, omapfile, odivfile):
 	mask = odiv > 0
 	omap[...,mask] /= odiv[mask]
 	enmap.write_map(tmapfile, omap)
-	enmap.write_map(tdivfile, odiv)
+	if odivfile: enmap.write_map(tdivfile, odiv)
 	shutil.move(tmapfile, omapfile)
-	shutil.move(tdivfile, odivfile)
+	if odivfile: shutil.move(tdivfile, odivfile)
 
 def copy_plain(ifile, ofile):
 	if args.cont and os.path.exists(ofile): return
@@ -137,10 +137,19 @@ for iname in sorted(datasets.keys()):
 		ipre = args.idir + "/" + sub.name + "_"
 		opre = obase + "_%dway_set%d_" % (len(d),si)
 		print ipre, opre
+		# Do we have srcs? If so, our maps are source free, and the
+		# srcs must be added
+		has_srcs = os.path.isfile(ipre + "sky_srcs.fits")
+		if not has_srcs:
+			if "map"  in outputs:
+				schedule(copy_mono, ipre + "sky_map%04d.fits" % sub.it, opre + "map.fits")
+		else:
+			if "map"  in outputs:
+				schedule(copy_mono, ipre + "sky_map%04d.fits" % sub.it, opre + "map_srcfree.fits")
+				schedule(copy_mono, ipre + "sky_srcs.fits", opre + "srcs.fits")
+				schedule(add_mono,  [ipre + "sky_map%04d.fits" % sub.it, ipre + "sky_srcs.fits"], opre + "map.fits")
 		if "ivar" in outputs:
 			schedule(copy_mono, ipre + "sky_div.fits", opre + "ivar.fits", slice=".preflat[0]")
-		if "map"  in outputs:
-			schedule(copy_mono, ipre + "sky_map%04d.fits" % sub.it, opre + "map.fits")
 		if "hits"  in outputs:
 			schedule(copy_mono, ipre + "sky_hits.fits", opre + "hits.fits")
 		if "xlink" in outputs:
@@ -152,10 +161,21 @@ for iname in sorted(datasets.keys()):
 			schedule(copy_plain, ipre + "noise.txt", opre + "sens.txt")
 	# Coadds
 	opre = obase + "_%dway_coadd_" % len(d)
+	ofmt = obase + "_%dway" % len(d) + "_set%d_"
 	if "totmap" in outputs:
 		imaps = [args.idir + "/" + sub.name + "_sky_map%04d.fits" % sub.it for sub in d]
+		isrcs = [args.idir + "/" + sub.name + "_sky_srcs.fits" for sub in d]
 		idivs = [args.idir + "/" + sub.name + "_sky_div.fits" for sub in d]
-		schedule(coadd_mono, imaps, idivs, opre + "map.fits", opre + "ivar.fits")
+		if not has_srcs:
+			schedule(coadd_mono, imaps, idivs, opre + "map.fits", opre + "ivar.fits")
+		else:
+			def map_src_full(ifree, isrcs, idivs, ofree, osrcs, omap, odiv):
+				print "map_src_full", ifree, isrcs, idivs, ofree, osrcs, omap, odiv
+				coadd_mono(ifree, idivs, ofree, odiv)
+				coadd_mono(isrcs, idivs, osrcs)
+				add_mono([ofree, osrcs], omap)
+			schedule(map_src_full, imaps, isrcs, idivs,
+					opre + "map_srcfree.fits", opre + "srcs.fits", opre + "map.fits", opre + "ivar.fits")
 	if "totxlink" in outputs:
 		imaps = [args.idir + "/" + sub.name + "_sky_crosslink.fits" for sub in d]
 		schedule(add_mono, imaps, opre + "xlink.fits", slice="[1:]")
@@ -174,4 +194,10 @@ for i in range(comm.rank, len(queue), comm.size):
 	ind = inds[i]
 	func, fargs, kwargs = queue[ind]
 	print comm.rank, func.__name__, fargs
-	func(*fargs, **kwargs)
+	try:
+		func(*fargs, **kwargs)
+	except Exception as e:
+		sys.stderr.write("Exception in %s\n" % func.__name__)
+		sys.stderr.write(str(fargs) + "\n")
+		sys.stderr.write(str(kwargs) + "\n")
+		raise

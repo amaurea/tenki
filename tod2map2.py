@@ -447,6 +447,7 @@ for out_ind in range(nouter):
 				if not pertod:
 					filter = mapmaking.FilterBuddy(myscans, m, sys=sys, mul=-mul, tmul=tmul)
 				else:
+					1/0 # FIXME
 					m = enmap.zeros((args.ncomp,)+m.shape[-2:], m.wcs, dtype)
 					filter = mapmaking.FilterBuddyPertod(m, sys=sys, mul=-mul, tmul=tmul, nstep=nstep, prec=prec)
 			else:

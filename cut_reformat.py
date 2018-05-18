@@ -4,6 +4,7 @@ from enact import files
 parser = argparse.ArgumentParser()
 parser.add_argument("iglobs", nargs="+")
 parser.add_argument("ofile")
+parser.add_argument("-m", "--mode", type=str, default="permissive")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -36,13 +37,21 @@ tmpdir  = args.ofile + ".tmp"
 tmpfmt  = tmpdir + "/cut%03d.hdf"
 utils.mkdir(tmpdir)
 
+permissive = args.mode == "permissive"
+
 # Process each of our blocks
+nplus, nminus = 0,0
 with h5py.File(tmpfmt % comm.rank, "w") as hfile:
 	for j, i in enumerate(range(comm.rank*nfile/comm.size, (comm.rank+1)*nfile/comm.size)):
 		ifile, id = ifiles[i], ids[i]
 		progress = min(comm.rank + j*comm.size, nfile-1)
+		dets, cuts, offset = files.read_cut(ifile, permissive=permissive)
+		#_, moo, _ = files.read_cut(ifile, permissive=not permissive)
+		#diff = (cuts.size-cuts.sum())-(moo.size-moo.sum())
+		#if diff > 0: nplus  += diff
+		#else:        nminus -= diff
+		#print "%5d/%d %5.1f%% %s %6dM %6dM %6dM" % (progress+1, nfile, 100.0*(progress+1)/nfile, id, diff/1e6, nplus/1e6, nminus/1e6)
 		print "%5d/%d %5.1f%% %s" % (progress+1, nfile, 100.0*(progress+1)/nfile, id)
-		dets, cuts, offset = files.read_cut(ifile)
 		flags= flagrange.from_sampcut(cuts, dets=dets, sample_offset=offset)
 		flags.write(hfile, group=id)
 

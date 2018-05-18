@@ -32,7 +32,7 @@ config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelo
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
-config.default("filter_scan_default",  "use=no,name=scan,value=1,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
+config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=0,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
@@ -59,6 +59,7 @@ parser.add_argument("-F", "--filter", action="append")
 parser.add_argument("--group-tods", action="store_true")
 parser.add_argument("--individual", action="store_true")
 parser.add_argument("--tod-debug",  action="store_true")
+parser.add_argument("--prepost",    action="store_true")
 args = parser.parse_args()
 
 if args.dump_config:
@@ -394,12 +395,12 @@ for out_ind in range(nouter):
 			if mode >= 2:
 				for sparam, signal in matching_signals(param, signal_params, signals):
 					if sparam["type"] == "map" or sparam["type"] == "bmap":
-						prec_ptp = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
+						prec = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
 					elif sparam["type"] == "dmap":
-						prec_ptp = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
+						prec = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
 					else:
 						raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
-					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec_ptp, daz=daz, nt=nt, weighted=weighted>0))
+					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec, daz=daz, nt=-nt, weighted=weighted>0))
 		elif param["name"] == "common":
 			mode = int(param["value"])
 			if mode == 0: continue
@@ -622,6 +623,7 @@ for out_ind in range(nouter):
 				cg.save(cgpath)
 			dt = bench.stats["cg_step"]["time"].last
 			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0:
+				if args.prepost: eqsys.write(root, "map%04d_prepost" % cg.i, cg.x)
 				x = eqsys.postprocess(cg.x)
 				eqsys.write(root, "map%04d" % cg.i, x)
 				if args.tod_debug:

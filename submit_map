@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 # Script for quickly submitting tod2map runs
 # Format: submit_map nsplit patch,patch,... tag,tag,... tag,tag,... 
-import argparse, os, subprocess
-from enlib import utils, config, enmap
+import argparse, os, subprocess, re, sys
 parser = argparse.ArgumentParser()
 parser.add_argument("sel")
 parser.add_argument("odir")
@@ -13,7 +12,9 @@ parser.add_argument("-T", "--tblock", type=float, default=4)
 parser.add_argument("-d", "--dry-run", action="store_true")
 parser.add_argument("-s", "--sky",    type=str,   default="sky")
 parser.add_argument("--split-mode",   type=str,   default="jon")
+parser.add_argument("--no-prune",      action="store_true")
 args, unknown = parser.parse_known_args()
+from enlib import utils, config, enmap
 
 config.init()
 root = config.get("root")
@@ -21,6 +22,11 @@ root = config.get("root")
 utils.mkdir(args.odir)
 rundir = args.odir + "/runs"
 utils.mkdir(rundir)
+
+array_freqs = {"pa1":["f150"], "pa2":["f150"], "pa3":["f090","f150"],
+	"pa4":["f150","f220"], "pa5":["f090","f150"], "pa6":["f090","f150"]}
+season_arrays = {"s13":["pa1"], "s14":["pa1","pa2"], "s15":["pa1","pa2","pa3"],
+		"s16":["pa2","pa3","pa4"], "s17":["pa4","pa5","pa6"], "s18":["pa4","pa5","pa6"]}
 
 tag_map = {"+":"", "~":"no", ">":"_gt_", "<":"_lt_"}
 def remap(toks, tag_map):
@@ -43,19 +49,47 @@ def get_patch_file(toks, override=None):
 		if os.path.isfile(fname): return fname
 	raise ValueError("Can infer patch file")
 
+def invalid_combination(toks):
+	# Find seasons, arrays and freqs
+	seasons, arrays, freqs = [], [], []
+	for tok in toks:
+		m = re.match(r"(s\d\d)", tok)
+		if m: seasons.append(m.group(1))
+		m = re.match(r"(pa\d)", tok)
+		if m: arrays.append(m.group(1))
+		m = re.match(r"\+?(f\d\d\d)", tok)
+		if m: freqs.append(m.group(1))
+	# We only handle the simple case of one array and one freq
+	if len(seasons) != 1 or len(arrays) != 1 or len(freqs) != 1:
+		return False
+	season, array, freq = seasons[0], arrays[0], freqs[0]
+	if season in season_arrays and array not in season_arrays[season]: return True
+	if array not in array_freqs: return False
+	return freq not in array_freqs[array]
+
 for toks in utils.list_combination_iter(alts):
+	# Skip invalid array-frequency combinations
+	if not args.no_prune and invalid_combination(toks): continue
+	# Expand variables in toks, based on the toks themselves. Only positional expansion supported
+	otoks = remap(toks, tag_map)
 	for i in range(args.nsplit):
 		if args.split_mode == "jon":
 			osel = ",".join(toks) + ",int32(jon/%f)%%%d==%d" % (args.tblock,args.nsplit,i)
 		elif args.split_mode == "baz":
 			osel = ",".join(toks) + ",int32(((baz+180)%%360-180+200)/400.*%d)==%d" % (args.nsplit,i)
+		elif args.split_mode.startswith("file:"):
+			fname = args.split_mode[5:]
+			fname = fname.format(*otoks, i=i)
+			osel = ",".join(toks) + ",@" + fname
 		else: raise ValueError(args.split_mode)
-		otag = "_".join(remap(toks, tag_map)) + "_%dway_%d" % (args.nsplit, i)
+		otag = "_".join(otoks) + "_%dway_%d" % (args.nsplit, i)
 		#otag = "_".join(tok.replace("+","").replace("~","no") for tok in toks) + "_%dway_%d" % (args.nsplit,i)
-		patch_file = get_patch_file(toks, args.patch)
+		patch_file = get_patch_file(otoks, args.patch)
 		shape, wcs = enmap.read_map_geometry(patch_file)
 		npix = shape[-2]*shape[-1]
-		map_type = "map" if npix < 1e7 else "dmap"
+		map_type = "map" if npix < 4e7 else "dmap"
+		# Allow variable replacement in the unknown arguments
+		unknown_expanded = [a.format(*otoks, i=i) for a in unknown]
 		batch = """#!/bin/bash
 #SBATCH --nodes %(nnode)d --ntasks-per-node=10 --cpus-per-task=8 --time=24:00:00
 #SBATCH --job-name %(name)s
@@ -64,9 +98,17 @@ OMP_NUM_THREADS=8 mpirun -bind-to none -ppn 10 python ~/local/tenki/tod2map2.py 
 		"nnode": args.nnode, "name": otag, "cdir": os.getcwd(),
 		"patch": patch_file, "map_type": map_type, "osel": osel,
 		"sky": args.sky,
-		"otag": otag, "odir": args.odir, "extra_args": " ".join(unknown)}
+		"otag": otag, "odir": args.odir, "extra_args": " ".join(unknown_expanded)}
 		runfile = rundir + "/%s.txt" % otag
 		with open(runfile, "w") as f:
 			f.write(batch + "\n")
 		if not args.dry_run:
 			subprocess.call(["sbatch",runfile])
+
+# Copy our command line argument to the run directory, but avoid clobbering
+for i in range(100):
+	ofile = rundir + "/submit%d.txt" % i
+	if os.path.isfile(ofile): continue
+	with open(ofile, "w") as f:
+		f.write("submit_map " + " ".join(sys.argv[1:]) + "\n")
+	break

@@ -6,7 +6,7 @@ parser.add_argument("odir")
 parser.add_argument("-i", "--iteration", type=str, default="individual")
 parser.add_argument("-a", "--allow-nonstandard",   action="store_true")
 parser.add_argument("-c", "--cont",                action="store_true")
-parser.add_argument("-O", "--output",    type=str, default="map,ivar,sens,xlink,totmap,totsens,totxlink")
+parser.add_argument("-O", "--output",    type=str, default="map,ivar,sens,xlink,hits,totmap,totsens,totxlink,tothits")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -153,7 +153,7 @@ for iname in sorted(datasets.keys()):
 		if "hits"  in outputs:
 			schedule(copy_mono, ipre + "sky_hits.fits", opre + "hits.fits")
 		if "xlink" in outputs:
-			schedule(copy_mono, ipre + "sky_crosslink.fits", opre + "xlink.fits", slice="[1:]")
+			schedule(copy_mono, ipre + "sky_crosslink.fits", opre + "xlink.fits")
 		if "icov" in outputs:
 			schedule(copy_mono,  ipre + "sky_icov.fits", opre + "icov.fits", slice=".preflat[0]")
 			schedule(copy_plain, ipre + "sky_icov_pix.txt", opre + "icov_pix.txt")
@@ -176,9 +176,12 @@ for iname in sorted(datasets.keys()):
 				add_mono([ofree, osrcs], omap)
 			schedule(map_src_full, imaps, isrcs, idivs,
 					opre + "map_srcfree.fits", opre + "srcs.fits", opre + "map.fits", opre + "ivar.fits")
+	if "tothits" in outputs:
+		imaps = [args.idir + "/" + sub.name + "_sky_hits.fits" for sub in d]
+		schedule(add_mono, imaps, opre + "hits.fits")
 	if "totxlink" in outputs:
 		imaps = [args.idir + "/" + sub.name + "_sky_crosslink.fits" for sub in d]
-		schedule(add_mono, imaps, opre + "xlink.fits", slice="[1:]")
+		schedule(add_mono, imaps, opre + "xlink.fits")
 	if "toticov" in outputs:
 		imaps = [args.idir + "/" + sub.name + "_sky_icov.fits" for sub in d]
 		schedule(add_mono,  imaps, opre + "icov.fits", slice=".preflat[0]")

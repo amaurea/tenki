@@ -12,6 +12,7 @@ parser.add_argument("-r", "--res",   type=float, default=0.5)
 parser.add_argument("-b", "--block", type=str,   default="day")
 parser.add_argument("-O", "--nopt",  type=int,   default=2000)
 parser.add_argument("-m", "--mode",  type=str,   default="crosslink")
+parser.add_argument("-w", "--weight",type=str,   default="plain")
 parser.add_argument("--opt-mode",    type=str,   default="linear")
 args = parser.parse_args()
 
@@ -111,7 +112,7 @@ sys.stderr.write("estimating hitmap for block %*d/%d" % (ndig,0,nblock))
 for bi in range(nblock):
 	for ai in range(narray):
 		block_db = db.select(block_inds[bi,ai])
-		hits[bi,ai] = fastweight.fastweight(shape, wcs, block_db, array_rad=args.rad*utils.degree, site=site)
+		hits[bi,ai] = fastweight.fastweight(shape, wcs, block_db, array_rad=args.rad*utils.degree, site=site, weight=args.weight)
 	sys.stderr.write("%s%*d/%d" % ("\b"*(1+2*ndig),ndig,bi+1,nblock))
 sys.stderr.write("\n")
 

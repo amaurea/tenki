@@ -9,17 +9,18 @@ parser.add_argument("-H", "--hdu",   type=int, default=None, help="The HDU to re
 parser.add_argument("-r", "--rot",   type=str, default=None, help="Coordinate transformation to perform while interpolation. By default no rotation is performed. Takes the form isys,osys, where either can be cel, gal or ecl for celestial (equatorial), galactic or ecliptic coordinates respectively. For example -r gal,cel would transform from an input map in galactic coordinates to an output map in equatorial coordinates.")
 parser.add_argument("-O", "--order", type=int, default=3, help="Interpolation order. Defaults to bicubic spline interpolation (3)."),
 parser.add_argument("-l", "--lmax",  type=int, default=None)
-parser.add_argument("-v",      action="count", default=1, help="Increase verbosity.")
+parser.add_argument("-v",      action="count", default=0, help="Increase verbosity.")
 parser.add_argument("-q",      action="count", default=0, help="Decrease verbosity.")
 parser.add_argument("--nopol", action="store_true", help="Do not perform any polarization rotation.")
 parser.add_argument("-T", "--transpose", action="store_true", help="Changes the ifiles ordering to imap1 templ1 omap2 imap2 templ2 omap2 ...")
+parser.add_argument("-c", "--cont",      action="store_true", help="Skip files where the output file already exists")
 args = parser.parse_args()
-import numpy as np, sys
+import numpy as np, sys, time, os
 from enlib import enmap, utils, mpi
 
 printer = utils.Printer(args.v - args.q)
 
-def remove_bad(arr, extra_vals=[healpy.UNSEEN], fill=0):
+def remove_bad(arr, extra_vals=[], fill=0):
 	arr  = np.asanyarray(arr).copy()
 	mask = ~np.isfinite(arr)
 	for val in extra_vals:
@@ -41,15 +42,18 @@ else:
 	templates = args.files[1::3]
 	omaps     = args.files[2::3]
 
+prev_templatefile = None
+
 comm = mpi.COMM_WORLD
 for ind in range(comm.rank, nfile, comm.size):
 	imapfile, templatefile, omapfile = imaps[ind], templates[ind], omaps[ind]
+	if args.cont and os.path.isfile(omapfile): continue
 	try:
 		# We separate out this part first, so we know the exception
 		# came from the read and not somewhere else.
 		try:
 			# Assume it's not a healpix map first
-			with printer.time("read %s" % imapfile, 1):
+			with printer.time("read %s" % imapfile, 0):
 				imap  = enmap.read_map(imapfile, hdu=args.hdu)
 				heal  = False
 		except ValueError:
@@ -58,10 +62,10 @@ for ind in range(comm.rank, nfile, comm.size):
 			first = args.first or 0
 			ncomp = args.ncomp or 3
 			fields= tuple(range(first,first+ncomp))
-			with printer.time("read healpix %s" % imapfile, 1):
+			with printer.time("read healpix %s" % imapfile, 0):
 				imap   = np.atleast_2d(healpy.read_map(ifmapfile, field=fields, hdu=args.hdu or 1))
 			with printer.time("remove bad values", 1):
-				imap = remove_bad(imap)
+				imap = remove_bad(imap, [healpy.UNSEEN])
 			heal   = True
 
 		# Ok, now we know which type we have.
@@ -73,8 +77,10 @@ for ind in range(comm.rank, nfile, comm.size):
 			if args.first: imap = imap[...,args.first:,:,:]
 			if args.ncomp: imap = imap[...,:args.ncomp,:,:]
 			pol   = imap.shape[-3] == 3 and not args.nopol
-			with printer.time("read %s" % templatefile, 1):
-				template = enmap.read_map(templatefile)
+			if prev_templatefile != templatefile:
+				with printer.time("read %s" % templatefile, 1):
+					template = enmap.read_map(templatefile)
+			prev_templatefile = templatefile
 			if args.rot:
 				import coordinates
 				s1,s2 = args.rot.split(",")
@@ -89,8 +95,15 @@ for ind in range(comm.rank, nfile, comm.size):
 					with printer.time("rotate polarization", 1):
 						omap[1:3] = enmap.rotate_pol(omap[1:3], -opos[2])
 			else:
-				with printer.time("interpolate", 1):
-					omap  = imap.project(template.shape, template.wcs, order=args.order, mask_nan=False)
+				t1 = time.time()
+				try:
+					omap = enmap.extract(imap, template.shape, template.wcs)
+					name = "extract"
+				except AssertionError:
+					omap = imap.project(template.shape, template.wcs, order=args.order, mask_nan=False)
+					name = "interpolate"
+				t2 = time.time()
+				printer.write(name, 1, prepend="%6.2f " % (t2-t1))
 			# Remove any pre-axes we added if necessary
 			if orig_ndim == 2: omap = omap[0]
 			with printer.time("write %s" % omapfile, 1):
@@ -115,9 +128,10 @@ for ind in range(comm.rank, nfile, comm.size):
 				if ncomp == 3:
 					sht.map2alm(imap[1:3],alm[1:3], spin=2)
 				del imap
-			with printer.time("read %s" % templatefile, 1):
-				# Get our template
-				template = enmap.read_map(templatefile)
+			if prev_templatefile != templatefile:
+				with printer.time("read %s" % templatefile, 1):
+					template = enmap.read_map(templatefile)
+			prev_templatefile = templatefile
 			with printer.time("compute target positions", 1):
 				# Compute position of our output pixels in the input map
 				pmap = template.posmap()
@@ -137,6 +151,6 @@ for ind in range(comm.rank, nfile, comm.size):
 					omap[1:3] = enmap.rotate_pol(omap[1:3], psi)
 			with printer.time("write %s" % omapfile, 1):
 				enmap.write_map(omapfile, omap)
-	except IOError as e:
+	except (IOError, TypeError) as e:
 		print "Error projecting %s on %s to %s : %s. Skipping" % (imapfile, templatefile, omapfile, e.message)
 		continue

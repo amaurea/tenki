@@ -35,7 +35,7 @@ config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=0,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
-config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=map,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
+config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
 config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
 
@@ -443,6 +443,8 @@ for out_ind in range(nouter):
 			# and the one where a map is computed internally per tod. Both need
 			# an input map, but for the pertod buddy, this just indicates the
 			# pixelization to use for the internally generated buddy map.
+			if param["type"] == "auto":
+				param["type"] = ("dmap" if os.path.isdir(fname) else "map")
 			if param["type"] != "dmap":
 				m = enmap.read_map(fname).astype(dtype)
 				if not pertod:

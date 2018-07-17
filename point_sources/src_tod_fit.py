@@ -260,17 +260,17 @@ class Likelihood:
 		div  = self.P.backward(work)
 		div[div==0] = 1
 		return rhs/div, div
-	def calc_chisq_fixamp(self, off):
-		# We want (d-Pa)'N"(d-Pa), but this suffers from poor accuracy because
-		# so many noisy numbers are summed. We don't need d'N"d, so the terms
-		# we care about are chisq = a'P'N"Pa - 2d'N"Pa = -2(Pa)'N"(d-Pa/2)
-		self.P.set_offset(off)
-		Nr = self.tod.copy()
-		self.P.forward(Nr, -self.amp0/2, pmul=1)
-		self.N.apply(Nr)
-		PNr = self.P.backward(Nr)
-		chisq = -2 * np.sum(self.amp0*PNr)
-		return chisq, self.amp0, self.amp0*0
+	#def calc_chisq_fixamp(self, off):
+	#	# We want (d-Pa)'N"(d-Pa), but this suffers from poor accuracy because
+	#	# so many noisy numbers are summed. We don't need d'N"d, so the terms
+	#	# we care about are chisq = a'P'N"Pa - 2d'N"Pa = -2(Pa)'N"(d-Pa/2)
+	#	self.P.set_offset(off)
+	#	Nr = self.tod.copy()
+	#	self.P.forward(Nr, -self.amp0/2, pmul=1)
+	#	self.N.apply(Nr)
+	#	PNr = self.P.backward(Nr)
+	#	chisq = -2 * np.sum(self.amp0*PNr)
+	#	return chisq, self.amp0, self.amp0*0
 	def calc_chisq_fixamp(self, off):
 		self.P.set_offset(off)
 		r = self.tod.copy()

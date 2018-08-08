@@ -12,9 +12,11 @@
 # Currently N and P take similar time. Can optimize P more with some effort, but P is dominated
 # by ffts, and can't improve much.
 from __future__ import division, print_function
-import numpy as np, time, h5py, astropy.io.fits, os, sys
+import numpy as np, time, astropy.io.fits, os, sys
 from scipy import optimize
-from enlib import utils, mpi, errors, fft, mapmaking, config, jointmap, pointsrcs
+from enlib import utils
+with utils.nowarn(): import h5py
+from enlib import mpi, errors, fft, mapmaking, config, jointmap, pointsrcs
 from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill
 from enact import filedb, actdata, actscan, nmat_measure
 
@@ -206,7 +208,6 @@ class ThumbMapper:
 		with utils.nowarn():
 			self.idiv = 1/self.div
 			self.idiv[~np.isfinite(self.idiv)] = 0
-			print(self.idiv)
 	def map(self, tod):
 		junk = np.zeros(self.pcut.njunk,tod.dtype)
 		rhs  = enmap.zeros(self.pthumb.shape, self.pthumb.wcs, tod.dtype)
@@ -271,16 +272,16 @@ class Likelihood:
 		PNr = self.P.backward(Nr)
 		chisq = -2 * np.sum(self.amp0*PNr)
 		return chisq, self.amp0, self.amp0*0
-	def calc_chisq_fixamp(self, off):
-		self.P.set_offset(off)
-		r = self.tod.copy()
-		self.P.forward(r, -self.amp0)
-		Nr = r.copy()
-		self.N.apply(Nr)
-		chisq = np.sum(r*Nr)
-		self.r = r
-		self.Nr = Nr
-		return chisq, self.amp0, self.amp0*0
+	#def calc_chisq_fixamp(self, off):
+	#	self.P.set_offset(off)
+	#	r = self.tod.copy()
+	#	self.P.forward(r, -self.amp0)
+	#	Nr = r.copy()
+	#	self.N.apply(Nr)
+	#	chisq = np.sum(r*Nr)
+	#	self.r = r
+	#	self.Nr = Nr
+	#	return chisq, self.amp0, self.amp0*0
 	def calc_chisq_fitamp(self, off):
 		self.P.set_offset(off)
 		ahat, aicov = self.fit_amp()
@@ -292,6 +293,15 @@ class Likelihood:
 			prior -= 2*jointmap.log_prob_gauss_positive_single(p)
 		chisq += prior
 		return chisq, ahat, aicov
+	def make_thumbs(self, off, amps):
+		self.P.set_offset(off)
+		tod2 = self.tod*0
+		self.P.forward(tod2, amps, pmul=1)
+		data   = self.thumb_mapper.map(self.tod.copy())
+		model  = self.thumb_mapper.map(tod2)
+		resid  = data-model
+		thumbs = enmap.samewcs([data,model,resid],data)
+		return thumbs
 	def chisq_wrapper(self, method="fitamp", thumb_path=None, thumb_interval=0, verbose=True):
 		if method == "fitamp": fun = self.calc_chisq_fitamp
 		else:                  fun = self.calc_chisq_fixamp
@@ -301,30 +311,8 @@ class Likelihood:
 			chisq, amps, aicov = fun(off)
 			t2 = time.time()
 			if self.thumb_mapper and thumb_path and thumb_interval and self.i % thumb_interval == 0:
-				tod2 = self.tod*0
-				self.P.forward(tod2, amps, pmul=1)
-				#with h5py.File(thumb_path % self.i + ".hdf", "w") as hfile:
-				#	hfile["data"] = self.tod[5]
-				#	hfile["model"] = tod2[5]
-				#	hfile["r"] = self.r[5]
-				#	hfile["Nr"] = self.Nr[5]
-				#print("tod resid",  np.sum(self.tod**2)-np.sum((self.tod-tod2)**2))
-				#r = self.tod-tod2
-				#Nr = r.copy()
-				#self.N.apply(Nr)
-				#Nd = self.tod.copy()
-				#self.N.apply(Nd)
-				#print("tod resid2", np.sum(self.tod*Nd)-np.sum(r*Nr))
-				#print("chisq consistency", np.sum(r*Nr)-chisq)
-				#r2 = self.tod.copy()
-				#self.P.forward(r2, -amps)
-				data   = self.thumb_mapper.map(self.tod.copy())
-				model  = self.thumb_mapper.map(tod2)
-				resid  = data-model
-				print("map resid", np.sum(data**2)-np.sum(resid**2))
-				thumbs = enmap.samewcs([data,model,resid],data)
+				thumbs = self.make_thumbs(off, amps)
 				enmap.write_map(thumb_path % self.i, thumbs)
-				del tod2, thumbs
 			if self.chisq0 is None: self.chisq0 = chisq
 			if verbose:
 				doff = (off - self.off0)/utils.arcmin
@@ -431,12 +419,16 @@ for ind in range(comm.rank, len(ids), comm.size):
 		nsrc = len(sids)
 		print("Restricted to %d srcs: %s" % (nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
 	if nsrc == 0: continue
-	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=False)
+	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=True)
 	# And minimize chisq
 	x0 = L.zip(L.off0)
-	likfun = L.chisq_wrapper(method=args.method, thumb_path=args.odir + "/thumb%03d.fits", thumb_interval=1)
+	progress_thumbs = args.minimaps and verbose >= 3
+	likfun = L.chisq_wrapper(method=args.method, thumb_path=args.odir + "/" + oid + "_thumb%03d.fits", thumb_interval=progress_thumbs)
 	pos    = optimize.fmin_powell(likfun,x0)
 	chisq, oamps, oaicov = likfun(pos, full=True)
+	if args.minimaps:
+		thumbs = L.make_thumbs(pos, oamps)
+		enmap.write_map(args.odir + "/" + oid + "_thumb.fits", thumbs)
 
 	# Output our fit
 	with h5py.File(args.odir + "/fit_%s.hdf" % oid, "w") as ofile:
@@ -446,8 +438,6 @@ for ind in range(comm.rank, len(ids), comm.size):
 		ofile["aicov"] = oaicov
 		ofile["ivar"] = L.N.ivar
 
-	1/0
-	#FIXME
 
 	# Our likelihood is
 	# (d-Pa)'N"(d-Pa)

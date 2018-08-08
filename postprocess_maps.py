@@ -25,8 +25,9 @@ for fname in glob.glob(args.idir + "/*map????.fits"):
 	sub    = int(m.group(3))
 	it     = int(m.group(4))
 	if prefix not in datasets:
-		datasets[prefix] = [bunch.Bunch(it=0, name="") for i in range(nway)]
-	datasets[prefix][sub].it   = max(datasets[prefix][sub].it, it)
+		datasets[prefix] = [bunch.Bunch(it=0, maxit=0, its=set(), name="") for i in range(nway)]
+	datasets[prefix][sub].maxit = max(datasets[prefix][sub].maxit, it)
+	datasets[prefix][sub].its.add(it)
 	datasets[prefix][sub].name = "_".join(fname.split("_")[:-2])
 
 nchar = max([len(key) for key in datasets])
@@ -35,13 +36,16 @@ nchar = max([len(key) for key in datasets])
 for key in sorted(datasets.keys()):
 	d     = datasets[key]
 	minit = min([sub.it for sub in d])
-	if   args.iteration == "individual": pass
+	if   args.iteration == "individual":
+		for i in range(len(d)): d[i].it = d[i].maxit
 	elif args.iteration == "min":
 		for i in range(len(d)): d[i].it = minit
 	else:
 		try:
 			for i in range(len(d)):
-				d[i].it = int(args.iteration)
+				it = int(args.iteration)
+				if it in d[i].its:
+					d[i].it = int(args.iteration)
 		except ValueError:
 			raise ValueError(args.iteration)
 	
@@ -139,7 +143,7 @@ for iname in sorted(datasets.keys()):
 		print ipre, opre
 		# Do we have srcs? If so, our maps are source free, and the
 		# srcs must be added
-		has_srcs = os.path.isfile(ipre + "sky_srcs.fits")
+		has_srcs = os.path.exists(ipre + "sky_srcs.fits")
 		if not has_srcs:
 			if "map"  in outputs:
 				schedule(copy_mono, ipre + "sky_map%04d.fits" % sub.it, opre + "map.fits")

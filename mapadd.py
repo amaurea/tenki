@@ -27,7 +27,8 @@ def get_tilenames(dir):
 # Two cases: Normal enmaps or dmaps
 if not os.path.isdir(args.imaps[0]):
 	# Normal monotlithic map
-	add_maps(args.imaps, args.omap)
+	if comm.rank == 0:
+		add_maps(args.imaps, args.omap)
 else:
 	# Dmap. Each name is actually a directory, but they
 	# all have compatible tile names.

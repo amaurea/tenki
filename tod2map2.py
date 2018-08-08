@@ -30,14 +30,23 @@ config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=side
 config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=sidelobe:Saturn,prec=bin,lim_Saturn_min_el=0", "Default parameters for saturn map")
 config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelobe:Uranus,prec=bin,lim_Uranus_min_el=0", "Default parameters for uranus map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
-config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
+config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1,tol=0.5", "Default parameters for scan/pickup signal")
+#config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=0,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_sub_default",  "use=no,name=sub,value=1,sys=cel,type=map,mul=1,tmul=1,sky=yes", "Default parameters for map subtraction filter")
+config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=map,mul=+1,tmul=1,sky=yes,nopol=0", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=map,mul=-1,tmul=1,sky=yes,nopol=0", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
 config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
+config.default("filter_addphase_default",  "use=no,name=addphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
+config.default("filter_subphase_default",  "use=no,name=addphase,value=1,mul=-1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
+config.default("filter_fitphase_default",  "use=no,name=fitphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5,perdet=1", "Default parameters for phasemap subtraction filter")
+config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", "Default parameters for filter that simply scale the TOD by the given value")
+
+# Default map filter parameters
+config.default("mapfilter_gauss_default", "use=no,name=gauss,value=0,cap=1e3,type=gauss,sky=yes", "Default parameters for gaussian map filter in mapmaking")
 
 config.default("crossmap", True,  "Whether to output the crosslinking map")
 config.default("icovmap",  True, "Whether to output the inverse correlation map")
@@ -54,8 +63,9 @@ parser.add_argument("-d", "--dump", type=str, default="10,50,100,250,500,700,100
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
 parser.add_argument("--dets",       type=str, default=0,  help="Detector slice")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
-parser.add_argument("-S", "--signal", action="append",    help="Signals to solve for. For example -S sky:area.fits -S scan would solve for the sky map and scan pickup maps jointly, using area.fits as the map template.")
-parser.add_argument("-F", "--filter", action="append")
+parser.add_argument("-S", "--signal",    action="append", help="Signals to solve for. For example -S sky:area.fits -S scan would solve for the sky map and scan pickup maps jointly, using area.fits as the map template.")
+parser.add_argument("-F", "--filter",    action="append")
+parser.add_argument("-M", "--mapfilter", action="append")
 parser.add_argument("--group-tods", action="store_true")
 parser.add_argument("--individual", action="store_true")
 parser.add_argument("--tod-debug",  action="store_true")
@@ -87,7 +97,9 @@ root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
 if comm.rank == 0:
 	config.save(root + "config.txt")
 	with open(root + "args.txt","w") as f:
-		f.write(" ".join([pipes.quote(a) for a in sys.argv[1:]]) + "\n")
+		argstring = " ".join([pipes.quote(a) for a in sys.argv[1:]])
+		f.write(argstring + "\n")
+		print argstring
 	with open(root + "env.txt","w") as f:
 		for k,v in os.environ.items():
 			f.write("%s: %s\n" %(k,v))
@@ -176,7 +188,8 @@ for sig in signal_params:
 		assert "value" in sig and sig["value"] is not None, "Map-type signals need a template map as argument. E.g. -S sky:foo.fits"
 
 ######## Filter parmeters ########
-filter_params = setup_params("filter", ["scan","sub"], {"use":"no"})
+filter_params    = setup_params("filter", ["scan","sub"], {"use":"no"})
+mapfilter_params = setup_params("mapfilter", [], {"use":"no"})
 
 # Read in all our scans
 L.info("Reading %d scans" % len(filelist))
@@ -367,9 +380,16 @@ for out_ind in range(nouter):
 		elif param["type"] == "scan":
 			res = float(param["res"])*utils.arcmin
 			tol = float(param["tol"])*utils.degree
+			col_major = True
 			patterns, mypids = scanutils.classify_scanning_patterns(active_scans, comm=comm, tol=tol)
 			L.info("Found %d scanning patterns" % len(patterns))
-			signal = mapmaking.SignalPhase(active_scans, mypids, patterns, active_scans[0].dgrid, res=res, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
+			# Define our phase maps
+			nrow, ncol = active_scans[0].dgrid
+			array_dets = np.arange(nrow*ncol)
+			if col_major: array_dets = array_dets.reshape(nrow,ncol).T.reshape(-1)
+			det_unit   = nrow if col_major else ncol
+			areas      = mapmaking.PhaseMap.zeros(patterns, array_dets, res=res, det_unit=det_unit, dtype=dtype)
+			signal     = mapmaking.SignalPhase(active_scans, areas, mypids, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 		signals.append(signal)
@@ -385,6 +405,7 @@ for out_ind in range(nouter):
 	filters = []
 	filters2= []
 	src_filters = []
+	map_add_filters = []
 	for param in filter_params:
 		if param["name"] == "scan":
 			daz, nt, mode, niter = float(param["daz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
@@ -408,26 +429,63 @@ for out_ind in range(nouter):
 		elif param["name"] == "hwp":
 			nmode = int(param["value"])
 			filter = mapmaking.FilterHWPNotch(nmode)
-		elif param["name"] == "sub":
-			if "map" not in param: raise ValueError("-F sub needs a map file to subtract. e.g. -F sub:2,map=foo.fits")
+		elif param["name"] == "add":
+			if "map" not in param: raise ValueError("-F add/sub needs a map file to subtract. e.g. -F add:2,map=foo.fits")
 			mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
+			nopol = int(param["nopol"])
 			tmul = float(param["tmul"])
 			if mode == 0: continue
+			if param["type"] == "auto":
+				param["type"] = ("dmap" if os.path.isdir(fname) else "map")
 			if param["type"] == "dmap":
 				# Warning: This only works if a dmap has already been initialized, and
 				# has compatible coordinate system and pixelization! This is the disadvantage
 				# of dmaps - they are so closely tied to a set of scans that they only work
 				# in the coordinate system where the scans are reasonably local.
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
-				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=-mul, tmul=tmul)
+				if nopol: m[1:] = 0
+				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=mul, tmul=tmul)
 			else:
 				m = enmap.read_map(fname).astype(dtype)
-				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=-mul, tmul=tmul)
+				if nopol: m[1:] = 0
+				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul)
+			map_add_filters.append(filter)
 			if mode >= 2:
+				# In post mode we subtract the map that was added before each output. That's
+				# why mul is -1 here
 				for sparam, signal in matching_signals(param, signal_params, signals):
 					assert sparam["sys"] == param["sys"]
 					assert signal.area.shape[-2:] == m.shape[-2:]
-					signal.post.append(mapmaking.PostAddMap(m, mul=mul))
+					signal.post.append(mapmaking.PostAddMap(m, mul=-mul))
+		elif param["name"] == "addphase" or param["name"] == "fitphase":
+			if "map" not in param: raise ValueError("-F addphase/subphase/fitphase needs a phase dir to subtract. e.g. -F addphase:map=foo")
+			mode, fname, mul, tmul = int(param["value"]), param["map"], float(param["mul"]), float(param["tmul"])
+			tol = float(param["tol"])*utils.degree
+			# Read the info file to see which scanning patterns were used in the phase dir
+			phasemap = mapmaking.PhaseMap.read(fname)
+			npat     = len(phasemap.patterns)
+			# Find which phase map part each scan corresponds to. We get all the scan
+			# boxes, and then add our existing scanning pattern boxes as references.
+			# We can then just see which scans get grouped with which patterns.
+			my_boxes = scanutils.get_scan_bounds(myscans)
+			boxes = utils.allgatherv(my_boxes, comm)
+			rank  = utils.allgatherv(np.full(len(my_boxes),comm.rank),      comm)
+			boxes = np.concatenate([phasemap.patterns, boxes], 0)
+			labels= utils.label_unique(boxes, axes=(1,2), atol=tol)
+			if comm.rank == 0:
+				print "labels"
+				for b,l in zip(boxes, labels):
+					print "%8.3f %8.3f %8.3f %5d" % (b[0,0]/utils.degree,b[0,1]/utils.degree,b[1,1]/utils.degree,l)
+			pids  = utils.find(labels[:npat], labels[npat:])
+			mypids= pids[rank==comm.rank]
+			if param["name"] == "addphase":
+				filter = mapmaking.FilterAddPhase(myscans, phasemap, mypids, mmul=mul, tmul=tmul)
+			else:
+				filter = mapmaking.FilterDeprojectPhase(myscans, phasemap, mypids, int(param["perdet"])>0, mmul=mul, tmul=tmul)
+		elif param["name"] == "scale":
+			value = float(param["value"])
+			if value == 1: continue
+			filter = mapmaking.FilterScale(value)
 		elif param["name"] == "buddy":
 			if "map" not in param: raise ValueError("-F buddy needs a map file to subtract. e.g. -F buddy:map=foo.fits")
 			mode  = int(param["value"])
@@ -475,7 +533,7 @@ for out_ind in range(nouter):
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 		# Add to normal filters of post-noise-model filters based on parameters
 		if "postnoise" in param and int(param["postnoise"]) > 0:
-			print "postnosie"
+			print "postnosie", param["name"]
 			filters2.append(filter)
 		else:
 			filters.append(filter)
@@ -485,6 +543,16 @@ for out_ind in range(nouter):
 		filters.append(mapmaking.FilterGapfill())
 	if len(filters2) > 0:
 		filters2.append(mapmaking.FilterGapfill())
+
+	L.info("Initializing mapfilters")
+	for param in mapfilter_params:
+		if param["name"] == "gauss":
+			scale = float(param["value"])*utils.arcmin*utils.fwhm
+			cap   = float(param["cap"])
+			filter= mapmaking.MapfilterGauss(scale, cap=cap)
+			for sparam, signal in matching_signals(param, signal_params, signals):
+				print "adding gauss filter to " + signal.name
+				signal.filters.append(filter)
 
 	# Initialize weights. Done in a hacky manner for now. This and the above needs
 	# to be reworked.
@@ -598,6 +666,19 @@ for out_ind in range(nouter):
 			srcmap = mapmaking.calc_ptsrc_map(signal, signal_cut, myscans, src_filters)
 			signal.write(root, "srcs", srcmap)
 			del srcmap
+	if map_add_filters:
+		L.info("Writing added/subtracted template map")
+		for fi, filter in enumerate(map_add_filters):
+			map   = filter.map * filter.mul
+			# It would be nice to only write the total added map, but they may be a mix
+			# of dmaps and enmap, or even have different coordinate systems, so this is safer.
+			# Anyway, in almost all the cases only a single map will be added
+			oname = root + "added" + ("_%d"%fi if len(map_add_filters)>1 else "") + ".fits"
+			if isinstance(map, dmap.Dmap):
+				map.write(oname)
+			elif comm.rank == 0:
+				enmap.write_map(oname, map)
+			del map
 
 	L.info("Writing RHS")
 	eqsys.write(root, "rhs", eqsys.b)
@@ -624,7 +705,7 @@ for out_ind in range(nouter):
 			if resume != 0 and cg.i % np.abs(resume) == 0:
 				cg.save(cgpath)
 			dt = bench.stats["cg_step"]["time"].last
-			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0:
+			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0 or cg.i == nmax:
 				if args.prepost: eqsys.write(root, "map%04d_prepost" % cg.i, cg.x)
 				x = eqsys.postprocess(cg.x)
 				eqsys.write(root, "map%04d" % cg.i, x)

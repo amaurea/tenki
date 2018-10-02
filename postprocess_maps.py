@@ -11,6 +11,7 @@ args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
 outputs = set(args.output.split(","))
+verbose = True
 
 # Look for map files in the input directory
 datasets = {}
@@ -81,6 +82,7 @@ def read_map(ifile, slice=None):
 
 def copy_mono(ifile, ofile, slice=None):
 	if args.cont and os.path.exists(ofile): return
+	if verbose: print "%3d copy_mono %s" % (comm.rank, ofile)
 	tfile = ofile + ".tmp"
 	map   = read_map(ifile, slice=slice)
 	enmap.write_map(tfile, map)
@@ -88,6 +90,7 @@ def copy_mono(ifile, ofile, slice=None):
 
 def add_mono(ifiles, ofile, slice=None):
 	if args.cont and os.path.exists(ofile): return
+	if verbose: print "%3d add_mono %s" % (comm.rank, ofile)
 	tfile = ofile + ".tmp"
 	omap  = read_map(ifiles[0], slice=slice)
 	for ifile in ifiles[1:]:
@@ -97,6 +100,7 @@ def add_mono(ifiles, ofile, slice=None):
 
 def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
 	if args.cont and os.path.exists(omapfile): return
+	if verbose: print "%3d coadd_mono %s" % (comm.rank, omapfile)
 	omap, odiv = None, None
 	tmapfile = omapfile + ".tmp"
 	if odivfile: tdivfile = odivfile + ".tmp"
@@ -115,12 +119,14 @@ def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
 
 def copy_plain(ifile, ofile):
 	if args.cont and os.path.exists(ofile): return
+	if verbose: print "%3d copy_plain %s" % (comm.rank, ofile)
 	tfile = ofile + ".tmp"
 	shutil.copyfile(ifile, tfile)
 	shutil.move(tfile, ofile)
 
 def cat_files(ifiles, ofile):
 	if args.cont and os.path.exists(ofile): return
+	if verbose: print "%3d cat %s" % (comm.rank, ofile)
 	with open(ofile, "w") as ofh:
 		for ifile in ifiles:
 			with open(ifile, "r") as ifh:
@@ -140,7 +146,7 @@ for iname in sorted(datasets.keys()):
 	for si, sub in enumerate(d):
 		ipre = args.idir + "/" + sub.name + "_"
 		opre = obase + "_%dway_set%d_" % (len(d),si)
-		print ipre, opre
+		#print ipre, opre
 		# Do we have srcs? If so, our maps are source free, and the
 		# srcs must be added
 		has_srcs = os.path.exists(ipre + "sky_srcs.fits")
@@ -200,7 +206,6 @@ inds = np.random.permutation(len(queue))
 for i in range(comm.rank, len(queue), comm.size):
 	ind = inds[i]
 	func, fargs, kwargs = queue[ind]
-	print comm.rank, func.__name__, fargs
 	try:
 		func(*fargs, **kwargs)
 	except Exception as e:

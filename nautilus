@@ -1,0 +1,202 @@
+#!/usr/bin/env python
+# This program automates the running of nemo, which otherwise requires tedious
+# patch-dependent configuration
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("maps_and_divs", nargs="+", help="map map map ... div div div if not transpose, else interleaved")
+parser.add_argument("-T", "--transpose", action="store_true")
+parser.add_argument("-d", "--dry-run",   action="store_true")
+parser.add_argument("-s", "--serial",    action="store_true")
+args = parser.parse_args()
+import numpy as np, os, re, sys, shutil, subprocess
+from enlib import utils, enmap
+from scipy import optimize
+
+afreqs = {
+	"pa1":["f150"],"pa2":["f150"],"pa3":["f090","f150"],
+	"pa4":["f150","f220"],"pa5":["f090","f150"],"pa6":["f090","f150"],
+}
+sarrs = {
+	"s13":["pa1"],"s14":["pa1","pa2"],"s15":["pa1","pa2","pa3"],
+	"s16":["pa2","pa3","pa4"],"s17":["pa4","pa5","pa6"],"s18":["pa4","pa5","pa6"],
+}
+ffreqs = {"f090": 97.0, "f150": 148.0, "f220": 220.}
+# This should probably not be hardcoded here, but inferred from the mapdata config
+beam_fmt = "/home/snaess/project/actpol/depot/sigurdkn/beam/marius/mr3_{season}_{array}_{freq}_nohwp_night_beam_profile_instant_2018022.txt"
+
+aseas = {}
+for season in sarrs:
+	for array in sarrs[season]:
+		if array not in aseas: aseas[array] = []
+		aseas[array].append(season)
+
+nmap = len(args.maps_and_divs)//2
+if not args.transpose:
+	imaps = args.maps_and_divs[:nmap]
+	idivs = args.maps_and_divs[nmap:]
+else:
+	imaps = args.maps_and_divs[0::2]
+	idivs = args.maps_and_divs[1::2]
+
+for imapfile, idivfile in zip(imaps, idivs):
+	print imapfile
+	# Parse the file name looking for array and season information. We need all this
+	# just to infer which beam to use!
+	season, array, freq = None, None, None
+	toks = ".".join(os.path.basename(imapfile).split(".")[:-1]).split("_")
+	for tok in toks:
+		m = re.match(r"(pa\d)", tok)
+		if m and not array:  array  = m.group(1)
+		m = re.match(r"(s\d\d)", tok)
+		if m and not season: season = m.group(1)
+		m = re.match(r"\+?(f\d\d\d)", tok)
+		if m and not freq:   freq   = m.group(1)
+	if array is None:
+		print "Could not infer array from '%s'. Skipping" % imapfile
+		continue
+	if season is None:
+		if array in aseas: season = aseas[array][0]
+		else:
+			print "Could not infer season from '%s'. Skipping" % imapfile
+			continue
+	if freq is None:
+		if array in afreqs: freq = afreqs[array][0]
+		else:
+			print "Could not infer freq from '%s'. Skipping" % imapfile
+			continue
+	beam = beam_fmt.format(season=season, array=array, freq=freq)
+
+	def find_largest_rectangle(mask, p0):
+		def calc_chisq(x):
+			box = utils.nint(x.reshape(2,2))
+			if np.any(box[1] < box[0]):      return np.inf
+			if np.any(box[0] < 0):           return np.inf
+			if np.any(box[1] >= mask.shape): return np.inf
+			h, w   = box[1]-box[0]
+			area   = h*w
+			bad    = np.sum(~mask[box[0,0]:box[1,0],box[0,1]:box[1,1]])
+			chisq = -area + 1e6*bad
+			#print "A %4d %4d %4d %4d %15.7e" % (x[0],x[1],x[2],x[3],chisq)
+			return chisq
+		p0 = np.array(p0)
+		x0 = np.array([p0,p0+1],float).reshape(-1)
+		# Powell sometimes gets stuck here. This seems like a case where simplex is
+		# better.
+		x  = optimize.fmin(calc_chisq, x0, disp=False)
+		return utils.nint(x.reshape(2,2))
+
+	# Automatically find the reference region by finding the biggest
+	# rectangle that has no holes. We base this on a low-resolution
+	# version of the map.
+	shape, wcs = enmap.read_map_geometry(idivfile)
+	down= 1
+	div = enmap.read_fits(idivfile, sel=(Ellipsis, slice(None,None,down), slice(None, None, down))).preflat[0]
+	p0  = np.array(div.shape[-2:])//2
+	ref = 0
+	for i in range(3):
+		ref = np.median(div[div>ref/8])
+	mask = div>ref/5
+	pixbox = find_largest_rectangle(mask, p0)
+	box    = div.pix2sky(pixbox.T).T/utils.degree
+	# Shrink box to whole degrees to make nemo happy
+	box[0] = np.ceil(box[0])
+	box[1] = np.floor(box[1])
+	dec1, ra1, dec2, ra2 = box.reshape(-1)
+
+	# If the box is too tall, switch to dec slice mode
+	if dec2-dec1 > 30:
+		dec1 = "'numDecSteps'"
+		dec2 = 8
+	
+	print ra1, ra2, dec1, dec2
+
+	# Estimate memory usage. Assume double precision and 16 copies
+	mem = shape[-2]*shape[-1]*2*24*8/1024.**3
+	print "estimated memory: %.1fG" % mem
+
+	# Generate the nemo parameter string
+	nemo_params = r"""# Nautilus auto-generated parameters for nemo
+unfilteredMaps = [\
+	{'mapFileName': "%(map)s", \
+	'weightsFileName': "%(div)s", \
+	'obsFreqGHz': %(freq)s, 'units': 'uK', \
+	'beamFileName': "%(beam)s", \
+	'addNoise': None, \
+	'pointSourceRemoval': None, \
+	'pointSourceMask': None, \
+	'surveyMask': None \
+}]
+
+# Detection options
+thresholdSigma = 3.5
+minObjPix = 1
+rejectBorder = 0 #would be nice to calibrate this.
+objIdent = 'nemo-'
+longNames = False
+catalogCuts=['SNR > 3.5']
+findCenterOfMass = True
+useInterpolator = True
+
+useMPI = False
+
+# tileDeck options - cut-up each map into smaller sections, store in a multi-extension .fits file
+makeTileDeck = False
+tileOverlapDeg = 1.0
+
+mapFilters = [{\
+		'label': "Beam", 'class': "BeamRealSpaceMatchedFilter", \
+		'params': {'noiseParams': {'method': "max(dataMap,CMB)", \
+			'matchedFilterClass': 'BeamMatchedFilter', \
+			'RADecSection':  [%(ra1)s, %(ra2)s, %(dec1)s, %(dec2)s],\
+			'kernelMaxArcmin': 7., \
+			'symmetrize': False, \
+			'noiseGridArcmin': 20., \
+			'saveHighPassMap': False, \
+			'saveRMSMap': False}, \
+			'bckSub': True, \
+			'outputUnits': 'uK', \
+		}, \
+	}]
+
+# Photometry options
+photometryOptions = {'photFilter': 'Beam'}
+
+# Set this to True to generate a sky sim (with noise), run all the filters over it, and measure contamination
+# Set numSkySims to number required - we need to average over many as results vary a fair bit
+estimateContaminationFromSkySim=False
+numSkySims=1
+
+# Set this to True to estimate contamination by running cluster finder over inverted maps
+# This is sensitive to how well point source masking is done
+estimateContaminationFromInvertedMaps=False
+""" % {
+	"map":os.path.abspath(imapfile), "div":os.path.abspath(idivfile), "freq":ffreqs[freq],
+	"dec1":dec1, "ra1":ra1, "dec2":dec2, "ra2":ra2, "beam":beam}
+
+	# Set up nemo work directory
+	workdir = imapfile + ".work"
+	#shutil.rmtree(workdir, ignore_errors=True)
+	utils.mkdir(workdir)
+	with open(workdir + "/nemo.par", "w") as f:
+		f.write(nemo_params)
+	ofile = ".".join(imapfile.split(".")[:-1]) + "_catalog.txt"
+	runfile = workdir + "/batch.txt"
+
+	# Build a batch script. Nemo is not parallel, so this will just ask for
+	# one core per node
+	batch = r"""#!/bin/bash
+#SBATCH --nodes 1 --ntasks-per-node=1 --cpus-per-task=1 --time=4:00:00 --mem-per-cpu=%(mem)dM
+#SBATCH --job-name %(name)s
+cd "%(wdir)s"
+nemo nemo.par
+cp nemo/nemo_optimalCatalog.csv "%(ofile)s"
+""" % {"name": "_".join(["nemo"]+toks), "wdir": workdir, "ofile": os.path.abspath(ofile),
+		"mem": mem*1024}
+	with open(runfile, "w") as f:
+		f.write(batch)
+	
+	if not args.dry_run:
+		if not args.serial:
+			subprocess.call(["sbatch",runfile])
+		else:
+			subprocess.call(["bash",runfile])

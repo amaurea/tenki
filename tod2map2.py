@@ -3,7 +3,7 @@ from enlib import utils
 with utils.nowarn(): import h5py
 from enlib import enmap, pmat, fft, config, array_ops, mapmaking, nmat, errors, mpi
 from enlib import log, bench, dmap, coordinates, scan as enscan, scanutils
-from enlib import pointsrcs, bunch
+from enlib import pointsrcs, bunch, planet9, ephemeris, parallax
 from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import actscan, nmat_measure, filedb, todinfo
@@ -29,6 +29,8 @@ config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=sidelobe:M
 config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=sidelobe:Jupiter,prec=bin,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
 config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=sidelobe:Saturn,prec=bin,lim_Saturn_min_el=0", "Default parameters for saturn map")
 config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelobe:Uranus,prec=bin,lim_Uranus_min_el=0", "Default parameters for uranus map")
+config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=sidelobe:Neptune,prec=bin,lim_Neptune_min_el=0", "Default parameters for neptune map")
+config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,lim_Pluto_min_el=0", "Default parameters for pluto map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1,tol=0.5", "Default parameters for scan/pickup signal")
 #config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
@@ -88,7 +90,7 @@ filedb.init()
 db = filedb.data
 filelist = todinfo.get_tods(args.filelist, filedb.scans)
 if args.group_tods:
-	filelist = data.group_ids(filelist)
+	filelist = scanutils.get_tod_groups(filelist)
 
 utils.mkdir(args.odir)
 root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
@@ -334,7 +336,34 @@ def write_noise_stats(fname, stats):
 	with open(fname, "w") as f:
 		for line in stats:
 			f.write("%s %6.3f :: " % (line["id"],line["asens"]))
-			f.write(" ".join(["%13s" % ("%d:%7.3f" % (d,s)) for d,s in zip(line["dets"],line["dsens"])]) + "\n")
+			f.write(" ".join(["%13s" % ("%s:%7.3f" % (d,s)) for d,s in zip(line["dets"],line["dsens"])]) + "\n")
+
+def setup_extra_transforms(param):
+	extra = []
+	if "p9" in param:
+		# Planet 9 search coordinate system: p9=elemfile:tref. Includes
+		# both parallax and motion compensation
+		toks     = param["p9"].split(":")
+		elemfile = toks[0]
+		tref     = float(toks[1]) if len(toks)>1 else 1380000000.0
+		tref     = utils.ctime2mjd(tref)
+		obj      = ephemeris.read_object(elemfile)
+		p9       = planet9.MotionCompensator(obj)
+		def trf(pos, time):
+			# We ignore the polarization rotation for now
+			opos = pos.copy()
+			opos[:2] = p9.compensate(pos[:2], time, tref)
+			return opos
+		extra.append(trf)
+	if "parallax" in param:
+		# Simple parallax compensation. parallax=dist, with dist in AU
+		dist = float(param["parallax"])
+		def trf(pos, time):
+			opos = pos.copy()
+			opos[:2] = parallax.earth2sun(pos[:2], time, dist)
+			return opos
+		extra.append(trf)
+	return extra
 
 # UGLY HACK: Handle individual output file mode
 nouter = 1
@@ -360,23 +389,23 @@ for out_ind in range(nouter):
 		elif param["type"] == "map":
 			area = enmap.read_map(param["value"])
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
+			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "fmap":
 			area = enmap.read_map(param["value"])
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-			signal = mapmaking.SignalMapFast(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
+			signal = mapmaking.SignalMapFast(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "dmap":
 			area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
+			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "fdmap":
 			area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-			signal = mapmaking.SignalDmapFast(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
+			signal = mapmaking.SignalDmapFast(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "bmap":
 			area = enmap.read_map(param["value"])
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-			signal = mapmaking.SignalMapBuddies(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"])
+			signal = mapmaking.SignalMapBuddies(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "scan":
 			res = float(param["res"])*utils.arcmin
 			tol = float(param["tol"])*utils.degree

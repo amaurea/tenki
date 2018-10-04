@@ -17,13 +17,13 @@ from scipy import optimize
 from enlib import utils
 with utils.nowarn(): import h5py
 from enlib import mpi, errors, fft, mapmaking, config, jointmap, pointsrcs
-from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill
+from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill, wcs as enwcs
 from enact import filedb, actdata, actscan, nmat_measure
 
 config.set("downsample", 1, "Amount to downsample tod by")
 config.set("gapfill", "linear", "Gapfiller to use. Can be 'linear' or 'joneig'")
 config.default("pmat_interpol_pad", 10.0, "Number of arcminutes to pad the interpolation coordinate system by")
-config.default("pmat_interpol_max_size", 1000000, "Maximum mesh size in pointing interpolation. Worst-case time and memory scale at most proportionally with this.")
+config.default("pmat_interpol_max_size", 4000000, "Maximum mesh size in pointing interpolation. Worst-case time and memory scale at most proportionally with this.")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "./enkirc")
 parser.add_argument("mode", help="Mode to use. Can be srcs or planet. This sets up useful defaults for other arguments")
@@ -40,6 +40,9 @@ parser.add_argument("-A", "--minamp",    type=float, default=None)
 parser.add_argument("-v", "--verbose",   action="count", default=0)
 parser.add_argument("-q", "--quiet",     action="count", default=0)
 parser.add_argument("-p", "--perdet",    type=int,   default=None)
+parser.add_argument(      "--minsn",     type=float, default=1)
+parser.add_argument(      "--dump-tod",  action="store_true")
+parser.add_argument(      "--dump-tod-ndet", type=int, default=8)
 args = parser.parse_args()
 
 #config.default("pmat_accuracy", 10.0, "Factor by which to lower accuracy requirement in pointing interpolation. 1.0 corresponds to 1e-3 pixels and 0.1 arc minute in polangle")
@@ -51,13 +54,19 @@ def read_srcs(fname):
 	return np.array([data.ra*utils.degree, data.dec*utils.degree,data.I])
 
 filedb.init()
-ids     = filedb.scans[args.sel]
+db      = filedb.scans.select(args.sel)
+ids     = db.ids
 comm    = mpi.COMM_WORLD
 dtype   = np.float64
 ndir    = 1
 verbose = args.verbose - args.quiet
 R       = args.radius*utils.arcmin
 res     = args.res*utils.arcmin
+poly_pad= 3*utils.degree
+grid_bounds = np.array([[-2,-3],[2,5]])*utils.arcmin
+grid_res    = 0.75*utils.arcmin
+#grid_bounds = np.array([[-3,-3],[3,2]])*utils.arcmin
+#grid_res    = 0.25*utils.arcmin
 utils.mkdir(args.odir)
 
 # Set up our mode-dependent arguments
@@ -67,8 +76,8 @@ if args.mode == "srcs":
 	planet = None
 	srcdata= read_srcs(args.srcdb_or_planet)
 	src_sys= "cel"
-	bounds = filedb.scans.select(ids).data["bounds"]
-	bounds = filedb.scans.select(ids).data["bounds"]
+	bounds = db.data["bounds"]
+	bounds = db.data["bounds"]
 	prune_unreliable_srcs = True
 elif args.mode == "planet":
 	perdet = getdef(args.perdet, 1)>0
@@ -118,10 +127,8 @@ class PmatTot:
 		if perdet:
 			self.params = np.tile(self.params[:,:,None,:],(1,1,data.ndet,1))
 		scan = actscan.ACTScan(data.entry, d=data)
-		with bench.show("PmatPtsrc"):
-			self.psrc = pmat.PmatPtsrc(scan, self.params, sys=src_sys)
-		with bench.show("PmatCut"):
-			self.pcut = pmat.PmatCut(scan)
+		self.psrc = pmat.PmatPtsrc(scan, self.params, sys=src_sys)
+		self.pcut = pmat.PmatCut(scan)
 		# Extract basic offset
 		self.off0 = data.point_correction
 		self.off  = self.off0*1
@@ -156,13 +163,9 @@ class NmatTot:
 		self.ivar = self.nmat.ivar
 		self.cut  = data.cut
 	def apply(self, tod):
-		#gapfill.gapfill(tod, self.cut, inplace=True)
-		#sampcut.gapfill_const(self.cut, tod, 0, inplace=True)
 		nmat.apply_window(tod, self.window)
 		self.nmat.apply(tod)
 		nmat.apply_window(tod, self.window)
-		#sampcut.gapfill_const(self.cut, tod, 0, inplace=True)
-		#gapfill.gapfill(tod, self.cut, inplace=True)
 		return tod
 
 class PmatThumbs:
@@ -183,7 +186,8 @@ class PmatThumbs:
 		for i, pos in enumerate(srcpos.T):
 			if planet: sys = src_sys
 			else:      sys = ["icrs",[np.array([[pos[0]],[pos[1]],[0],[0]]),False]]
-			self.pmats.append(pmat.PmatMap(scan, area, sys=sys))
+			with config.override("pmat_accuracy", 10):
+				self.pmats.append(pmat.PmatMap(scan, area, sys=sys))
 		self.shape = (len(srcpos.T),3)+shape
 		self.wcs   = wcs
 	def forward(self, tod, map):
@@ -225,13 +229,13 @@ class ThumbMapper:
 # dchisq = -2*d(Pa)'N"(d-Pa/2) + (Pa')N"dPa = 
 
 class Likelihood:
-	def __init__(self, data, srcpos, srcamp, perdet=False, thumbs=False):
+	def __init__(self, data, srcpos, srcamp, perdet=False, thumbs=False, N=None, method="fixamp"):
 		# Set up fiducial source model. These source parameters
 		# are not the same as those we will be optimizing.
 		with bench.show("PmatTot"):
 			self.P = PmatTot(data, srcpos, perdet=perdet)
 		with bench.show("NmatTot"):
-			self.N = NmatTot(data)
+			self.N = N if N else NmatTot(data)
 		self.tod  = data.tod # might only need the one below
 		with bench.show("Nmat apply"):
 			self.Nd   = self.N.apply(self.tod.copy())
@@ -246,22 +250,29 @@ class Likelihood:
 			with bench.show("ThumbMapper"):
 				self.thumb_mapper = ThumbMapper(data, srcpos, self.P.pcut, self.N.nmat, perdet=perdet)
 		self.amp_unit, self.off_unit = 1e3, utils.arcmin
+		# Save samples from the wrapper, so we can use them to estimate uncertainty
+		self.samples = bunch.Bunch(offs=[], amps=[], aicovs=[], chisqs=[])
+		self.method  = method
 	#def zip(self, off, amps): return np.concatenate([off/self.off_unit, amps[:,0]/self.amp_unit],0)
 	#def unzip(self, x): return x[:2]*self.off_unit, x[2:,None]*self.amp_unit
 	def zip(self, off): return off/self.off_unit
 	def unzip(self, x): return x*self.off_unit
-	def fit_amp(self):
+	def fit_amp(self, off=None):
 		"""Compute the ML amplitude for each point source, along with their covariance.
 		This assumes independent source amplitudes. For perdet mapping, this means we may
 		need to use detector-diagonal noise."""
+		if off is not None: self.P.set_offset(off)
 		rhs = self.P.backward(self.Nd)
 		work = np.zeros(self.tod.shape, self.tod.dtype)
 		self.P.forward(work, rhs*0+1)
 		self.N.apply(work)
 		div  = self.P.backward(work)
-		div[div==0] = 1
-		return rhs/div, div
+		safediv = div.copy()
+		safediv[div==0] = 1
+		return rhs/safediv, div
 	def calc_chisq_fixamp(self, off):
+		# Compute (the nonstatic part of) the chisquare for the given offset, while
+		# keeping the amplitudes fixed to their fiducial values.
 		# We want (d-Pa)'N"(d-Pa), but this suffers from poor accuracy because
 		# so many noisy numbers are summed. We don't need d'N"d, so the terms
 		# we care about are chisq = a'P'N"Pa - 2d'N"Pa = -2(Pa)'N"(d-Pa/2)
@@ -272,27 +283,36 @@ class Likelihood:
 		PNr = self.P.backward(Nr)
 		chisq = -2 * np.sum(self.amp0*PNr)
 		return chisq, self.amp0, self.amp0*0
-	#def calc_chisq_fixamp(self, off):
-	#	self.P.set_offset(off)
-	#	r = self.tod.copy()
-	#	self.P.forward(r, -self.amp0)
-	#	Nr = r.copy()
-	#	self.N.apply(Nr)
-	#	chisq = np.sum(r*Nr)
-	#	self.r = r
-	#	self.Nr = Nr
-	#	return chisq, self.amp0, self.amp0*0
+	def calc_chisq_fixamp_simple(self, off):
+		# Computes r'N"r directly in time domain. Numerically lossy
+		self.P.set_offset(off)
+		r = self.tod.copy()
+		self.P.forward(r, -self.amp0)
+		Nr = r.copy()
+		self.N.apply(Nr)
+		chisq = np.sum(r*Nr)
+		self.r = r
+		self.Nr = Nr
+		return chisq, self.amp0, self.amp0*0
 	def calc_chisq_fitamp(self, off):
 		self.P.set_offset(off)
 		ahat, aicov = self.fit_amp()
 		chisq = -np.sum(ahat**2*aicov)
-		# Prior
+		return chisq, ahat, aicov
+	def calc_chisq_posamp(self, off):
+		chisq, ahat, aicov = self.calc_chisq_fitamp(off)
 		prior = 0
 		positivity = (ahat*aicov**0.5).reshape(-1)
 		for p in positivity:
 			prior -= 2*jointmap.log_prob_gauss_positive_single(p)
 		chisq += prior
 		return chisq, ahat, aicov
+	def get_chisq_fun(self, method=None):
+		if method is None: method = self.method
+		if   method == "fitamp": fun = self.calc_chisq_fitamp
+		elif method == "posamp": fun = self.calc_chisq_posamp
+		else:                    fun = self.calc_chisq_fixamp
+		return fun
 	def make_thumbs(self, off, amps):
 		self.P.set_offset(off)
 		tod2 = self.tod*0
@@ -302,9 +322,8 @@ class Likelihood:
 		resid  = data-model
 		thumbs = enmap.samewcs([data,model,resid],data)
 		return thumbs
-	def chisq_wrapper(self, method="fitamp", thumb_path=None, thumb_interval=0, verbose=True):
-		if method == "fitamp": fun = self.calc_chisq_fitamp
-		else:                  fun = self.calc_chisq_fixamp
+	def chisq_wrapper(self, method=None, thumb_path=None, thumb_interval=0, verbose=True):
+		fun = self.get_chisq_fun(method)
 		def wrapper(off, full=False):
 			t1 = time.time()
 			off = self.unzip(off)
@@ -316,19 +335,89 @@ class Likelihood:
 			if self.chisq0 is None: self.chisq0 = chisq
 			if verbose:
 				doff = (off - self.off0)/utils.arcmin
-				msg = "%4d %6.3f %6.3f" % (self.i,doff[0],doff[1])
+				msg = "%4d %8.5f %8.5f" % (self.i,doff[0],doff[1])
 				famps, faicov = amps.reshape(-1), aicov.reshape(-1)
 				for i in range(len(famps)):
 					nsigma = (famps[i]**2*faicov[i])**0.5
 					msg += " %7.3f %4.1f" % (famps[i]/self.amp_unit, nsigma)
 				msg += " %12.5e %7.2f" % (self.chisq0-chisq, t2-t1)
 				print(msg)
+				self.samples.offs.append(off)
+				self.samples.amps.append(amps)
+				self.samples.aicovs.append(aicov)
+				self.samples.chisqs.append(chisq)
 			self.i += 1
 			if not full:
 				return chisq
 			else:
 				return chisq, amps, aicov
 		return wrapper
+	def estimate_error(self, off, method=None, step=0.1):
+		# Simple numerical second derivative in each dimension.
+		# chisq = x**2/sigma**2 => ddchisq = 2/sigma**2 => sigma = (2/ddchisq)**0.5
+		fun = self.get_chisq_fun(method)
+		off  = np.array(off)
+		doff = self.off_unit*step
+		vmid = fun(off)[0]
+		derivs = off*0
+		for dim in range(len(off)):
+			u = off*0; u[dim] = 1
+			v1 = fun(off + u*doff)[0]
+			v2 = fun(off - u*doff)[0]
+			derivs[dim] = (v2+v1-2*vmid)/doff**2
+		sigma = (2/derivs)**0.5
+		return sigma
+	def get_model(self, off, amps):
+		self.P.set_offset(off)
+		tod2 = self.tod*0
+		self.P.forward(tod2, amps, pmul=1)
+		return tod2
+
+def build_grid_geometry(bounds, res):
+	"""bounds: [[y1,x1],[y2,x2]] in rads
+	res: resolution in rads
+	Returns shape, wcs"""
+	bounds = np.array(bounds)
+	ngrid  = np.round((bounds[1]-bounds[0])/res).astype(int)+1
+	wcs = enwcs.WCS(naxis=2)
+	wcs.wcs.cdelt[:] = res/utils.degree
+	wcs.wcs.crpix[:] = 1
+	wcs.wcs.crval = bounds[0,::-1]/utils.degree
+	wcs.wcs.ctype = ["RA---CAR","DEC--CAR"]
+	return tuple(ngrid), wcs
+
+def eval_offs(L, likwrap, offs):
+	res = offs.preflat[0]*0
+	oflat = offs.reshape(2,-1)
+	rflat = res.reshape(-1)
+	for i in range(rflat.size):
+		rflat[i] = likwrap(L.zip(oflat[:,i]))
+	return res
+
+def rhand_polygon(poly):
+	"""Returns True if the polygon is ordered in the right-handed convention,
+	where the sum of the turn angles is positive"""
+	poly = np.concatenate([poly,poly[:1]],0)
+	vecs = poly[1:]-poly[:-1]
+	vecs /= np.sum(vecs**2,1)[:,None]**0.5
+	vecs = np.concatenate([vecs,vecs[:1]],0)
+	cosa, sina = vecs[:-1].T
+	cosb, sinb = vecs[1:].T
+	sins = sinb*cosa - cosb*sina
+	coss = sinb*sina + cosb*cosa
+	angs = np.arctan2(sins,coss)
+	tot_ang = np.sum(angs)
+	return tot_ang > 0
+
+def pad_polygon(poly, pad):
+	"""Given poly[nvertex,2], return a new polygon where each vertex has been moved
+	pad outwards."""
+	sign  = -1 if rhand_polygon(poly) else 1
+	pwrap = np.concatenate([poly[-1:],poly,poly[:1]],0)
+	vecs  = pwrap[2:]-pwrap[:-2]
+	vecs /= np.sum(vecs**2,1)[:,None]**0.5
+	vort  = np.array([-vecs[:,1],vecs[:,0]]).T
+	return poly + vort * sign * pad
 
 # (d-Pa)'N"(d-Pa) = d'N"d + (Pa)'N"(Pa) - 2*d'N"Pa
 
@@ -347,7 +436,6 @@ class Likelihood:
 #        = K int_amp exp(-0.5*[
 #             a'P'N"P(a-(P'N"P)"P'N"d
 
-
 # (d-Pa)'N"(d-Pa) = d'N"d - 2d'N"Pa + (Pa)'N"Pa
 
 # Load source database
@@ -358,6 +446,8 @@ allowed &= set(np.where(amps > args.minamp)[0])
 if args.srcs is not None:
 	selected = [int(w) for w in args.srcs.split(",")]
 	allowed &= set(selected)
+
+f = open(args.odir + "/fits_%03d.txt" % comm.rank, "w")
 
 # Iterate over tods
 for ind in range(comm.rank, len(ids), comm.size):
@@ -375,6 +465,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		mjd       = utils.ctime2mjd(float(id.split(".")[0]))
 		srccel    = coordinates.transform(src_sys, "cel", srcpos, time=mjd)
 		srccel[0] = utils.rewind(srccel[0], poly[0,0])
+		poly      = pad_polygon(poly.T, poly_pad).T
 		sids      = np.where(utils.point_in_polygon(srccel.T, poly.T))[0]
 		sids      = sorted(list(set(sids)&allowed))
 	else:
@@ -397,7 +488,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		data = actdata.read(entry, exclude=["tod"], verbose=verbose)
 		data+= actdata.read_tod(entry)
 		data = actdata.calibrate(data, verbose=verbose)
-		#data.restrict(dets=data.dets[:100])
+		#data.restrict(dets=data.dets[100:200])
 		# Avoid planets while building noise model
 		if planet is not None:
 			data.cut_noiseest *= actdata.cuts.avoidance_cut(data.boresight, data.point_offset, data.site, planet, R)
@@ -414,43 +505,75 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# Find out which sources are reliable, so we don't waste time on bad ones
 	if prune_unreliable_srcs:
 		_, aicov = L.fit_amp()
-		good = amps[sids]**2*aicov[:,0] > 1
+		good = amps[sids]**2*aicov[:,0] > args.minsn**2
 		sids = [sid for sid,g in zip(sids,good) if g]
 		nsrc = len(sids)
 		print("Restricted to %d srcs: %s" % (nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
 	if nsrc == 0: continue
-	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=True)
+	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=True, N=L.N, method=args.method)
 	# And minimize chisq
-	x0 = L.zip(L.off0)
 	progress_thumbs = args.minimaps and verbose >= 3
-	likfun = L.chisq_wrapper(method=args.method, thumb_path=args.odir + "/" + oid + "_thumb%03d.fits", thumb_interval=progress_thumbs)
-	pos    = optimize.fmin_powell(likfun,x0)
-	chisq, oamps, oaicov = likfun(pos, full=True)
+	likfun = L.chisq_wrapper(thumb_path=args.odir + "/" + oid + "_thumb%03d.fits", thumb_interval=progress_thumbs)
+	grid_shape, grid_wcs = build_grid_geometry(grid_bounds, grid_res)
+	grid_pos = enmap.posmap(grid_shape, grid_wcs) + L.off0[:,None,None]
+	grid_lik = eval_offs(L, likfun, grid_pos)
+	enmap.write_map(args.odir + "/grid_%s.fits" % oid, grid_lik)
+	x0 = enmap.argmin(grid_lik) + L.off0
+	x0 = L.zip(x0)
+	off    = L.unzip(optimize.fmin_powell(likfun,x0))
+	# Evaluate the ampitude at the ML point
+	oamps, oaicov = L.fit_amp(off)
+	#chisq, oamps, oaicov = likfun(off, full=True)
 	if args.minimaps:
-		thumbs = L.make_thumbs(pos, oamps)
+		thumbs = L.make_thumbs(off, oamps)
 		enmap.write_map(args.odir + "/" + oid + "_thumb.fits", thumbs)
+	# Estimate position errors using a few extra samples
+	doff = L.estimate_error(off)
+	
+	# Estimate our total S/N. We know that our amplitudes should be positive, so
+	# degrade the S/N 
+	zs = oamps * oaicov**0.5
+	chisqs = np.array([z**2 + 2*jointmap.log_prob_gauss_positive_single(z) for z in zs])
+	tot_sn = max(0,np.sum(chisqs))**0.5
+
+	off_off = off - L.P.off0
 
 	# Output our fit
 	with h5py.File(args.odir + "/fit_%s.hdf" % oid, "w") as ofile:
-		ofile["pos"]  = pos
-		ofile["dets"] = data.dets
+		ofile["off"]  = off
+		ofile["doff"] = doff
+		ofile["fidoff"] = L.P.off0
 		ofile["amps"] = oamps
 		ofile["aicov"] = oaicov
 		ofile["ivar"] = L.N.ivar
+		ofile["dets"] = data.dets
+		ofile["srcs"] = sids
+		ofile["srcpos"] = srcpos[:,sids]
+		ofile["fidamp"] = amps[sids]
 
+	# Format fit result in standard format
+	msg = ""
+	for si, sid in enumerate(sids):
+		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %8.4f %6.2f %6.2f | %7.2f %7.2f | %5.2f %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
+				id, sid,
+				off_off[0]/utils.arcmin, off_off[1]/utils.arcmin, doff[0]/utils.arcmin, doff[1]/utils.arcmin,
+				amps[sid]/1e3, oamps[si,0]/1e3, oaicov[si,0]**-0.5/1e3, oamps[si,0]*oaicov[si,0]**0.5, tot_sn,
+				srcpos[0,sid]/utils.degree, srcpos[1,sid]/utils.degree,
+				db.data["hour"][ind], db.data["baz"][ind], db.data["bel"][ind], db.data["waz"][ind],
+				L.P.off0[0]/utils.arcmin, L.P.off0[1]/utils.arcmin)
+	print(msg)
+	f.write(msg + "\n")
+	f.flush()
 
-	# Our likelihood is
-	# (d-Pa)'N"(d-Pa)
-	# = d'N"d + a'P'N"Pa - 2 a'P'N"d
-	# = chi0  + a'P'N"(Pa - 2 d)
-	# However, dot(d-Pa,N"(d-Pa)) is faster than using P't. So no need to factor out chi0
+	if args.dump_tod:
+		data_dump  = data.tod
+		model_dump = L.get_model(off, oamps)
+		resid_dump = data_dump - model_dump
+		best = np.argsort(np.max(model_dump,1))[::-1]
+		with h5py.File(args.odir + "/dump_%s.hdf" % oid, "w") as ofile:
+			ofile["data"]  = data_dump[best[:args.dump_tod_ndet]]
+			ofile["model"] = model_dump[best[:args.dump_tod_ndet]]
+			ofile["resid"] = resid_dump[best[:args.dump_tod_ndet]]
 
-	# But this is linear in a, so we can solve a directly.
-	# a <- N(a_ml, acov), where a_ml = (P'N"P)"P'N"Pd and acov = (P'N"P)"
-	# If the point sources are independent, then this requires 3 evaluations
-	# to build. If they are dependent, then it will be 3*nsrc. If sources
-	# are close to the edge, then forwards and backwards going scans
-	# will not be independent either, and you get 3*ndir*nsrc.
-	# This would need to be repeated every time P changes.
-	# On the other hand, plain MC or nonlinear minimization also takes
-	# about that long. This would need to 
+f.close()
+comm.Barrier()

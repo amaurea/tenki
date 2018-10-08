@@ -22,18 +22,26 @@ db     = filedb.scans.select(ids)
 ntod   = len(db)
 nsplit = args.nsplit
 nopt   = args.nopt if nsplit > 1 else 0
-optimize_crosslink = args.mode == "crosslink"
+optimize_subsets = args.mode == "crosslink"
 utils.mkdir(args.odir)
 
 # Determine which arrays we have. We can't process arrays independently,
 # as they in principle have correlated noise. But we also want to distinguish
 # between them
 pre, _, anames = np.char.rpartition(ids,".").T
-if optimize_crosslink:
+if args.mode == "crosslink":
 	# Treat rising and setting as separate arrays"
 	rise = utils.rewind(db.data["baz"],0,360) > 0
 	anames[rise]  = np.char.add(anames[rise], "r")
 	anames[~rise] = np.char.add(anames[~rise],"s")
+elif args.mode == "scanpat":
+	# Treat each scanning pattern as a different array
+	patterns = np.array([db.data["baz"],db.data["bel"],db.data["waz"]]).T
+	pids     = utils.label_unique(patterns, axes=(1,), atol=1.0)
+	npat     = np.max(pids)+1
+	for pid in range(npat):
+		anames[pids==pid] = np.char.add(anames[pids==pid], "p%d" % pid)
+
 arrays, ais, nper = np.unique(anames, return_counts=True, return_inverse=True)
 narray = len(arrays)
 ctime  = np.char.rpartition(pre,".").T[0].astype(int)
@@ -195,7 +203,7 @@ for si in range(nsplit):
 		for bi in split_blocks[si]:
 			split_ids[si][ai] += list(ids[block_inds[bi,ai]])
 
-if optimize_crosslink:
+if optimize_subsets:
 	# If we are optimizing for crosslinking support we want to output information
 	# both about individual scanning directions and the overall ones. We do that
 	# by first handling the individual ones, and then combining them

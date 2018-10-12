@@ -184,17 +184,13 @@ class UnskewCurved:
 	def apply(self, map):
 		"""Apply unskew operation to map, returning an array where the scanning motion
 		goes along the vertical axis."""
-		work = np.ascontiguousarray(utils.moveaxis(map,0,-1))
-		omap = interpol.map_coordinates(work, self.skew_pix, order=self.order)
-		omap = np.ascontiguousarray(utils.moveaxis(omap,-1,0))
+		omap = interpol.map_coordinates(map, self.skew_pix, order=self.order)
 		return omap
 	def trans(self, imap, omap):
 		"""Transpose of apply. omap = U.T(imap). Omap argument specifies the shape of the result,
 		but its values may be destroyed during the operation."""
-		imap = np.ascontiguousarray(utils.moveaxis(imap,0,-1))
-		omap = np.ascontiguousarray(utils.moveaxis(omap,0,-1))
-		interpol.map_coordinates(omap, self.skew_pix, odata=imap, trans=True, order=self.order)
-		return np.ascontiguousarray(utils.moveaxis(omap,-1,0))
+		interpol.map_coordinates(omap, self.skew_pix, imap, trans=True, order=self.order)
+		return omap
 	def apply_pix(self, ipix):
 		"""Transform from normal sky pixels to unskewd pixels."""
 		return self.skew_pix.at(ipix)

@@ -125,25 +125,48 @@ def eval_tile(mapinfo, box, signals=["ptsrc","sz"], dump_dir=None, verbosity=1):
 	info.ffpad = mapset.ffpad
 	return info
 
-def output_tile(prefix, info):
+#def output_tile(prefix, info):
+#	shape = info.model.shape[-2:]
+#	ffpad_slice = (Ellipsis,slice(0,shape[0]-info.ffpad[0]),slice(0,shape[1]-info.ffpad[1]))
+#	for name, snmap in info.snmaps:
+#		enmap.write_map(prefix + name + "_snmap.fits", snmap[ffpad_slice])
+#	for name, snmap in info.snresid:
+#		enmap.write_map(prefix + name + "_snresid.fits", snmap[ffpad_slice])
+#	if not args.output_full_model:
+#		if len(info.model) > 0: model = info.model[0]
+#		else: model = enmap.zeros(info.model.shape[-2:], info.model.wcs, info.model.dtype)
+#		enmap.write_map(prefix + "model.fits", model[ffpad_slice])
+#	else:
+#		enmap.write_map(prefix + "model.fits", info.model[ffpad_slice])
+#	# Output total catalogue
+#	apod_slice  = (slice(args.apod_edge,-args.apod_edge), slice(args.apod_edge,-args.apod_edge))
+#	shape, wcs = enmap.slice_geometry(info.model.shape, info.model.wcs, ffpad_slice[-2:])
+#	shape, wcs = enmap.slice_geometry(shape, wcs, apod_slice)
+#	box        = enmap.box(shape, wcs)
+#	jointmap.write_catalogue(prefix + "catalogue.fits", info.catalogue, box)
+
+def write_padtile(ofile, map):
+	enmap.write_map(ofile, map, extra={"PAD": args.pad, "EDGE": args.apod_edge})
+
+def output_tile(prefix, tpos, info):
 	shape = info.model.shape[-2:]
+	tname = "tile%(y)03d_%(x)03d.fits" % {"y":tpos,"x":tpos[1]}
 	ffpad_slice = (Ellipsis,slice(0,shape[0]-info.ffpad[0]),slice(0,shape[1]-info.ffpad[1]))
-	for name, snmap in info.snmaps:
-		enmap.write_map(prefix + name + "_snmap.fits", snmap[ffpad_slice])
-	for name, snmap in info.snresid:
-		enmap.write_map(prefix + name + "_snresid.fits", snmap[ffpad_slice])
+	for maptypename, mapgroup in [("snmap",info.snmaps),("snresid",info.snresid)]:
+		for srctypename, map in mapgroups:
+			write_padtile("%s%s_%s/%s" % (prefix, srctypename, maptypename, tname), map[ffpad_slice])
 	if not args.output_full_model:
 		if len(info.model) > 0: model = info.model[0]
 		else: model = enmap.zeros(info.model.shape[-2:], info.model.wcs, info.model.dtype)
-		enmap.write_map(prefix + "model.fits", model[ffpad_slice])
+		write_padtile(prefix + "model" + tname, model[ffpad_slice])
 	else:
-		enmap.write_map(prefix + "model.fits", info.model[ffpad_slice])
+		write_padtile(prefix + "model" + tname, info.model[ffpad_slice])
 	# Output total catalogue
 	apod_slice  = (slice(args.apod_edge,-args.apod_edge), slice(args.apod_edge,-args.apod_edge))
 	shape, wcs = enmap.slice_geometry(info.model.shape, info.model.wcs, ffpad_slice[-2:])
 	shape, wcs = enmap.slice_geometry(shape, wcs, apod_slice)
 	box        = enmap.box(shape, wcs)
-	jointmap.write_catalogue(prefix + "catalogue.fits", info.catalogue, box)
+	jointmap.write_catalogue(prefix + "catalogue" + tname, info.catalogue, box)
 
 # We have two modes, depending on what args.area is.
 # 1. area is an enmap. Will loop over tiles in that area, and output padded tiles
@@ -162,7 +185,7 @@ if bounds is None:
 		y, x = tyx[i]
 		if debug_tile is not None and not (y == debug_tile[0] and x == debug_tile[1]):
 			continue
-		prefix  = args.odir + "/padtile%(y)03d_%(x)03d_" % {"y":y,"x":x}
+		prefix  = args.odir + "/"
 		if args.cont and os.path.isfile(prefix + "catalogue.fits"):
 			if verbosity >= 1:
 				print "%3d skipping %3d %3d (already done)" % (comm.rank, y, x)
@@ -176,7 +199,7 @@ if bounds is None:
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
 		try:
 			info = eval_tile(mapinfo, box, signals, verbosity=verbosity)
-			output_tile(prefix, info)
+			output_tile(prefix, [y,x], info)
 		#except (np.linalg.LinAlgError, MemoryError) as e:
 		except Exception as e:
 			print "%3d error while processing %3d %3d: '%s'. Skipping" % (comm.rank, y, x, e.message)

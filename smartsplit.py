@@ -1,8 +1,4 @@
-import numpy as np, sys
-from enlib import utils
-with utils.nowarn():
-	from enlib import config, fastweight, enmap
-	from enact import filedb, actdata
+from enlib import config
 parser = config.ArgumentParser()
 parser.add_argument("sel")
 parser.add_argument("odir")
@@ -14,7 +10,13 @@ parser.add_argument("-O", "--nopt",  type=int,   default=2000)
 parser.add_argument("-m", "--mode",  type=str,   default="crosslink")
 parser.add_argument("-w", "--weight",type=str,   default="plain")
 parser.add_argument("--opt-mode",    type=str,   default="linear")
+parser.add_argument("--constraint",  type=str,   default=None)
 args = parser.parse_args()
+import numpy as np, sys, glob, re, os
+from enlib import utils
+with utils.nowarn():
+	from enlib import fastweight, enmap
+	from enact import filedb, actdata
 
 filedb.init()
 ids    = filedb.scans[args.sel]
@@ -42,9 +44,10 @@ elif args.mode == "scanpat":
 	for pid in range(npat):
 		anames[pids==pid] = np.char.add(anames[pids==pid], "p%d" % pid)
 
+def ids2ctimes(ids): return np.char.partition(ids,".").T[0].astype(int)
 arrays, ais, nper = np.unique(anames, return_counts=True, return_inverse=True)
 narray = len(arrays)
-ctime  = np.char.rpartition(pre,".").T[0].astype(int)
+ctime  = ids2ctimes(pre)
 sys.stderr.write("found arrays " + " ".join(arrays) + "\n")
 
 # Get our block splitting parameters
@@ -64,6 +67,58 @@ def format_overlap_matrix(mat):
 			res += " %4d" % col
 		res += "\n"
 	return res
+
+def read_existing(dirname):
+	# Read an existing split set, returning [(array,splits),(array,splits),...],
+	# where splits = [ids1, ids2, ...].
+	work = {}
+	for fname in glob.glob(dirname + "/ids*.txt"):
+		m = re.match(r"ids_([^_]+)_set(\d+)\.txt", os.path.basename(fname))
+		if not m: continue
+		array = m.group(1)
+		split = int(m.group(2))
+		ids   = np.loadtxt(fname, usecols=(0,), dtype="S")
+		if array not in work: work[array] = {}
+		work[array][split] = ids
+	# Check that we have a consistent number of splits
+	shit = np.bincount([split for key in work for split in work[key]])
+	if np.any(shit != shit[0]): raise ValueError("Inconsistent number of splits in input directory")
+	nsplit = len(shit)
+	# Reformat to lists insted of dicts for the splits
+	aset = {array:[work[array][split] for split in range(nsplit)] for array in work}
+	return aset
+
+def match_existing(aset, ctimes):
+	# Given an aset as returned by read_existing, convert TOD ids to ctimes and match them against
+	# our existing ctime list. Returns an [nctime] array containing the id of the input split
+	# it belongs to. If any id is present in aset but not in ctimes, an IndexError is raised.
+	# Unrestricted ctimes will be set to -1.
+	ind_ownership = np.full(len(ctimes),-1,int)
+	for array in aset:
+		for split, ids in enumerate(aset[array]):
+			my_ctimes = ids2ctimes(ids)
+			my_inds   = utils.find(ctimes, my_ctimes)
+			ind_ownership[my_inds] = split
+	return ind_ownership
+
+def get_block_ownership(ind_ownership, block_inds):
+	# Given information of which split already owns which ctime index,
+	# return the corresponding information at the block level. Returns
+	# ValueError if a block has conflicting ownership
+	block_ownership = np.full(len(block_inds),-1,int)
+	for bi, ablock in enumerate(block_inds):
+		bown = []
+		for inds in ablock:
+			bown.append(ind_ownership[inds])
+		bown = np.concatenate(bown)
+		# Filter out unowned markers
+		bown = bown[bown>=0]
+		if len(bown) == 0:
+			block_ownership[bi] = -1
+		else:
+			if np.any(bown != bown[0]): raise ValueError("Inconsistent ownership for block %d: %s" % (bi, str(np.unique(bown))))
+			block_ownership[bi] = bown[0]
+	return block_ownership
 
 # Peform the actual splitting. The goal is to get a
 # [nblock,narray][{tod_index}] list defining the blocks
@@ -86,12 +141,24 @@ for i, bi in enumerate(bid):
 	block_size[bi] += 1
 block_inds = np.array(block_inds)
 # Sort from biggest to smallest, to aid greedy algorithm
-block_order = np.argsort(block_size)[::-1]
-block_inds  = block_inds[block_order]
-block_size  = block_size[block_order]
+block_order = np.argsort(block_size)[::-1]  # [nblock]
+block_inds  = block_inds[block_order]       # [nblock,narr][{tod_indices}]
+block_size  = block_size[block_order]       # [nblock]
 
-sys.stderr.write("splitting %d:[%s] tods into %d splits via %d blocks" % (
-	ntod, atolist(nper), nsplit, nblock) + "\n")
+# Apply any external constraints
+if args.constraint:
+	aset            = read_existing(args.constraint)
+	ind_ownership   = match_existing(aset, ctime)
+	block_ownership = get_block_ownership(ind_ownership, block_inds)
+else:
+	block_ownership = np.full(len(block_inds),-1,int)
+fixed_blocks = np.where(block_ownership>=0)[0]
+free_blocks  = np.where(block_ownership<0)[0]
+nfixed = len(fixed_blocks)
+nfree  = len(free_blocks)
+
+sys.stderr.write("splitting %d:[%s] tods into %d splits via %d blocks%s" % (
+	ntod, atolist(nper), nsplit, nblock, (" with %d:%d free:fixed" % (nfree,nfixed)) if nfixed > 0 else "") + "\n")
 
 # We assume that site and pointing offsets are the same for all tods,
 # so get them based on the first one
@@ -157,27 +224,37 @@ def calc_delta_score(split_hits, bhits, mask):
 # be prioritized, while increasing already high areas counts less.
 #target = np.sum(hits,0)/nsplit
 split_hits   = enmap.zeros((nsplit,narray)+shape, wcs)
-split_blocks = [[] for bi in range(nsplit)]
-#split_ids    = [[[] for ai in range(narray)] for bi in range(nsplit)]
-sys.stderr.write("allocating block %*d/%d" % (ndig,0,nblock))
-for bi, bhits in enumerate(hits):
+split_blocks = [[] for i in range(nsplit)]
+split_fixed  = [np.where(block_ownership==i)[0] for i in range(nsplit)]
+ndig_free  = calc_ndig(nfree)
+ndig_fixed = calc_ndig(nfixed)
+if nfixed > 0:
+	sys.stderr.write("allocating fixed block %*d/%d" % (ndig_fixed,0,nfixed))
+	for i, bi in enumerate(fixed_blocks):
+		split_hits[block_ownership[bi]] += hits[bi]
+		sys.stderr.write("%s%*d/%d" % ("\b"*(1+2*ndig_fixed),ndig_fixed,i+1,nfixed))
+	sys.stderr.write("\n")
+	sys.stderr.write("allocating free block %*d/%d" % (ndig_free,0,nfree))
+else:
+	sys.stderr.write("allocating block %*d/%d" % (ndig_free,0,nfree))
+for i, bi in enumerate(free_blocks):
+	bhits = hits[bi]
 	score = calc_delta_score(split_hits, bhits, mask)
 	best  = np.argmax(score)
 	split_hits[best] += bhits
 	split_blocks[best].append(bi)
-	#for ai in range(narray):
-	#	split_ids[best][ai] += list(ids[block_inds[bi,ai]])
-	sys.stderr.write("%s%*d/%d" % ("\b"*(1+2*ndig),ndig,bi+1,nblock))
+	sys.stderr.write("%s%*d/%d" % ("\b"*(1+2*ndig_free),ndig_free,i+1,nfree))
 sys.stderr.write("\n")
 
 nswap  = 0
 odig   = calc_ndig(nopt)
 if   args.opt_mode == "linear":
-	opt_order = np.arange(nopt)%nblock
+	opt_order = np.arange(nopt)%max(1,nfree)
 elif args.opt_mode == "random":
-	opt_order = np.random.randint(0, nblock, nopt)
+	opt_order = np.random.randint(0, nfree, nopt)
 sys.stderr.write("optimizing %*d/%d [%*d]" % (odig, 0, nopt, odig, 0))
-for oi, bi in enumerate(opt_order):
+for oi, i in enumerate(opt_order):
+	bi    = free_blocks[i]
 	bhits = hits[bi]
 	# Which split is this block currently in? This could be sped up with a set, but
 	# will probably be fast enough anyway
@@ -196,6 +273,12 @@ for oi, bi in enumerate(opt_order):
 	if scur != best: nswap += 1
 	sys.stderr.write("%s%*d/%d [%*d]" % ("\b"*(3*odig+4),odig,oi+1,nopt,odig,nswap))
 sys.stderr.write("\n")
+
+# Merge the fixed and free groups
+split_blocks = [np.concatenate([split_blocks[i],split_fixed[i]]) for i in range(nsplit)]
+
+# We now know which split each block belongs to. Use this and the block
+# definitions to extract the ids that go into each split.
 
 split_ids = [[[] for ai in range(narray)] for bi in range(nsplit)]
 for si in range(nsplit):

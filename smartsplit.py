@@ -24,7 +24,7 @@ db     = filedb.scans.select(ids)
 ntod   = len(db)
 nsplit = args.nsplit
 nopt   = args.nopt if nsplit > 1 else 0
-optimize_subsets = args.mode == "crosslink"
+optimize_subsets = (args.mode == "crosslink" or args.mode=="scanpat")
 utils.mkdir(args.odir)
 
 # Determine which arrays we have. We can't process arrays independently,
@@ -275,7 +275,10 @@ for oi, i in enumerate(opt_order):
 sys.stderr.write("\n")
 
 # Merge the fixed and free groups
-split_blocks = [np.concatenate([split_blocks[i],split_fixed[i]]) for i in range(nsplit)]
+split_blocks = [np.concatenate([
+		np.array(split_blocks[i],int),
+		np.array(split_fixed[i], int),
+	]) for i in range(nsplit)]
 
 # We now know which split each block belongs to. Use this and the block
 # definitions to extract the ids that go into each split.
@@ -308,13 +311,15 @@ if optimize_subsets:
 	with open(args.odir + "/stats_rs.txt", "w") as f:
 		f.write(stats)
 	# Combine rising and setting versions of each array
-	arrays_comb = sorted(list(set([a[:-1] for a in arrays])))
+	if   args.mode == "crosslink": patdig = 1
+	elif args.mode == "scanpat":   patdig = calc_ndig(npat)+1
+	arrays_comb = sorted(list(set([a[:-patdig] for a in arrays])))
 	split_hits_comb = enmap.zeros((nsplit,len(arrays_comb))+shape, wcs)
 	split_ids_comb = [[[] for a in arrays_comb] for bi in range(nsplit)]
 	mask_comb      = enmap.zeros((len(arrays_comb),)+shape, wcs, bool)
 	for an, anew in enumerate(arrays_comb):
 		for ao, aold in enumerate(arrays):
-			if not aold[:-1] == anew: continue
+			if not aold[:-patdig] == anew: continue
 			for i in range(nsplit):
 				split_hits_comb[i,an] += split_hits[i,ao]
 				split_ids_comb[i][an] += split_ids[i][ao]

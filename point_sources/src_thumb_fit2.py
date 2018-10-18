@@ -1,6 +1,6 @@
 import numpy as np, os, time, h5py, astropy.io.fits, sys, argparse, copy, warnings, glob
 from scipy import optimize, stats, ndimage
-from enlib import utils, mpi, fft, enmap, bunch, coordinates
+from enlib import utils, mpi, fft, enmap, bunch, coordinates, wcsutils
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("odir")
@@ -38,7 +38,7 @@ def read_thumb_data(fname):
 	hdus   = astropy.io.fits.open(fname)
 	header = hdus[0].header
 	with warnings.catch_warnings():
-		wcs = enmap.enlib.wcs.WCS(header).sub(2)
+		wcs = wcsutils.WCS(header).sub(2)
 	res.rhs, res.div, res.corr = enmap.fix_endian(enmap.ndmap(hdus[0].data, wcs))
 	res.srcinfo = hdus[1].data
 	res.detinfo = hdus[2].data

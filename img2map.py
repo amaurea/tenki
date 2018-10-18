@@ -1,5 +1,5 @@
 import numpy as np, PIL.Image, argparse
-from enlib import enmap
+from enlib import enmap, wcsutils
 parser = argparse.ArgumentParser()
 parser.add_argument("image")
 parser.add_argument("template", nargs="?")
@@ -15,7 +15,7 @@ if args.template:
 	assert img.shape[-2:] == template.shape[-2:], "Image and template shapes do not conform"
 	wcs = template.wcs
 else:
-	wcs = enmap.enlib.wcs.WCS(naxis=2)
+	wcs = wcsutils.WCS(naxis=2)
 res = enmap.zeros(img.shape, wcs, dtype=np.int16)
 # Copy over data, taking into account y ordering
 res[:] = img[:,::-1,:]

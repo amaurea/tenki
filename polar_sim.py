@@ -1,5 +1,5 @@
 import numpy as np, argparse, time, sys
-from enlib import enmap, powspec, curvedsky, sharp, wcs as wcslib, memory
+from enlib import enmap, powspec, curvedsky, sharp, wcsutils, memory
 parser = argparse.ArgumentParser()
 parser.add_argument("powspec")
 parser.add_argument("omap")
@@ -30,7 +30,7 @@ with dprint("spec"):
 with dprint("construct omap"):
 	R   = args.radius*deg2rad
 	res = args.res*min2rad
-	wo  = wcslib.WCS(naxis=2)
+	wo  = wcsutils.WCS(naxis=2)
 	wo.wcs.ctype = ["RA---ZEA","DEC--ZEA"]
 	wo.wcs.crval = [0,90]
 	wo.wcs.cdelt = [res/deg2rad, res/deg2rad]

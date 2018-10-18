@@ -1,6 +1,6 @@
 import numpy as np, os, time, h5py, astropy.io.fits, sys, argparse, copy
 from scipy import optimize, stats, ndimage
-from enlib import utils, mpi, fft, enmap, bunch, coordinates
+from enlib import utils, mpi, fft, enmap, bunch, coordinates, wcsutils
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("odir")
@@ -68,7 +68,7 @@ def read_sdata(ifile):
 			header = astropy.io.fits.Header()
 			for key in hwcs:
 				header[key] = hwcs[key].value
-			wcs = enmap.enlib.wcs.WCS(header).sub(2)
+			wcs = wcsutils.WCS(header).sub(2)
 			# Then get the site
 			sdat.site= bunch.Bunch(**{key:g["site/"+key].value for key in g["site"]})
 			# And the rest

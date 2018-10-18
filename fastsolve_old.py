@@ -22,7 +22,7 @@
 
 import numpy as np, argparse, h5py, enlib.cg, scipy.interpolate, time
 import astropy.io.fits
-from enlib import enmap, fft, coordinates, utils, bunch, interpol, bench, zipper, mpi, log
+from enlib import enmap, fft, coordinates, utils, bunch, interpol, bench, zipper, mpi, log, wcsutils
 parser = argparse.ArgumentParser()
 parser.add_argument("infos", nargs="+")
 parser.add_argument("odir")
@@ -411,7 +411,7 @@ for infofile in ifiles[comm.rank::comm.size]:
 		header = astropy.io.fits.Header()
 		for key in hwcs:
 			header[key] = hwcs[key].value
-		wcs = enlib.wcs.WCS(header).sub(2)
+		wcs = wcsutils.WCS(header).sub(2)
 	# Set up our maps
 	rhs  = enmap.ndmap(rhs,  wcs)
 	hits = enmap.ndmap(hits, wcs)

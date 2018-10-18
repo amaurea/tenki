@@ -17,7 +17,7 @@ from scipy import optimize
 from enlib import utils
 with utils.nowarn(): import h5py
 from enlib import mpi, errors, fft, mapmaking, config, jointmap, pointsrcs
-from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill, wcs as enwcs
+from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill, wcsutils
 from enact import filedb, actdata, actscan, nmat_measure
 
 config.set("downsample", 1, "Amount to downsample tod by")
@@ -379,7 +379,7 @@ def build_grid_geometry(bounds, res):
 	Returns shape, wcs"""
 	bounds = np.array(bounds)
 	ngrid  = np.round((bounds[1]-bounds[0])/res).astype(int)+1
-	wcs = enwcs.WCS(naxis=2)
+	wcs = wcsutils.WCS(naxis=2)
 	wcs.wcs.cdelt[:] = res/utils.degree
 	wcs.wcs.crpix[:] = 1
 	wcs.wcs.crval = bounds[0,::-1]/utils.degree

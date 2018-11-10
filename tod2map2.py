@@ -51,7 +51,7 @@ config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", 
 config.default("mapfilter_gauss_default", "use=no,name=gauss,value=0,cap=1e3,type=gauss,sky=yes", "Default parameters for gaussian map filter in mapmaking")
 
 config.default("crossmap", True,  "Whether to output the crosslinking map")
-config.default("icovmap",  True, "Whether to output the inverse correlation map")
+config.default("icovmap",  False, "Whether to output the inverse correlation map")
 config.default("icovstep",    6, "Physical degree interval between inverse correlation measurements in icovmap")
 config.default("icovyskew",   1, "Number of degrees in the y direction (dec) to shift by per step in x (ra)")
 
@@ -70,6 +70,7 @@ parser.add_argument("-F", "--filter",    action="append")
 parser.add_argument("-M", "--mapfilter", action="append")
 parser.add_argument("--group-tods", action="store_true")
 parser.add_argument("--individual", action="store_true")
+parser.add_argument("--group",      type=int, default=0)
 parser.add_argument("--tod-debug",  action="store_true")
 parser.add_argument("--prepost",    action="store_true")
 args = parser.parse_args()
@@ -372,11 +373,18 @@ if args.individual:
 	ocomm, comm = comm, mpi.COMM_SELF
 	myscans_tot = myscans
 	root_tot = root
+elif args.group:
+	nouter = len(myscans)//args.group
+	ocomm, comm = comm, mpi.COMM_SELF
+	myscans_tot = myscans
+	root_tot = root
 for out_ind in range(nouter):
 	if args.individual:
 		myscans = myscans_tot[out_ind:out_ind+1]
 		root = root_tot + myscans[0].entry.id + "_"
-
+	elif args.group:
+		myscans = myscans_tot[out_ind*args.group:(out_ind+1)*args.group]
+		root = root_tot + "group%03d_" % out_ind
 	# 1. Initialize signals
 	L.info("Initializing signals")
 	signals = []

@@ -1,5 +1,7 @@
-import numpy as np, sys, os, h5py
-from enlib import config, pmat, mpi, errors, gapfill, utils, enmap, bench
+import numpy as np, sys, os
+from enlib import utils
+with utils.nowarn(): import h5py
+from enlib import config, pmat, mpi, errors, gapfill, enmap, bench
 from enlib import fft, array_ops
 from enact import filedb, actscan, actdata, cuts, nmat_measure
 
@@ -16,6 +18,7 @@ parser.add_argument("-e", "--equator", action="store_true")
 parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("--sim",           type=str,   default=None, help="Passing a sel here sets up simulation mode. The simulations will consist of data from the sim sel TODs with the scanning pattern of the real TODs, and with the signal read off from the area map")
 parser.add_argument("--noiseless",      action="store_true", help="Replace signal with simulation instead of adding them. This can be used to get noise free transfer functions")
+parser.add_argument("--dbox",          type=str,   default=None, help="Select only detectors in y1:y2,x1:x2 in the focalplane, relative to the center of the array, in degrees.")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -34,7 +37,9 @@ sys = "hor:"+args.planet
 if args.equator: sys += "/0_0"
 utils.mkdir(args.odir)
 prefix = args.odir + "/"
-if args.tag: prefix += args.tag + "_"
+if args.tag:  prefix += args.tag + "_"
+if args.dbox: dbox = np.array([[float(w) for w in tok.split(":")] for tok in args.dbox.split(",")]).T*utils.degree
+else: dbox = None
 
 if args.sim:
 	sim_ids = filedb.scans[args.sim][:len(ids)]
@@ -73,6 +78,14 @@ for ind in range(comm.rank, len(ids), comm.size):
 		with bench.show("calibrate"):
 			d = actdata.calibrate(d, exclude=["autocut"])
 		if d.ndet == 0 or d.nsamp < 2: raise errors.DataMissing("no data in tod")
+		# Select detectors if needed
+		if dbox is not None:
+			mid  = np.mean(utils.minmax(d.point_template, 0), 0)
+			off  = d.point_template-mid
+			print np.std(off)/utils.degree
+			good = np.all((off > dbox[0])&(off < dbox[1]),-1)
+			print np.sum(good), d.ndet
+			d    = d.restrict(dets=d.dets[good])
 	except errors.DataMissing as e:
 		print "Skipping %s (%s)" % (id, e.message)
 		continue

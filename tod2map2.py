@@ -33,7 +33,7 @@ config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=side
 config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,lim_Pluto_min_el=0", "Default parameters for pluto map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1,tol=0.5", "Default parameters for scan/pickup signal")
-#config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
+config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin", "Default parameters for noiserect mapping")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,nopol=0", "Default parameters for map subtraction filter")
@@ -212,6 +212,8 @@ read_nsamp= utils.allgatherv([scan.cut.size-scan.cut.sum() for scan in myscans],
 read_dets = utils.uncat(utils.allgatherv(
 	np.concatenate([scan.dets for scan in myscans]) if len(myscans) > 0 else np.zeros(0,int)
 	,comm), read_ndets)
+ntod = np.sum(read_ndets>0)
+ncut = np.sum(read_ndets==0)
 # Save accept list
 if comm.rank == 0:
 	with open(root + "accept.txt", "w") as f:
@@ -238,7 +240,7 @@ if comm.rank == 0:
 mydets  = [len(scan.dets) for scan in myscans]
 myinds  = [ind  for ind, ndet in zip(myinds, mydets) if ndet > 0]
 myscans = [scan for scan,ndet in zip(myscans,mydets) if ndet > 0]
-L.info("Pruned %d fully autocut tods" % np.sum(read_ndets==0))
+L.info("Pruned %d fully autocut tods" % ncut)
 
 # Try to get about the same amount of data for each mpi task.
 # If we use distributed maps, we also try to make things as local as possible
@@ -419,6 +421,21 @@ for out_ind in range(nouter):
 			det_unit   = nrow if col_major else ncol
 			areas      = mapmaking.PhaseMap.zeros(patterns, array_dets, res=res, det_unit=det_unit, dtype=dtype)
 			signal     = mapmaking.SignalPhase(active_scans, areas, mypids, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
+		elif param["type"] == "noiserect":
+			ashape, awcs = enmap.read_map_geometry(param["value"])
+			# Drift is in degrees per hour
+			drift = float(param["drift"])*utils.degree/3600
+			area = enmap.zeros((args.ncomp,)+ashape[-2:], awcs, dtype)
+			# Find the duration of each tod. We need this for the y offsets
+			nactive = utils.allgather(np.array(len(active_scans)), comm)
+			offs    = utils.cumsum(nactive, endpoint=True)
+			durs    = np.zeros(np.sum(nactive))
+			for i, scan in enumerate(active_scans): durs[offs[comm.rank]+i] = scan.nsamp*scan.srate
+			durs    = utils.allreduce(durs, comm)
+			ys      = np.cumsum(durs)*drift
+			my_ys   = ys[offs[comm.rank]:offs[comm.rank+1]]
+			# That was surprisingly cumbersome
+			signal  = mapmaking.SignalNoiseRect(active_scans, area, drift, my_ys, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 		signals.append(signal)
@@ -615,7 +632,7 @@ for out_ind in range(nouter):
 			continue
 		if param["type"] == "cut":
 			signal.precon = mapmaking.PreconCut(signal, myscans)
-		elif param["type"] in ["map","bmap","fmap"]:
+		elif param["type"] in ["map","bmap","fmap","noiserect"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
 			if param["prec"] == "bin":
 				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights)

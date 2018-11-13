@@ -313,12 +313,16 @@ def apply_scan_limits(scans, params):
 			res.append(scan)
 	return res
 
+def safe_concat(arrays, dtype):
+	if len(arrays) == 0: return np.zeros([0], dtype)
+	else: return np.concatenate(arrays)
+
 def build_noise_stats(myscans, comm):
 	ids    = utils.allgatherv([scan.id    for scan in myscans], comm)
 	ndets  = utils.allgatherv([scan.ndet  for scan in myscans], comm)
 	srates = utils.allgatherv([scan.srate for scan in myscans], comm)
-	gdets  = utils.allgatherv(np.concatenate([scan.dets       for scan in myscans]), comm)
-	ivars  = utils.allgatherv(np.concatenate([scan.noise.ivar for scan in myscans]), comm)
+	gdets  = utils.allgatherv(safe_concat([scan.dets       for scan in myscans],int),   comm)
+	ivars  = utils.allgatherv(safe_concat([scan.noise.ivar for scan in myscans],float), comm)
 	offs   = utils.cumsum(ndets, endpoint=True)
 	res    = []
 	for i, id in enumerate(ids):
@@ -375,9 +379,21 @@ if args.individual:
 	ocomm, comm = comm, mpi.COMM_SELF
 	myscans_tot = myscans
 	root_tot = root
+	ntod, ntod_tot = 1, ntod
 elif args.group:
-	nouter = len(myscans)//args.group
-	ocomm, comm = comm, mpi.COMM_SELF
+	# Group layout:
+	# task0: scan00 scan01 scan02 scan03 ...
+	# task1: scan10 scan11 scan12 scan13 ...
+	# task2: scan20 scan21 scan22 scan23 ...
+	# If there are more mpi tasks than members of
+	# a group, which is likely, then different
+	# groups of mpi tasks need to work on different
+	# groups. Inside each group, we will distribute scans columwise
+	ocomm   = comm
+	comm    = ocomm.Split(ocomm.rank//args.group, ocomm.rank%args.group)
+	# Compute number of tods this mpi group will deal with
+	ntod, ntod_tot = comm.allreduce(len(myscans)), ntod
+	nouter  = (ntod+args.group-1)//args.group
 	myscans_tot = myscans
 	root_tot = root
 for out_ind in range(nouter):
@@ -385,8 +401,11 @@ for out_ind in range(nouter):
 		myscans = myscans_tot[out_ind:out_ind+1]
 		root = root_tot + myscans[0].entry.id + "_"
 	elif args.group:
-		myscans = myscans_tot[out_ind*args.group:(out_ind+1)*args.group]
-		root = root_tot + "group%03d_" % out_ind
+		raw_inds = np.arange(out_ind*args.group, min((out_ind+1)*args.group,ntod))
+		row, col = raw_inds%comm.size, raw_inds//comm.size
+		my_ginds = col[row==comm.rank]
+		myscans  = [myscans_tot[i] for i in my_ginds]
+		root = root_tot + "group%03d_%03d_" % (ocomm.rank//args.group, out_ind)
 	# 1. Initialize signals
 	L.info("Initializing signals")
 	signals = []
@@ -431,16 +450,16 @@ for out_ind in range(nouter):
 			signal     = mapmaking.SignalPhase(active_scans, areas, mypids, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 		elif param["type"] == "noiserect":
 			ashape, awcs = enmap.read_map_geometry(param["value"])
-			# Drift is in degrees per hour
-			drift = float(param["drift"])*utils.degree/3600
+			# Drift is in degrees per hour, but we want it per second
+			drift = float(param["drift"])/3600
 			area = enmap.zeros((args.ncomp,)+ashape[-2:], awcs, dtype)
 			# Find the duration of each tod. We need this for the y offsets
 			nactive = utils.allgather(np.array(len(active_scans)), comm)
 			offs    = utils.cumsum(nactive, endpoint=True)
 			durs    = np.zeros(np.sum(nactive))
-			for i, scan in enumerate(active_scans): durs[offs[comm.rank]+i] = scan.nsamp*scan.srate
+			for i, scan in enumerate(active_scans): durs[offs[comm.rank]+i] = scan.nsamp/scan.srate
 			durs    = utils.allreduce(durs, comm)
-			ys      = np.cumsum(durs)*drift
+			ys      = utils.cumsum(durs)*drift
 			my_ys   = ys[offs[comm.rank]:offs[comm.rank+1]]
 			# That was surprisingly cumbersome
 			signal  = mapmaking.SignalNoiseRect(active_scans, area, drift, my_ys, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")

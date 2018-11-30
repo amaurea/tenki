@@ -33,11 +33,11 @@ config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=side
 config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,lim_Pluto_min_el=0", "Default parameters for pluto map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1,tol=0.5", "Default parameters for scan/pickup signal")
-config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin", "Default parameters for noiserect mapping")
+config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz", "Default parameters for noiserect mapping")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,nopol=0", "Default parameters for map subtraction filter")
-config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,nopol=0", "Default parameters for map subtraction filter")
+config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
@@ -462,7 +462,7 @@ for out_ind in range(nouter):
 			ys      = utils.cumsum(durs)*drift
 			my_ys   = ys[offs[comm.rank]:offs[comm.rank+1]]
 			# That was surprisingly cumbersome
-			signal  = mapmaking.SignalNoiseRect(active_scans, area, drift, my_ys, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
+			signal  = mapmaking.SignalNoiseRect(active_scans, area, drift, my_ys, comm, name=effname, mode=param["mode"], ofmt=param["ofmt"], output=param["output"]=="yes")
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 		signals.append(signal)
@@ -505,7 +505,7 @@ for out_ind in range(nouter):
 		elif param["name"] == "add":
 			if "map" not in param: raise ValueError("-F add/sub needs a map file to subtract. e.g. -F add:2,map=foo.fits")
 			mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
-			nopol = int(param["nopol"])
+			comps = set([int(c) for c in param["comps"]])
 			tmul = float(param["tmul"])
 			if mode == 0: continue
 			if param["type"] == "auto":
@@ -516,11 +516,13 @@ for out_ind in range(nouter):
 				# of dmaps - they are so closely tied to a set of scans that they only work
 				# in the coordinate system where the scans are reasonably local.
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
-				if nopol: m[1:] = 0
+				for i in range(len(m)):
+					if i not in comps: m[i] = 0
 				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=mul, tmul=tmul)
 			else:
 				m = enmap.read_map(fname).astype(dtype)
-				if nopol: m[1:] = 0
+				for i in range(len(m)):
+					if i not in comps: m[i] = 0
 				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul)
 			map_add_filters.append(filter)
 			if mode >= 2:
@@ -706,25 +708,26 @@ for out_ind in range(nouter):
 	mapmaking.write_precons(signals, root)
 
 	for param, signal in zip(signal_params, signals):
-		if config.get("crossmap"):
-			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
+		if config.get("crossmap") and param["type"] in ["map","bmap","fmap","dmap"]:
 			L.info("Computing crosslink map")
 			cmap = mapmaking.calc_crosslink_map(signal, signal_cut, myscans, weights)
 			signal.write(root, "crosslink", cmap)
 			del cmap
-		if config.get("icovmap"):
-			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
+		if config.get("icovmap") and param["type"] in ["map","bmap","fmap","dmap","noiserect"]:
 			L.info("Computing icov map")
 			shape, wcs = signal.area.shape, signal.area.wcs
 			# Use equidistant pixel spacing for robustness in non-cylindrical coordinates
 			step = utils.nint(np.abs(config.get("icovstep")/wcs.wcs.cdelt[::-1]))
-			pos  = np.mgrid[0.5:shape[-2]/step[-2],0.5:shape[-1]/step[-1]].reshape(2,-1).T
+			posy = np.arange(0.5,shape[-2]/step[-2]) if step[-2] > 0 else np.array([0])
+			posx = np.arange(0.5,shape[-1]/step[-1]) if step[-1] > 0 else np.array([0])
+			pos  = utils.outer_stack([posy,posx]).reshape(2,-1).T
 			if pos.size == 0:
 				L.debug("Not enough pixels to compute icov for step size %f. Skipping icov" % config.get("icovstep"))
 				continue
 			# Apply the y skew
-			yskew     = utils.nint(config.get("icovyskew")/wcs.wcs.cdelt[1])
-			pos[:,0] += pos[:,1] * yskew * 1.0 / step[0]
+			if step[0] > 0:
+				yskew     = utils.nint(config.get("icovyskew")/wcs.wcs.cdelt[1])
+				pos[:,0] += pos[:,1] * yskew * 1.0 / step[0]
 			# Go from grid indices to pixels
 			pos       = (pos*step % shape[-2:]).astype(int)
 			print pos.shape, pos.dtype
@@ -733,8 +736,7 @@ for out_ind in range(nouter):
 			if comm.rank == 0:
 				np.savetxt(root + signal.name + "_icov_pix.txt", pos, "%6d %6d")
 			del icov
-		if src_filters:
-			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
+		if src_filters and param["type"] in ["map","bmap","fmap","dmap"]:
 			L.info("Computing point source map")
 			srcmap = mapmaking.calc_ptsrc_map(signal, signal_cut, myscans, src_filters)
 			signal.write(root, "srcs", srcmap)

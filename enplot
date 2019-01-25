@@ -2,4 +2,5 @@
 import sys
 from enlib import enplot
 args = enplot.parse_args()
-enplot.plot(*args.ifiles, **args)
+for plot in enplot.plot_iterator(*args.ifiles, **args):
+	enplot.write(plot.name, plot)

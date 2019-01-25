@@ -99,7 +99,7 @@ def add_mono(ifiles, ofile, slice=None):
 	shutil.move(tfile, ofile)
 
 def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
-	if args.cont and os.path.exists(omapfile): return
+	if args.cont and os.path.exists(omapfile) and (odivfile is None or os.path.exists(odivfile)): return
 	if verbose: print "%3d coadd_mono %s" % (comm.rank, omapfile)
 	omap, odiv = None, None
 	tmapfile = omapfile + ".tmp"

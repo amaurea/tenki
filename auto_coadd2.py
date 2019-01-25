@@ -8,7 +8,9 @@ parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("-t", "--tsize",  type=int,   default=480)
 parser.add_argument("-p", "--pad",    type=int,   default=240)
-parser.add_argument("-c", "--cont",   action="store_true")
+parser.add_argument("-C", "--ncomp",  type=int,   default=3)
+parser.add_argument("-c", "--cont",    action="store_true")
+parser.add_argument("-v", "--verbose", action="store_true")
 args = parser.parse_args()
 
 config  = jointmap.read_config(args.config)
@@ -16,6 +18,7 @@ mapinfo = jointmap.Mapset(config, args.sel)
 tsize   = args.tsize # pixels
 pad     = args.pad   # pixels
 dtype   = np.float64
+ncomp   = args.ncomp
 comm    = mpi.COMM_WORLD
 utils.mkdir(args.odir)
 
@@ -24,8 +27,8 @@ boxes  = np.sort(np.array([d.box for d in mapinfo.datasets]),-2)
 
 # Read the cmb power spectrum, which is an effective noise
 # component. T-only
-cl_path = os.path.join(os.path.dirname(args.config),config.cl_background)
-cl_bg   = powspec.read_spectrum(cl_path)[0,0]
+#cl_path = os.path.join(os.path.dirname(args.config),config.cl_background)
+#cl_bg   = powspec.read_spectrum(cl_path)[0,0]
 
 def overlaps_any(box, refboxes):
 	rdec, rra = utils.moveaxis(refboxes - box[0,:], 2,0)
@@ -46,14 +49,14 @@ def parse_bounds(bstr):
 		res.append([float(s)*utils.degree for s in sub])
 	return np.array(res).T
 
-def get_coadded_tile(mapinfo, box, dump_dir=None, verbose=False):
+def get_coadded_tile(mapinfo, box, ncomp=1, dump_dir=None, verbose=False):
 	if not overlaps_any(box, boxes): return None
-	mapset = mapinfo.read(box, pad=pad, dtype=dtype, verbose=verbose)
+	mapset = mapinfo.read(box, pad=pad, dtype=dtype, verbose=verbose, ncomp=ncomp)
 	if mapset is None: return None
 	jointmap.sanitize_maps(mapset)
 	jointmap.build_noise_model(mapset)
 	if len(mapset.datasets) == 0: return None
-	jointmap.setup_background_cmb(mapset, cl_bg)
+	#jointmap.setup_background_cmb(mapset, cl_bg)
 	jointmap.setup_beams(mapset)
 	jointmap.setup_target_beam(mapset)
 
@@ -80,8 +83,10 @@ if bounds is None:
 	tyx    = [(y,x) for y in range(ntile[0]-1,-1,-1) for x in range(ntile[1])]
 	for i in range(comm.rank, len(tyx), comm.size):
 		y, x = tyx[i]
-		ofile_map = args.odir + "/map_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}
-		ofile_div = args.odir + "/div_padtile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}
+		ofile_map = args.odir + "/map_padtile/tile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}
+		ofile_div = args.odir + "/div_padtile/tile%(y)03d_%(x)03d.fits" % {"y":y,"x":x}
+		utils.mkdir(os.path.dirname(ofile_map))
+		utils.mkdir(os.path.dirname(ofile_div))
 		if args.cont and os.path.isfile(ofile_map):
 			print "%3d skipping %3d %3d (already done)" % (comm.rank, y, x)
 			continue
@@ -89,7 +94,7 @@ if bounds is None:
 		tpos = np.array(tyx[i])
 		pbox = np.array([tpos*tshape,np.minimum((tpos+1)*tshape,shape[-2:])])
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
-		res  = get_coadded_tile(mapinfo, box, verbose=False)
+		res  = get_coadded_tile(mapinfo, box, ncomp=args.ncomp, verbose=args.verbose)
 		if res is None: res = jointmap.make_dummy_tile(shape, wcs, box, pad=pad, dtype=dtype)
 		enmap.write_map(ofile_map, res.map)
 		enmap.write_map(ofile_div, res.div)
@@ -98,7 +103,7 @@ else:
 	if not overlaps_any(bounds, boxes):
 		print "No data in selected region"
 	else:
-		res = get_coadded_tile(mapinfo, bounds, args.odir, verbose=True)
+		res = get_coadded_tile(mapinfo, bounds, ncomp=args.ncomp, dump_dir=args.odir, verbose=args.verbose)
 		enmap.write_map(args.odir + "/map.fits", res.map)
 		enmap.write_map(args.odir + "/div.fits", res.div)
 		#enmap.write_map(args.odir + "/C.fits",   res.C)

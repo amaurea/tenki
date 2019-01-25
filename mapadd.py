@@ -1,11 +1,12 @@
-import numpy as np, argparse, os
-from enlib import enmap, log, mpi, utils
+import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("imaps", nargs="+")
 parser.add_argument("omap")
 parser.add_argument("-m", "--mean",    action="store_true")
 parser.add_argument("-v", "--verbose", action="store_true")
 args = parser.parse_args()
+import numpy as np, os
+from enlib import enmap, log, mpi, utils
 
 comm  = mpi.COMM_WORLD
 def nonan(a):

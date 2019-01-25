@@ -33,11 +33,11 @@ config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=side
 config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,lim_Pluto_min_el=0", "Default parameters for pluto map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1,tol=0.5", "Default parameters for scan/pickup signal")
-#config.default("signal_scan_default",  "use=no,type=scan,name=scan,ofmt={name}_{pid:02}_{az0:.0f}_{az1:.0f}_{el:.0f},2way=yes,res=2,tol=0.5", "Default parameters for scan/pickup signal")
+config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,nopol=0", "Default parameters for map subtraction filter")
-config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,nopol=0", "Default parameters for map subtraction filter")
+config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
@@ -51,7 +51,7 @@ config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", 
 config.default("mapfilter_gauss_default", "use=no,name=gauss,value=0,cap=1e3,type=gauss,sky=yes", "Default parameters for gaussian map filter in mapmaking")
 
 config.default("crossmap", True,  "Whether to output the crosslinking map")
-config.default("icovmap",  True, "Whether to output the inverse correlation map")
+config.default("icovmap",  False, "Whether to output the inverse correlation map")
 config.default("icovstep",    6, "Physical degree interval between inverse correlation measurements in icovmap")
 config.default("icovyskew",   1, "Number of degrees in the y direction (dec) to shift by per step in x (ra)")
 
@@ -70,6 +70,7 @@ parser.add_argument("-F", "--filter",    action="append")
 parser.add_argument("-M", "--mapfilter", action="append")
 parser.add_argument("--group-tods", action="store_true")
 parser.add_argument("--individual", action="store_true")
+parser.add_argument("--group",      type=int, default=0)
 parser.add_argument("--tod-debug",  action="store_true")
 parser.add_argument("--prepost",    action="store_true")
 args = parser.parse_args()
@@ -212,6 +213,8 @@ read_nsamp= utils.allgatherv([scan.cut.size-scan.cut.sum() for scan in myscans],
 read_dets = utils.uncat(utils.allgatherv(
 	np.concatenate([scan.dets for scan in myscans]) if len(myscans) > 0 else np.zeros(0,int)
 	,comm), read_ndets)
+ntod = np.sum(read_ndets>0)
+ncut = np.sum(read_ndets==0)
 # Save accept list
 if comm.rank == 0:
 	with open(root + "accept.txt", "w") as f:
@@ -238,7 +241,7 @@ if comm.rank == 0:
 mydets  = [len(scan.dets) for scan in myscans]
 myinds  = [ind  for ind, ndet in zip(myinds, mydets) if ndet > 0]
 myscans = [scan for scan,ndet in zip(myscans,mydets) if ndet > 0]
-L.info("Pruned %d fully autocut tods" % np.sum(read_ndets==0))
+L.info("Pruned %d fully autocut tods" % ncut)
 
 # Try to get about the same amount of data for each mpi task.
 # If we use distributed maps, we also try to make things as local as possible
@@ -310,12 +313,16 @@ def apply_scan_limits(scans, params):
 			res.append(scan)
 	return res
 
+def safe_concat(arrays, dtype):
+	if len(arrays) == 0: return np.zeros([0], dtype)
+	else: return np.concatenate(arrays)
+
 def build_noise_stats(myscans, comm):
 	ids    = utils.allgatherv([scan.id    for scan in myscans], comm)
 	ndets  = utils.allgatherv([scan.ndet  for scan in myscans], comm)
 	srates = utils.allgatherv([scan.srate for scan in myscans], comm)
-	gdets  = utils.allgatherv(np.concatenate([scan.dets       for scan in myscans]), comm)
-	ivars  = utils.allgatherv(np.concatenate([scan.noise.ivar for scan in myscans]), comm)
+	gdets  = utils.allgatherv(safe_concat([scan.dets       for scan in myscans],int),   comm)
+	ivars  = utils.allgatherv(safe_concat([scan.noise.ivar for scan in myscans],float), comm)
 	offs   = utils.cumsum(ndets, endpoint=True)
 	res    = []
 	for i, id in enumerate(ids):
@@ -372,11 +379,33 @@ if args.individual:
 	ocomm, comm = comm, mpi.COMM_SELF
 	myscans_tot = myscans
 	root_tot = root
+	ntod, ntod_tot = 1, ntod
+elif args.group:
+	# Group layout:
+	# task0: scan00 scan01 scan02 scan03 ...
+	# task1: scan10 scan11 scan12 scan13 ...
+	# task2: scan20 scan21 scan22 scan23 ...
+	# If there are more mpi tasks than members of
+	# a group, which is likely, then different
+	# groups of mpi tasks need to work on different
+	# groups. Inside each group, we will distribute scans columwise
+	ocomm   = comm
+	comm    = ocomm.Split(ocomm.rank//args.group, ocomm.rank%args.group)
+	# Compute number of tods this mpi group will deal with
+	ntod, ntod_tot = comm.allreduce(len(myscans)), ntod
+	nouter  = (ntod+args.group-1)//args.group
+	myscans_tot = myscans
+	root_tot = root
 for out_ind in range(nouter):
 	if args.individual:
 		myscans = myscans_tot[out_ind:out_ind+1]
 		root = root_tot + myscans[0].entry.id + "_"
-
+	elif args.group:
+		raw_inds = np.arange(out_ind*args.group, min((out_ind+1)*args.group,ntod))
+		row, col = raw_inds%comm.size, raw_inds//comm.size
+		my_ginds = col[row==comm.rank]
+		myscans  = [myscans_tot[i] for i in my_ginds]
+		root = root_tot + "group%03d_%03d_" % (ocomm.rank//args.group, out_ind)
 	# 1. Initialize signals
 	L.info("Initializing signals")
 	signals = []
@@ -419,6 +448,22 @@ for out_ind in range(nouter):
 			det_unit   = nrow if col_major else ncol
 			areas      = mapmaking.PhaseMap.zeros(patterns, array_dets, res=res, det_unit=det_unit, dtype=dtype)
 			signal     = mapmaking.SignalPhase(active_scans, areas, mypids, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
+		elif param["type"] == "noiserect":
+			ashape, awcs = enmap.read_map_geometry(param["value"])
+			leftright = int(param["leftright"]) > 0
+			# Drift is in degrees per hour, but we want it per second
+			drift = float(param["drift"])/3600
+			area = enmap.zeros((args.ncomp*(1+leftright),)+ashape[-2:], awcs, dtype)
+			# Find the duration of each tod. We need this for the y offsets
+			nactive = utils.allgather(np.array(len(active_scans)), comm)
+			offs    = utils.cumsum(nactive, endpoint=True)
+			durs    = np.zeros(np.sum(nactive))
+			for i, scan in enumerate(active_scans): durs[offs[comm.rank]+i] = scan.nsamp/scan.srate
+			durs    = utils.allreduce(durs, comm)
+			ys      = utils.cumsum(durs)*drift
+			my_ys   = ys[offs[comm.rank]:offs[comm.rank+1]]
+			# That was surprisingly cumbersome
+			signal  = mapmaking.SignalNoiseRect(active_scans, area, drift, my_ys, comm, name=effname, mode=param["mode"], ofmt=param["ofmt"], output=param["output"]=="yes")
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 		signals.append(signal)
@@ -461,7 +506,7 @@ for out_ind in range(nouter):
 		elif param["name"] == "add":
 			if "map" not in param: raise ValueError("-F add/sub needs a map file to subtract. e.g. -F add:2,map=foo.fits")
 			mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
-			nopol = int(param["nopol"])
+			comps = set([int(c) for c in param["comps"]])
 			tmul = float(param["tmul"])
 			if mode == 0: continue
 			if param["type"] == "auto":
@@ -472,11 +517,13 @@ for out_ind in range(nouter):
 				# of dmaps - they are so closely tied to a set of scans that they only work
 				# in the coordinate system where the scans are reasonably local.
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
-				if nopol: m[1:] = 0
+				for i in range(len(m)):
+					if i not in comps: m[i] = 0
 				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=mul, tmul=tmul)
 			else:
 				m = enmap.read_map(fname).astype(dtype)
-				if nopol: m[1:] = 0
+				for i in range(len(m)):
+					if i not in comps: m[i] = 0
 				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul)
 			map_add_filters.append(filter)
 			if mode >= 2:
@@ -615,7 +662,7 @@ for out_ind in range(nouter):
 			continue
 		if param["type"] == "cut":
 			signal.precon = mapmaking.PreconCut(signal, myscans)
-		elif param["type"] in ["map","bmap","fmap"]:
+		elif param["type"] in ["map","bmap","fmap","noiserect"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
 			if param["prec"] == "bin":
 				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights)
@@ -662,25 +709,26 @@ for out_ind in range(nouter):
 	mapmaking.write_precons(signals, root)
 
 	for param, signal in zip(signal_params, signals):
-		if config.get("crossmap"):
-			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
+		if config.get("crossmap") and param["type"] in ["map","bmap","fmap","dmap"]:
 			L.info("Computing crosslink map")
 			cmap = mapmaking.calc_crosslink_map(signal, signal_cut, myscans, weights)
 			signal.write(root, "crosslink", cmap)
 			del cmap
-		if config.get("icovmap"):
-			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
+		if config.get("icovmap") and param["type"] in ["map","bmap","fmap","dmap","noiserect"]:
 			L.info("Computing icov map")
 			shape, wcs = signal.area.shape, signal.area.wcs
 			# Use equidistant pixel spacing for robustness in non-cylindrical coordinates
 			step = utils.nint(np.abs(config.get("icovstep")/wcs.wcs.cdelt[::-1]))
-			pos  = np.mgrid[0.5:shape[-2]/step[-2],0.5:shape[-1]/step[-1]].reshape(2,-1).T
+			posy = np.arange(0.5,shape[-2]/step[-2]) if step[-2] > 0 else np.array([0])
+			posx = np.arange(0.5,shape[-1]/step[-1]) if step[-1] > 0 else np.array([0])
+			pos  = utils.outer_stack([posy,posx]).reshape(2,-1).T
 			if pos.size == 0:
 				L.debug("Not enough pixels to compute icov for step size %f. Skipping icov" % config.get("icovstep"))
 				continue
 			# Apply the y skew
-			yskew     = utils.nint(config.get("icovyskew")/wcs.wcs.cdelt[1])
-			pos[:,0] += pos[:,1] * yskew * 1.0 / step[0]
+			if step[0] > 0:
+				yskew     = utils.nint(config.get("icovyskew")/wcs.wcs.cdelt[1])
+				pos[:,0] += pos[:,1] * yskew * 1.0 / step[0]
 			# Go from grid indices to pixels
 			pos       = (pos*step % shape[-2:]).astype(int)
 			print pos.shape, pos.dtype
@@ -689,8 +737,7 @@ for out_ind in range(nouter):
 			if comm.rank == 0:
 				np.savetxt(root + signal.name + "_icov_pix.txt", pos, "%6d %6d")
 			del icov
-		if src_filters:
-			if param["type"] not in ["map","bmap","fmap","dmap"]: continue
+		if src_filters and param["type"] in ["map","bmap","fmap","dmap"]:
 			L.info("Computing point source map")
 			srcmap = mapmaking.calc_ptsrc_map(signal, signal_cut, myscans, src_filters)
 			signal.write(root, "srcs", srcmap)

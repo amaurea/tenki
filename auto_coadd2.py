@@ -9,6 +9,7 @@ parser.add_argument("odir")
 parser.add_argument("-t", "--tsize",  type=int,   default=480)
 parser.add_argument("-p", "--pad",    type=int,   default=240)
 parser.add_argument("-C", "--ncomp",  type=int,   default=3)
+parser.add_argument("-B", "--obeam",  type=str,   default=None)
 parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("-v", "--verbose", action="store_true")
 args = parser.parse_args()
@@ -49,25 +50,44 @@ def parse_bounds(bstr):
 		res.append([float(s)*utils.degree for s in sub])
 	return np.array(res).T
 
-def get_coadded_tile(mapinfo, box, ncomp=1, dump_dir=None, verbose=False):
+def mapdiag(map):
+	if map.ndim < 4: return map
+	elif map.ndim == 4: enmap.samewcs(np.einsum("iiyx->iyx",map),map)
+	else: raise NotImplementedError
+
+def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=False):
 	if not overlaps_any(box, boxes): return None
 	mapset = mapinfo.read(box, pad=pad, dtype=dtype, verbose=verbose, ncomp=ncomp)
 	if mapset is None: return None
+	if all([d.insufficient for d in mapset.datasets]): return None
 	jointmap.sanitize_maps(mapset)
 	jointmap.build_noise_model(mapset)
 	if len(mapset.datasets) == 0: return None
-	#jointmap.setup_background_cmb(mapset, cl_bg)
+	if all([d.insufficient for d in mapset.datasets]): return None
 	jointmap.setup_beams(mapset)
-	jointmap.setup_target_beam(mapset)
+	if obeam is not None: obeam = jointmap.eval_beam(obeam, mapset.l)
+	jointmap.setup_target_beam(mapset, obeam)
+	jointmap.setup_filter(mapset)
+	mask    = jointmap.get_mask_insufficient(mapset)
 
 	coadder = jointmap.Coadder(mapset)
 	rhs     = coadder.calc_rhs()
+	if dump_dir:
+		enmap.write_map(dump_dir + "/rhs.fits", rhs)
+		enmap.write_map(dump_dir + "/ps_rhs.fits", np.abs(enmap.fft(rhs.preflat[0]))**2)
 	map     = coadder.calc_coadd(rhs, dump_dir=dump_dir, verbose=verbose)#, maxiter=1)
+	if dump_dir:
+		enmap.write_map(dump_dir + "/ps_map.fits", np.abs(enmap.fft(mapdiag(map)))**2)
 	div     = coadder.tot_div
 	#C       = 1/mapset.datasets[0].iN
-
+	#res = bunch.Bunch(rhs=rhs*mask, map=map*mask, div=div*mask)#, C=C)
 	res = bunch.Bunch(rhs=rhs, map=map, div=div)#, C=C)
 	return res
+
+if args.obeam:
+	try: obeam = jointmap.read_beam(("fwhm",float(args.obeam)))
+	except ValueError: obeam = jointmap.read_beam(("transfun", args.obeam))
+else: obeam = None
 
 # We have two modes, depending on what args.area is.
 # 1. area is an enmap. Will loop over tiles in that area, and output padded tiles
@@ -94,8 +114,8 @@ if bounds is None:
 		tpos = np.array(tyx[i])
 		pbox = np.array([tpos*tshape,np.minimum((tpos+1)*tshape,shape[-2:])])
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
-		res  = get_coadded_tile(mapinfo, box, ncomp=args.ncomp, verbose=args.verbose)
-		if res is None: res = jointmap.make_dummy_tile(shape, wcs, box, pad=pad, dtype=dtype)
+		res  = get_coadded_tile(mapinfo, box, obeam=obeam, ncomp=args.ncomp, verbose=args.verbose)
+		if res is None: res = jointmap.make_dummy_tile((args.ncomp,)+shape[-2:], wcs, box, pad=pad, dtype=dtype)
 		enmap.write_map(ofile_map, res.map)
 		enmap.write_map(ofile_div, res.div)
 else:
@@ -103,7 +123,7 @@ else:
 	if not overlaps_any(bounds, boxes):
 		print "No data in selected region"
 	else:
-		res = get_coadded_tile(mapinfo, bounds, ncomp=args.ncomp, dump_dir=args.odir, verbose=args.verbose)
+		res = get_coadded_tile(mapinfo, bounds, obeam=obeam, ncomp=args.ncomp, dump_dir=args.odir, verbose=args.verbose)
 		enmap.write_map(args.odir + "/map.fits", res.map)
 		enmap.write_map(args.odir + "/div.fits", res.div)
 		#enmap.write_map(args.odir + "/C.fits",   res.C)

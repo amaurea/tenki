@@ -33,7 +33,7 @@ config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=side
 config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,lim_Pluto_min_el=0", "Default parameters for pluto map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1,tol=0.5", "Default parameters for scan/pickup signal")
-config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz", "Default parameters for noiserect mapping")
+config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
@@ -46,6 +46,7 @@ config.default("filter_addphase_default",  "use=no,name=addphase,value=1,mul=+1,
 config.default("filter_subphase_default",  "use=no,name=addphase,value=1,mul=-1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
 config.default("filter_fitphase_default",  "use=no,name=fitphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5,perdet=1", "Default parameters for phasemap subtraction filter")
 config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", "Default parameters for filter that simply scale the TOD by the given value")
+config.default("filter_beamsym_default", "use=no,name=beamsym,value=1,ibeam=1,obeam=1,postnoise=1", "Default parameters for beam symmetrization filter. ibeam and obeam (fwhm arcmin) specify the current and target beam horizontal size. To symmetrize, set the target horizontal beam size to its vertical size. If this filter becomes standard, these paramters should be moved to filedb or something.")
 
 # Default map filter parameters
 config.default("mapfilter_gauss_default", "use=no,name=gauss,value=0,cap=1e3,type=gauss,sky=yes", "Default parameters for gaussian map filter in mapmaking")
@@ -450,9 +451,10 @@ for out_ind in range(nouter):
 			signal     = mapmaking.SignalPhase(active_scans, areas, mypids, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 		elif param["type"] == "noiserect":
 			ashape, awcs = enmap.read_map_geometry(param["value"])
+			leftright = int(param["leftright"]) > 0
 			# Drift is in degrees per hour, but we want it per second
 			drift = float(param["drift"])/3600
-			area = enmap.zeros((args.ncomp,)+ashape[-2:], awcs, dtype)
+			area = enmap.zeros((args.ncomp*(1+leftright),)+ashape[-2:], awcs, dtype)
 			# Find the duration of each tod. We need this for the y offsets
 			nactive = utils.allgather(np.array(len(active_scans)), comm)
 			offs    = utils.cumsum(nactive, endpoint=True)
@@ -604,6 +606,11 @@ for out_ind in range(nouter):
 			srcparam = srcparam.astype(np.float64)
 			filter = mapmaking.FilterAddSrcs(myscans, srcparam, sys=param["sys"], mul=-float(param["mul"]))
 			src_filters.append(filter)
+		elif param["name"] == "beamsym":
+			if param["value"] == 0: continue
+			ibeam = float(param["ibeam"])*utils.arcmin*utils.fwhm
+			obeam = float(param["obeam"])*utils.arcmin*utils.fwhm
+			filter = mapmaking.FilterBroadenBeamHor(ibeam, obeam)
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 		# Add to normal filters of post-noise-model filters based on parameters

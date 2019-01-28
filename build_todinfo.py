@@ -23,7 +23,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 	try:
 		stats.append(todinfo.build_tod_stats(entry))
 	except (errors.DataMissing,AttributeError) as e:
-		print "Skipping %s (%s)" % (id, e.message)
+		print "%3d %4d/%d %5.1f%% Skipping %s (%s)" % (comm.rank, ind+1, len(ids), (ind+1)/float(len(ids))*100, id, e.message)
 		continue
 	print "%3d %4d/%d %5.1f%% %s" % (comm.rank, ind+1, len(ids), (ind+1)/float(len(ids))*100, id)
 stats = todinfo.merge_tod_stats(stats)

@@ -46,6 +46,7 @@ config.default("filter_addphase_default",  "use=no,name=addphase,value=1,mul=+1,
 config.default("filter_subphase_default",  "use=no,name=addphase,value=1,mul=-1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
 config.default("filter_fitphase_default",  "use=no,name=fitphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5,perdet=1", "Default parameters for phasemap subtraction filter")
 config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", "Default parameters for filter that simply scale the TOD by the given value")
+config.default("filter_beamsym_default", "use=no,name=beamsym,value=1,ibeam=1,obeam=1,postnoise=1", "Default parameters for beam symmetrization filter. ibeam and obeam (fwhm arcmin) specify the current and target beam horizontal size. To symmetrize, set the target horizontal beam size to its vertical size. If this filter becomes standard, these paramters should be moved to filedb or something.")
 
 # Default map filter parameters
 config.default("mapfilter_gauss_default", "use=no,name=gauss,value=0,cap=1e3,type=gauss,sky=yes", "Default parameters for gaussian map filter in mapmaking")
@@ -605,6 +606,11 @@ for out_ind in range(nouter):
 			srcparam = srcparam.astype(np.float64)
 			filter = mapmaking.FilterAddSrcs(myscans, srcparam, sys=param["sys"], mul=-float(param["mul"]))
 			src_filters.append(filter)
+		elif param["name"] == "beamsym":
+			if param["value"] == 0: continue
+			ibeam = float(param["ibeam"])*utils.arcmin*utils.fwhm
+			obeam = float(param["obeam"])*utils.arcmin*utils.fwhm
+			filter = mapmaking.FilterBroadenBeamHor(ibeam, obeam)
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 		# Add to normal filters of post-noise-model filters based on parameters

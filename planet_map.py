@@ -56,6 +56,15 @@ def smooth(tod, srate):
 	fft.ifft(ft, tod, normalize=True)
 	return tod
 
+def broaden_beam_hor(tod, d, ibeam, obeam):
+	ft    = fft.rfft(tod)
+	k     = 2*np.pi*fft.rfftfreq(d.nsamp, 1/d.srate)
+	el    = np.mean(d.boresight[2,::100])
+	skyspeed = d.speed*np.cos(el)
+	sigma = (obeam**2-ibeam**2)**0.5
+	ft *= np.exp(-0.5*(sigma/skyspeed)**2*k**2)
+	fft.ifft(ft, tod, normalize=True)
+
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
 	bid   = id.replace(":","_")
@@ -82,15 +91,14 @@ for ind in range(comm.rank, len(ids), comm.size):
 		if dbox is not None:
 			mid  = np.mean(utils.minmax(d.point_template, 0), 0)
 			off  = d.point_template-mid
-			print np.std(off)/utils.degree
 			good = np.all((off > dbox[0])&(off < dbox[1]),-1)
-			print np.sum(good), d.ndet
 			d    = d.restrict(dets=d.dets[good])
 	except errors.DataMissing as e:
 		print "Skipping %s (%s)" % (id, e.message)
 		continue
-	print "Processing %s" % id
-	# Very simple white noise model
+	print "Processing %s" % id, d.ndet, d.nsamp
+	#broaden_beam_hor(d.tod, d, 1.35*utils.arcmin*utils.fwhm, 1.57*utils.arcmin*utils.fwhm)
+	# Very simple white noise model. This breaks if the beam has been tod-smoothed by this point.
 	with bench.show("ivar"):
 		tod  = d.tod
 		del d.tod
@@ -144,7 +152,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			div[i] = 0
 			pmap.backward(tod, div[i])
 	with bench.show("map"):
-		idiv = array_ops.eigpow(div, -1, axes=[0,1], lim=1e-5)
+		idiv = array_ops.eigpow(div, -1, axes=[0,1], lim=1e-5, fallback="scalar")
 		map  = enmap.map_mul(idiv, rhs)
 	# Estimate central amplitude
 	c = np.array(map.shape[-2:])/2

@@ -6,6 +6,7 @@ parser.add_argument("odir")
 parser.add_argument("-i", "--iteration", type=str, default="individual")
 parser.add_argument("-a", "--allow-nonstandard",   action="store_true")
 parser.add_argument("-c", "--cont",                action="store_true")
+parser.add_argument("-d", "--dry",                 action="store_true")
 parser.add_argument("-O", "--output",    type=str, default="map,ivar,sens,xlink,hits,totmap,totsens,totxlink,tothits")
 args = parser.parse_args()
 
@@ -83,6 +84,7 @@ def read_map(ifile, slice=None):
 def copy_mono(ifile, ofile, slice=None):
 	if args.cont and os.path.exists(ofile): return
 	if verbose: print "%3d copy_mono %s" % (comm.rank, ofile)
+	if args.dry: return
 	tfile = ofile + ".tmp"
 	map   = read_map(ifile, slice=slice)
 	enmap.write_map(tfile, map)
@@ -91,6 +93,7 @@ def copy_mono(ifile, ofile, slice=None):
 def add_mono(ifiles, ofile, slice=None):
 	if args.cont and os.path.exists(ofile): return
 	if verbose: print "%3d add_mono %s" % (comm.rank, ofile)
+	if args.dry: return
 	tfile = ofile + ".tmp"
 	omap  = read_map(ifiles[0], slice=slice)
 	for ifile in ifiles[1:]:
@@ -101,6 +104,7 @@ def add_mono(ifiles, ofile, slice=None):
 def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
 	if args.cont and os.path.exists(omapfile) and (odivfile is None or os.path.exists(odivfile)): return
 	if verbose: print "%3d coadd_mono %s" % (comm.rank, omapfile)
+	if args.dry: return
 	omap, odiv = None, None
 	tmapfile = omapfile + ".tmp"
 	if odivfile: tdivfile = odivfile + ".tmp"
@@ -120,6 +124,7 @@ def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
 def copy_plain(ifile, ofile):
 	if args.cont and os.path.exists(ofile): return
 	if verbose: print "%3d copy_plain %s" % (comm.rank, ofile)
+	if args.dry: return
 	tfile = ofile + ".tmp"
 	shutil.copyfile(ifile, tfile)
 	shutil.move(tfile, ofile)
@@ -127,6 +132,7 @@ def copy_plain(ifile, ofile):
 def cat_files(ifiles, ofile):
 	if args.cont and os.path.exists(ofile): return
 	if verbose: print "%3d cat %s" % (comm.rank, ofile)
+	if args.dry: return
 	with open(ofile, "w") as ofh:
 		for ifile in ifiles:
 			with open(ifile, "r") as ifh:
@@ -180,7 +186,6 @@ for iname in sorted(datasets.keys()):
 			schedule(coadd_mono, imaps, idivs, opre + "map.fits", opre + "ivar.fits")
 		else:
 			def map_src_full(ifree, isrcs, idivs, ofree, osrcs, omap, odiv):
-				print "map_src_full", ifree, isrcs, idivs, ofree, osrcs, omap, odiv
 				coadd_mono(ifree, idivs, ofree, odiv)
 				coadd_mono(isrcs, idivs, osrcs)
 				add_mono([ofree, osrcs], omap)

@@ -9,6 +9,7 @@ parser.add_argument("-a", "--apod",  type=int, default=50)
 parser.add_argument("-p", "--pregrade",  type=int, default=1)
 parser.add_argument("-d", "--downgrade", type=int, default=1)
 parser.add_argument("-L", "--lmax-scale", type=float, default=np.inf)
+parser.add_argument("-O", "--order", type=int, default=3)
 args = parser.parse_args()
 
 # Compute total 2d spectrum for the given input files, which must
@@ -32,11 +33,14 @@ for ifile in args.ifiles:
 print("Computing cross spectrum")
 # Compute auto spectrum
 ps_auto /= nfile**2
-# Compute total spectrum
 ftot /= nfile
+# Compute total spectrum
 ps_tot = ftot[:,None]*np.conj(ftot[None,:])
-# Subtract to get cross spectrum
-ps_cross = ps_tot - ps_auto
+if len(args.ifiles) > 1:
+	# Subtract to get cross spectrum
+	ps_cross = ps_tot - ps_auto
+else:
+	ps_cross = ps_tot
 del ps_tot, ps_auto, ftot
 ps_cross = enmap.downgrade(ps_cross, args.pregrade)
 print(ps_cross.shape)

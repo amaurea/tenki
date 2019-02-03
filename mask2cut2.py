@@ -76,16 +76,18 @@ with h5py.File(wfname, "w") as hfile:
 			pmap = pmat.PmatMap(scan, mask, sys="sidelobe:%s" % args.objname)
 			# Build a tod to project onto.
 			tod = np.zeros((d.ndet, d.nsamp), dtype=dtype)
-			# And project
+		# And project
 			pmap.forward(tod, mask)
 			# Any nonzero samples should be cut
 			tod = tod != 0
 			cut = sampcut.from_mask(tod)
 			del tod
-		print("%s %6.4f %d  %8.3f %8.3f" % (id, float(cut.sum())/cut.size, visible, memory.current()/1024.**3, memory.max()/1024.**3))
+		progress = 100.0*(ind-comm.rank*ntod//comm.size)/((comm.rank+1)*ntod//comm.size-comm.rank*ntod//comm.size)
+		print("%3d %5.1f %s %6.4f %d  %8.3f %8.3f" % (comm.rank, progress, id, float(cut.sum())/cut.size, visible, memory.current()/1024.**3, memory.max()/1024.**3))
 		mystats.append([ind, float(cut.sum())/cut.size, visible])
 		# Add to my work file
-		flags = flagrange.from_sampcut(cut, dets=d.dets)
+		_, uids  = actdata.split_detname(d.dets)
+		flags = flagrange.from_sampcut(cut, dets=uids)
 		flags.write(hfile, group=id)
 
 # Merge all the individual cut files into a single big one.

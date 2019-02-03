@@ -4,9 +4,15 @@ parser.add_argument("imaps", nargs="+")
 parser.add_argument("omap")
 parser.add_argument("-m", "--mean",    action="store_true")
 parser.add_argument("-v", "--verbose", action="store_true")
+parser.add_argument("-s", "--scale",   type=str, default=None)
 args = parser.parse_args()
 import numpy as np, os
 from enlib import enmap, log, mpi, utils
+
+scales = np.full(len(args.imaps), 1.0)
+if args.scale:
+	for i, word in enumerate(args.scale.split(":")):
+		scales[i:] = float(word)
 
 comm  = mpi.COMM_WORLD
 def nonan(a):
@@ -15,10 +21,10 @@ def nonan(a):
 	return res
 def add_maps(imaps, omap):
 	if args.verbose: print "Reading %s" % imaps[0]
-	m = nonan(enmap.read_map(imaps[0]))
-	for mif in imaps[1:]:
+	m = nonan(enmap.read_map(imaps[0]))*scales[0]
+	for scale, mif in zip(scales[1:],imaps[1:]):
 		if args.verbose: print "Reading %s" % mif
-		m += nonan(enmap.read_map(mif))
+		m += nonan(enmap.read_map(mif))*scale
 	if args.mean: m /= len(imaps)
 	if args.verbose: "Writing %s" % omap
 	enmap.write_map(omap, m)

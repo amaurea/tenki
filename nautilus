@@ -23,10 +23,15 @@ sarrs = {
 	"s16":["pa2","pa3","pa4"],"s17":["pa4","pa5","pa6"],"s18":["pa4","pa5","pa6"],
 }
 ffreqs = {"f090": 97.0, "f150": 148.0, "f220": 220.}
-# This should probably not be hardcoded here, but inferred from the mapdata config
-#beam_fmt = "/home/snaess/project/actpol/depot/sigurdkn/beam/marius/mr3_{season}_{array}_{freq}_nohwp_night_beam_profile_instant_2018022.txt"
-#beam_fmt = "/project/r/rbond/sigurdkn/actpol/mapdata/depot/sigurdkn/beam/marius/mr3_{season}_{array}_{freq}_nohwp_night_beam_profile_instant_2018022.txt"
-beam_fmt = "/home/r/rbond/sigurdkn/project/actpol/mapdata/depot/mlungu/beams/180805/mr3_{season}_{array}_{freq}_nohwp_night_beam_profile_jitter_180805.txt"
+# This should probably not be hardcoded here, but inferred from the mapdata configA
+def get_beam(season, array, freq):
+	#beam_fmt = "/home/snaess/project/actpol/depot/sigurdkn/beam/marius/mr3_{season}_{array}_{freq}_nohwp_night_beam_profile_instant_2018022.txt"
+	#beam_fmt = "/project/r/rbond/sigurdkn/actpol/mapdata/depot/sigurdkn/beam/marius/mr3_{season}_{array}_{freq}_nohwp_night_beam_profile_instant_2018022.txt"
+	#beam_fmt = "/home/r/rbond/sigurdkn/project/actpol/mapdata/depot/mlungu/beams/180805/mr3_{season}_{array}_{freq}_nohwp_night_beam_profile_jitter_180805.txt"
+	if int(array[-1:]) < 4:
+		return "/home/snaess/project/actpol/depot/sigurdkn/beam/180805/mr3_{season}_{array}_{freq}_nohwp_night_beam_profile_jitter_180805.txt".format(season=season, array=array, freq=freq)
+	else:
+		return "/home/snaess/project/actpol/depot/sigurdkn/beam/171227/beam_profile_171227_{array}_{freq}_{season}_instant.txt".format(season=season, array=array, freq=freq)
 
 aseas = {}
 for season in sarrs:
@@ -43,7 +48,7 @@ else:
 	idivs = args.maps_and_divs[1::2]
 
 for ind in range(comm.rank, len(imaps), comm.size):
-	imapfile, idivifile = imaps[ind], idivs[ind]
+	imapfile, idivfile = imaps[ind], idivs[ind]
 	print imapfile
 	# Parse the file name looking for array and season information. We need all this
 	# just to infer which beam to use!
@@ -69,7 +74,7 @@ for ind in range(comm.rank, len(imaps), comm.size):
 		else:
 			print "Could not infer freq from '%s'. Skipping" % imapfile
 			continue
-	beam = beam_fmt.format(season=season, array=array, freq=freq)
+	beam = get_beam(season, array, freq)
 
 	def find_largest_rectangle(mask, p0):
 		def calc_chisq(x):
@@ -93,14 +98,10 @@ for ind in range(comm.rank, len(imaps), comm.size):
 	# Automatically find the reference region by finding the biggest
 	# rectangle that has no holes. We base this on a low-resolution
 	# version of the map.
-	print "A"
 	shape, wcs = enmap.read_map_geometry(idivfile)
 	down= 1
-	print "B"
 	div = enmap.read_fits(idivfile, sel=(Ellipsis, slice(None,None,down), slice(None, None, down))).preflat[0]
-	print "C"
 	area= div.area()
-	print "D", area
 
 	if area < np.pi:
 		# Not the huge advanced act patch, which must be handled separately
@@ -320,10 +321,10 @@ numSkySims: 1
 estimateContaminationFromInvertedMaps: False
 """ % {
 		"map":os.path.abspath(imapfile), "div":os.path.abspath(idivfile), "freq":ffreqs[freq], "beam":beam}
-		ntask = 20
+		ntask = 10
 
 	# Set up nemo work directory
-	workdir = imapfile + ".work"
+	workdir = os.getcwd() + "/" + imapfile + ".work"
 	#shutil.rmtree(workdir, ignore_errors=True)
 	utils.mkdir(workdir)
 	with open(workdir + "/nemo.yml", "w") as f:
@@ -334,7 +335,7 @@ estimateContaminationFromInvertedMaps: False
 	# Build a batch script. Nemo is not parallel, so this will just ask for
 	# one core per node
 	batch = r"""#!/bin/bash
-#SBATCH --nodes 1 --ntasks-per-node=%(ntask)s --cpus-per-task=1 --time=4:00:00 --mem-per-cpu=%(mem)dM
+#SBATCH --nodes 1 --ntasks-per-node=%(ntask)s --cpus-per-task=1 --time=4:00:00
 #SBATCH --job-name %(name)s
 cd "%(wdir)s"
 OMP_NUM_THREADS=1 mpirun -n %(ntask)s nemo nemo.yml

@@ -84,7 +84,7 @@ elif args.mode == "planet":
 	minamp = 0.0
 	planet = args.srcdb_or_planet.capitalize()
 	# Coordinates are in relative to the planet itself, so it's fiducially at 0,0
-	srcdata= np.array([0,0,100e3])[:,None]
+	srcdata= np.array([0,0,5000e3])[:,None]
 	src_sys= "hor:%s/0_0" % planet
 	bounds = None
 	prune_unreliable_srcs = False
@@ -336,11 +336,11 @@ class Likelihood:
 			if verbose:
 				doff = (off - self.off0)/utils.arcmin
 				msg = "%4d %8.5f %8.5f" % (self.i,doff[0],doff[1])
+				msg += " %12.5e %7.3f" % (self.chisq0-chisq, t2-t1)
 				famps, faicov = amps.reshape(-1), aicov.reshape(-1)
 				for i in range(len(famps)):
 					nsigma = (famps[i]**2*faicov[i])**0.5
-					msg += " %7.3f %4.1f" % (famps[i]/self.amp_unit, nsigma)
-				msg += " %12.5e %7.2f" % (self.chisq0-chisq, t2-t1)
+					msg += " %10.3f %8.1f" % (famps[i]/self.amp_unit, nsigma)
 				print(msg)
 				self.samples.offs.append(off)
 				self.samples.amps.append(amps)
@@ -488,7 +488,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 		data = actdata.read(entry, exclude=["tod"], verbose=verbose)
 		data+= actdata.read_tod(entry)
 		data = actdata.calibrate(data, verbose=verbose)
-		#data.restrict(dets=data.dets[100:200])
+		#print("fixme") # FIXME
+		#data.restrict(dets=data.dets[100:150])
 		# Avoid planets while building noise model
 		if planet is not None:
 			data.cut_noiseest *= actdata.cuts.avoidance_cut(data.boresight, data.point_offset, data.site, planet, R)
@@ -532,7 +533,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 	
 	# Estimate our total S/N. We know that our amplitudes should be positive, so
 	# degrade the S/N 
-	zs = oamps * oaicov**0.5
+	zs = (oamps * oaicov**0.5).reshape(-1)
 	chisqs = np.array([z**2 + 2*jointmap.log_prob_gauss_positive_single(z) for z in zs])
 	tot_sn = max(0,np.sum(chisqs))**0.5
 
@@ -551,13 +552,15 @@ for ind in range(comm.rank, len(ids), comm.size):
 		ofile["srcpos"] = srcpos[:,sids]
 		ofile["fidamp"] = amps[sids]
 
+	meanamps = np.mean(oamps, -1)
+	meancovs = np.mean(oaicov,-1)
 	# Format fit result in standard format
 	msg = ""
 	for si, sid in enumerate(sids):
 		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %8.4f %6.2f %6.2f | %7.2f %7.2f | %5.2f %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
 				id, sid,
 				off_off[0]/utils.arcmin, off_off[1]/utils.arcmin, doff[0]/utils.arcmin, doff[1]/utils.arcmin,
-				amps[sid]/1e3, oamps[si,0]/1e3, oaicov[si,0]**-0.5/1e3, oamps[si,0]*oaicov[si,0]**0.5, tot_sn,
+				amps[sid]/1e3, meanamps[si,0]/1e3, meancovs[si,0]**-0.5/1e3, meanamps[si,0]*meancovs[si,0]**0.5, tot_sn,
 				srcpos[0,sid]/utils.degree, srcpos[1,sid]/utils.degree,
 				db.data["hour"][ind], db.data["baz"][ind], db.data["bel"][ind], db.data["waz"][ind],
 				L.P.off0[0]/utils.arcmin, L.P.off0[1]/utils.arcmin)

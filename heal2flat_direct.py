@@ -10,6 +10,7 @@ parser.add_argument("-v", "--verbosity", type=int, default=2)
 parser.add_argument("-r", "--rot",   type=str, default=None)
 parser.add_argument("-u", "--unit",  type=float, default=1)
 parser.add_argument("-O", "--order", type=int, default=0)
+parser.add_argument("-s", "--scalar", action="store_true")
 args = parser.parse_args()
 
 log_level = log.verbosity2level(args.verbosity)
@@ -19,7 +20,7 @@ assert ncomp == 1 or ncomp == 3, "Only 1 or 3 components supported"
 
 # Read the input maps
 L.info("Reading " + args.ihealmap)
-imap    = np.atleast_2d(healpy.read_map(args.ihealmap, field=tuple(range(args.first,args.first+ncomp)))).astype(dtype,copy=False)
+imap    = np.atleast_2d(healpy.read_map(args.ihealmap, field=tuple(range(args.first,args.first+ncomp))))
 nside   = healpy.npix2nside(imap.shape[-1])
 mask    = imap < -1e20
 dtype   = imap.dtype
@@ -57,7 +58,7 @@ for bi in range(nblock):
 	if args.order == 0:
 		pix  = healpy.ang2pix(nside, theta, phi)
 		osub[:] = imap[:,pix]
-	elif args.order = 1:
+	elif args.order == 1:
 		for i in range(ncomp):
 			osub[i] = healpy.get_interp_val(imap[i], theta, phi)
 	# Rotate polarization if necessary
@@ -65,5 +66,6 @@ for bi in range(nblock):
 		osub[1:3] = enmap.rotate_pol(osub[1:3], psi)
 
 print "Writing"
-enmap.write_map(oname, res)
+if args.scalar: omap = omap.preflat[0]
+enmap.write_map(args.ofile, omap)
 print "Done"

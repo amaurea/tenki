@@ -1,5 +1,4 @@
-import numpy as np, argparse, glob, re, os, shutil, sys
-from enlib import enmap, utils, retile, bunch, mpi
+import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("idir")
 parser.add_argument("odir")
@@ -9,6 +8,8 @@ parser.add_argument("-c", "--cont",                action="store_true")
 parser.add_argument("-d", "--dry",                 action="store_true")
 parser.add_argument("-O", "--output",    type=str, default="map,ivar,sens,xlink,hits,totmap,totsens,totxlink,tothits")
 args = parser.parse_args()
+import numpy as np, glob, re, os, shutil, sys
+from enlib import enmap, utils, retile, bunch, mpi
 
 comm = mpi.COMM_WORLD
 outputs = set(args.output.split(","))

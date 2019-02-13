@@ -780,7 +780,14 @@ for out_ind in range(nouter):
 		if resume > 0 and os.path.isfile(cgpath):
 			cg.load(cgpath)
 		assert cg.i == comm.bcast(cg.i), "Inconsistent CG step in mapmaker!"
-		while cg.i < nmax:
+		def dump(cg):
+			if args.prepost: eqsys.write(root, "map%04d_prepost" % cg.i, cg.x)
+			x = eqsys.postprocess(cg.x)
+			eqsys.write(root, "map%04d" % cg.i, x)
+			if args.tod_debug:
+				eqsys.A(cg.x, debug_file = root + "tod_debug%04d.hdf" % cg.i)
+		errlim = 1e-30
+		while cg.i < nmax and cg.err > errlim:
 			with bench.mark("cg_step"):
 				cg.step()
 			# Save cg state
@@ -788,11 +795,10 @@ for out_ind in range(nouter):
 				cg.save(cgpath)
 			dt = bench.stats["cg_step"]["time"].last
 			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0 or cg.i == nmax:
-				if args.prepost: eqsys.write(root, "map%04d_prepost" % cg.i, cg.x)
-				x = eqsys.postprocess(cg.x)
-				eqsys.write(root, "map%04d" % cg.i, x)
-				if args.tod_debug:
-					eqsys.A(cg.x, debug_file = root + "tod_debug%04d.hdf" % cg.i)
+				dump(cg)
 			bench.stats.write(benchfile)
 			ptime = bench.stats["M"]["time"].last
 			L.info("CG step %5d %15.7e %6.1f %6.3f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans)), ptime))
+		# If we exited early due to reaching the error limit make sure we output our result
+		if cg.err <= errlim:
+			dump(cg)

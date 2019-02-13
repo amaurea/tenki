@@ -44,6 +44,6 @@ for det in range(d.ndet):
 	omap += utils.bin_multi(opix[det], template.shape[-2:], weight[det]*pickup[det]) * d.det_comps[det,:,None,None]
 	odiv += utils.bin_multi(opix[det], template.shape[-2:], weight[det]) * d.det_comps[det,:,None,None,None] * d.det_comps[det,None,:,None,None]
 
-odiv = enmap.samewcs(array_ops.svdpow(odiv,   -1, axes=[0,1]), odiv)
+odiv = enmap.samewcs(array_ops.eigpow(odiv,   -1, axes=[0,1]), odiv)
 omap = enmap.samewcs(array_ops.matmul(odiv, omap, axes=[0,1]), omap)
 enmap.write_map(args.ofile, omap)

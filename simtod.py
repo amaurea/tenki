@@ -1,10 +1,10 @@
 import numpy as np, argparse, enlib.scan, os
 from enlib import enmap, utils, config, scansim, log, powspec, fft, bunch
-from enact import data, filedb, nmat_measure
+from enact import actscan, filedb, nmat_measure
 
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 
-parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
+parser = config.ArgumentParser()
 parser.add_argument("odir")
 parser.add_argument("--area",  type=str)
 parser.add_argument("--bore",  type=str, default="grid:2:0.2:0.8")
@@ -38,7 +38,7 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 		ids  = fileb.scans[real].ids
 		for id in ids:
 			try:
-				real_scans.append(data.ACTScan(db[id]))
+				real_scans.append(actscan.ACTScan(db[id]))
 			except errors.DataMissing as e:
 				L.debug("Skipped %s (%s)" % (id, e.message))
 	# Dets
@@ -64,8 +64,24 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 		for i in range(nscan):
 			tbox = shorten(area.box(),i%2,short)
 			sim_bore.append(scansim.scan_grid(tbox, density*np.pi/180/60, dir=i, margin=margin))
+	elif toks[0] == "ces":
+		nscan = int(toks[1])
+		azs   = [float(w)*utils.degree for w in toks[2].split(",")]
+		els   = [float(w)*utils.degree for w in toks[3].split(",")]
+		mjd0  = float(toks[4])
+		dur   = float(toks[5])
+		azrate= float(toks[6]) if len(toks) > 6 else 1.5*utils.degree
+		srate = float(toks[7]) if len(toks) > 7 else 400
+		nsamp = utils.nint(dur*srate)
+		for i in range(nscan):
+			mjd  = mjd0 + dur*(i//(2*len(els)))/(24*3600)
+			el   = els[(i//2)%len(els)]
+			az1, az2 = azs
+			if i%2 == 1: az1, az2 = -az2, -az1
+			box = np.array([[az1,el],[az2,el]])
+			sim_bore.append(scansim.scan_ceslike(nsamp, box, mjd0=mjd, srate=srate, azrate=azrate))
 	elif toks[0] == "real":
-		sim_bore = [bunch.Bunch(boresight=s.boresight, sys=s.sys, site=s.site, mjd0=s.mjd0) for s in real_scans]
+		sim_bore = [bunch.Bunch(boresight=s.boresight, hwp_phase=s.hwp_phase, sys=s.sys, site=s.site, mjd0=s.mjd0) for s in real_scans]
 	else: raise ValueError
 	nsim = len(sim_bore)
 	# Make one det info per scan
@@ -97,7 +113,10 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 	# Signal
 	L.debug("signal")
 	toks = signal.split(":")
-	if toks[0] == "ptsrc":
+	if toks[0] == "none":
+		for i in range(nsim):
+			scans.append(scansim.SimPlain(sim_bore[i], sim_dets[i], sim_nmat[i], seed=seed+i, noise_scale=noise_scale))
+	elif toks[0] == "ptsrc":
 		# This one always operates in the same coordinates as 
 		nsrc, amp, fwhm = int(toks[1]), float(toks[2]), float(toks[3])
 		np.random.seed(seed)
@@ -152,6 +171,8 @@ else:
 enmap.write_map(args.odir + "/area.fits", area)
 model = get_model(scans[0], area)
 enmap.write_map(args.odir + "/model.fits", model)
-for i, scan in enumerate(scans):
-	L.info("scan %2d/%d" % (i+1,len(scans)))
-	enlib.scan.write_scan(args.odir + "/scan%03d.hdf" % i, scan)
+with open(args.odir + "/tods.txt", "w") as ofile:
+	for i, scan in enumerate(scans):
+		L.info("scan %2d/%d" % (i+1,len(scans)))
+		enlib.scan.write_scan(args.odir + "/scan%03d.hdf" % i, scan)
+		ofile.write("%s/scan%03d.hdf\n" % (args.odir, i))

@@ -125,7 +125,7 @@ for i in range(ncomp):
 		scan.pmap.backward(tod, div[i])
 div = utils.allreduce(div, comm)
 #idiv = utils.eigpow(div,-1,[0,1])
-idiv = array_ops.svdpow(div,-1,[0,1], lim=1e-6)
+idiv = array_ops.eigpow(div,-1,[0,1], lim=1e-6)
 if comm.rank == 0:
 	enmap.write_map(args.odir + "/map_div.fits",  div)
 	enmap.write_map(args.odir + "/map_idiv.fits", idiv)

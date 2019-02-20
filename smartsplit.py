@@ -348,6 +348,7 @@ with open(args.odir + "/overlap.txt", "w") as f:
 # Get the ids that go into each split
 for i in range(nsplit):
 	for ai, aname in enumerate(arrays):
+		aname = aname.replace("ar","pa").replace(":","_")
 		with open(args.odir + "/ids_%s_set%d.txt" % (aname,i), "w") as f:
 			for id in sorted(split_ids[i][ai]):
 				f.write(id + "\n")

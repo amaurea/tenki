@@ -65,10 +65,13 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 	if len(mapset.datasets) == 0: return None
 	if all([d.insufficient for d in mapset.datasets]): return None
 	jointmap.setup_beams(mapset)
-	if obeam is not None: obeam = jointmap.eval_beam(obeam, mapset.l)
 	jointmap.setup_target_beam(mapset, obeam)
 	jointmap.setup_filter(mapset)
+	jointmap.setup_background_spectrum(mapset)
 	mask    = jointmap.get_mask_insufficient(mapset)
+	#fitter  = jointmap.SourceFitter(mapset)
+	#fitter.fit()
+	#1/0
 
 	coadder = jointmap.Coadder(mapset)
 	rhs     = coadder.calc_rhs()
@@ -80,8 +83,8 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 		enmap.write_map(dump_dir + "/ps_map.fits", np.abs(enmap.fft(mapdiag(map)))**2)
 	div     = coadder.tot_div
 	#C       = 1/mapset.datasets[0].iN
-	#res = bunch.Bunch(rhs=rhs*mask, map=map*mask, div=div*mask)#, C=C)
-	res = bunch.Bunch(rhs=rhs, map=map, div=div)#, C=C)
+	res = bunch.Bunch(rhs=rhs*mask, map=map*mask, div=div*mask)#, C=C)
+	#res = bunch.Bunch(rhs=rhs, map=map, div=div)#, C=C)
 	return res
 
 if args.obeam:

@@ -1,19 +1,20 @@
 #!/usr/bin/env python2
-import numpy as np, argparse, sys
-from scipy import ndimage
-from enlib import enmap
-np.seterr(all="ignore")
+import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("imap")
 parser.add_argument("hitmap", nargs="?", default=None)
 parser.add_argument("omap")
 parser.add_argument("-F", "--filter", action="append", help="Filter specification. Can be specified multiple times. Formats: g:lcut = gaussian filter, lowpass for positive lcut, highpass for negative. b:lcut:alpha = butterworth filter. Lowpass for positive alpha, highpass for negative.")
-parser.add_argument("-m", "--mode", type=str, default="a")
 parser.add_argument("-s", "--slice", type=str, default=None)
 parser.add_argument("-L", "--limit", type=float, default=0.10)
+parser.add_argument(      "--lmax",  type=float, default=None, help="Don't filter anything above this l")
 parser.add_argument("-e", "--extent-model", type=str, default=None)
 parser.add_argument("-v", action="count")
 args = parser.parse_args()
+import numpy as np, sys
+from scipy import ndimage
+from enlib import enmap
+np.seterr(all="ignore")
 
 filter_specs = args.filter or ["b:200:-5"]
 
@@ -26,8 +27,7 @@ if args.slice:
 ishape = m.shape
 m = m.preflat
 if args.hitmap != None:
-	w = enmap.read_map(args.hitmap)
-	while w.ndim > 2: w = w[0]
+	w = enmap.read_map(args.hitmap).preflat[0]
 else:
 	w = enmap.zeros(m.shape[-2:], m.wcs, dtype=m.dtype)+1
 
@@ -52,42 +52,33 @@ def filter_gauss(l, lsigma):
 def filter_butter(l, lknee, alpha):
 	return 1.0/(1+(l/lknee)**alpha)
 
-# Set up filter
-for mode in args.mode:
-	l = wm.lmap()
-	if args.v > 0: print mode
-	if   mode == "v": l = np.abs(l[1])
-	elif mode == "h": l = np.abs(l[0])
-	elif mode == "a": l = np.sum(l**2,0)**0.5
-	else: raise ValueError("Unrecognized mode " + mode)
-
-	filters = enmap.zeros(wm.shape, wm.wcs, dtype=wm.dtype)
-	for i, fspec in enumerate(filter_specs):
-		filter = l*0+1
-		for fstr in fspec.split(","):
-			toks = fstr.split(":")
-			if toks[0] in ["g","gauss"]:
-				lsigma = float(toks[1])
-				filter *= filter_gauss(l, lsigma)
-			elif toks[0] in ["b", "butter", "butterworth"]:
-				lknee = float(toks[1])
-				alpha = float(toks[2])
-				print "a"
-				filter *= filter_butter(l, lknee, alpha)
-				print "b"
-			else: raise ValueError("Unknown filter type: " + toks[0])
-		filters[i] = filter
-		del filter
-	del l
-	print "moo"
-	for j in range(i+1,len(filters)):
-		filters[j] = filters[i]
-	# Apply filter
-	print np.std(filters)
-	wm  = enmap.map2harm(wm)
-	wm *= filters
-	del filters
-	wm  = enmap.harm2map(wm)
+# Perform the filtering
+fmap = enmap.map2harm(wm)
+lmap = fmap.lmap()
+for i, fspec in enumerate(filter_specs):
+	toks = fspec.split(":")
+	desc, fargs = toks[0], toks[1:]
+	dirs   = [c for c in "vha"     if c      in desc] or ["a"]
+	comps  = [c for c in range(10) if str(c) in desc] or list(range(fmap.shape[-3]))
+	for dir in dirs:
+		if   dir == "v": l = np.abs(lmap[0])
+		elif dir == "h": l = np.abs(lmap[1])
+		elif dir == "a": l = np.sum(lmap**2,0)**0.5
+		else: raise ValueError("Invalid direction '%s'" % dir)
+		if "g" in desc:
+			lsigma = float(fargs[0])
+			filter = filter_gauss(l, lsigma)
+		elif "b" in desc:
+			lknee = float(fargs[0])
+			alpha = float(fargs[1])
+			filter = filter_butter(l, lknee, alpha)
+		else: raise ValueError("No known filter specified in " + desc)
+		if args.lmax is not None:
+			lmask = np.sum(lmap**2,0)**0.5 > args.lmax
+			filter[lmask] = 1
+		for comp in comps:
+			fmap[comp] *= filter
+wm  = enmap.harm2map(fmap)
 
 # And recover filtered map
 m   = wm/w

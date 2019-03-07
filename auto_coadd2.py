@@ -69,10 +69,6 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 	jointmap.setup_filter(mapset)
 	jointmap.setup_background_spectrum(mapset)
 	mask    = jointmap.get_mask_insufficient(mapset)
-	#fitter  = jointmap.SourceFitter(mapset)
-	#fitter.fit()
-	#1/0
-
 	coadder = jointmap.Coadder(mapset)
 	rhs     = coadder.calc_rhs()
 	if dump_dir:

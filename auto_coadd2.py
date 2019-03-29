@@ -12,6 +12,7 @@ parser.add_argument("-C", "--ncomp",  type=int,   default=3)
 parser.add_argument("-B", "--obeam",  type=str,   default=None)
 parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("-v", "--verbose", action="store_true")
+parser.add_argument("--filter-mode",  type=str,   default="weight")
 args = parser.parse_args()
 
 config  = jointmap.read_config(args.config)
@@ -33,7 +34,7 @@ boxes  = np.sort(np.array([d.box for d in mapinfo.datasets]),-2)
 
 def overlaps_any(box, refboxes):
 	rdec, rra = utils.moveaxis(refboxes - box[0,:], 2,0)
-	wdec, wra = box[1]   - box[0]
+	wdec, wra = np.abs(box[1]   - box[0])
 	rra -= np.floor(rra[:,0,None]/(2*np.pi)+0.5)*(2*np.pi)
 	for i in range(-1,2):
 		nra = rra + i*(2*np.pi)
@@ -66,13 +67,9 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 	if all([d.insufficient for d in mapset.datasets]): return None
 	jointmap.setup_beams(mapset)
 	jointmap.setup_target_beam(mapset, obeam)
-	jointmap.setup_filter(mapset)
+	jointmap.setup_filter(mapset, mode=args.filter_mode)
 	jointmap.setup_background_spectrum(mapset)
 	mask    = jointmap.get_mask_insufficient(mapset)
-	#fitter  = jointmap.SourceFitter(mapset)
-	#fitter.fit()
-	#1/0
-
 	coadder = jointmap.Coadder(mapset)
 	rhs     = coadder.calc_rhs()
 	if dump_dir:

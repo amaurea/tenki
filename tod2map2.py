@@ -46,6 +46,7 @@ config.default("filter_addphase_default",  "use=no,name=addphase,value=1,mul=+1,
 config.default("filter_subphase_default",  "use=no,name=addphase,value=1,mul=-1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
 config.default("filter_fitphase_default",  "use=no,name=fitphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5,perdet=1", "Default parameters for phasemap subtraction filter")
 config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", "Default parameters for filter that simply scale the TOD by the given value")
+config.default("filter_null_default",     "use=no,name=null", "Default parameters for filter that does nothing")
 config.default("filter_beamsym_default", "use=no,name=beamsym,value=1,ibeam=1,obeam=1,postnoise=1", "Default parameters for beam symmetrization filter. ibeam and obeam (fwhm arcmin) specify the current and target beam horizontal size. To symmetrize, set the target horizontal beam size to its vertical size. If this filter becomes standard, these paramters should be moved to filedb or something.")
 
 # Default map filter parameters
@@ -373,6 +374,52 @@ def setup_extra_transforms(param):
 		extra.append(trf)
 	return extra
 
+# Point source handling:
+# We may want to do several different things:
+# 1. ignore them
+# 2. subtract them (-F src)
+# 3. mask them (currently handled with a config parameter in autocut)
+# 4. inpaint them
+# 5. map them with a white noise model
+#
+# It would be nice to have a unified user interface to these, but
+# they don't all fit into our standard way of doing things.
+# 4-5 in particular are quite complicated. Here's how they would work:
+#
+# src_cuts = make_cuts_selecting_the samples that hit the sources
+# cuts_orig = cuts
+# cuts = cuts+src_cuts
+# map = solve mapmaking equation()
+# for each tod:
+#  tod  = Pmap(map) + Pcut(cuts)
+#  nmat.white(tod)
+#  Pcut_orig.T(tod)
+#  rhs2 += Pmap.T(tod)
+# (and the same for div2)
+# map2 = rhs2/div2
+#
+# This produces a smoothly inpainted TOD based on the ML solution of
+# what's going on in the cut regions.
+#
+# Given this we can now produce the source white maps:
+# tod = d.tod - gapfill(d.tod, src_cuts)
+# where gapfill can be the jon gapfilling or perhaps the constrained
+# realization gapfilling.
+# src_white = map_white(tod, cuts_orig)
+# map2 += src_white
+#
+# Aside from the cuts juggling, #4-#5 can be done as a postfilter.
+# src_white would be computed in the constructor, while
+# the main function would do the inpainting projection
+# and src_white-adding. The main ugly thing
+# here is the cuts juggling. Since cuts are stored
+# in each signal, which are set up early, it's too late
+# to try to modify cuts in the postfilter constructor.
+# It has to be done at the point where this comment is, at
+# the latest.
+
+
+
 # UGLY HACK: Handle individual output file mode
 nouter = 1
 if args.individual:
@@ -565,6 +612,8 @@ for out_ind in range(nouter):
 			value = float(param["value"])
 			if value == 1: continue
 			filter = mapmaking.FilterScale(value)
+		elif param["name"] == "null":
+			filter = mapmaking.FilterNull()
 		elif param["name"] == "buddy":
 			if "map" not in param: raise ValueError("-F buddy needs a map file to subtract. e.g. -F buddy:map=foo.fits")
 			mode  = int(param["value"])

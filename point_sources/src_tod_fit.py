@@ -9,7 +9,7 @@
 # However, this takes 1-5 s per likelihood evaluation. A robust fit requires ~500 evaluations,
 # which would be 8-42 minutes. And that's using 16 cores! That's too slow. So this one is
 # useful for comparing with a faster methods for a few reference tods, but not in general.
-# Currently N and P take similar time. Can optimize P more with some effort, but P is dominated
+# Currently N and P take similar time. Can optimize P more with some effort, but N is dominated
 # by ffts, and can't improve much.
 from __future__ import division, print_function
 import numpy as np, time, astropy.io.fits, os, sys

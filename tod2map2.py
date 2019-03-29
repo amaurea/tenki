@@ -32,7 +32,7 @@ config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelo
 config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=sidelobe:Neptune,prec=bin,lim_Neptune_min_el=0", "Default parameters for neptune map")
 config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,lim_Pluto_min_el=0", "Default parameters for pluto map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
-config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=0.5,tol=0.5", "Default parameters for scan/pickup signal")
+config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1.0,tol=0.5", "Default parameters for scan/pickup signal")
 config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
@@ -442,6 +442,8 @@ for out_ind in range(nouter):
 			col_major = True
 			patterns, mypids = scanutils.classify_scanning_patterns(active_scans, comm=comm, tol=tol)
 			L.info("Found %d scanning patterns" % len(patterns))
+			if comm.rank == 0:
+				print patterns/utils.degree
 			# Define our phase maps
 			nrow, ncol = active_scans[0].dgrid
 			array_dets = np.arange(nrow*ncol)

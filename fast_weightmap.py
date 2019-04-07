@@ -9,7 +9,7 @@ parser.add_argument("--daz",        type=float, default=0.7)
 parser.add_argument("--azdown",     type=int,   default=100)
 parser.add_argument("--chunk-size", type=int,   default=100)
 parser.add_argument("--rad",        type=float, default=0.7)
-parser.add_argument("-W", "--weight", type=str, default="det")
+parser.add_argument("-W", "--weight", type=str, default="det", help="det: output will be in det-seconds per square arcmin. arr: arr-seconds per square arcmin")
 args = parser.parse_args()
 
 filedb.init()

@@ -21,6 +21,11 @@ config.default("map_ptsrc_sys", "cel", "Coordinate system the point source posit
 config.default("map_format", "fits", "File format to use when writing maps. Can be 'fits', 'fits.gz' or 'hdf'.")
 config.default("resume", 0, "Interval at which to write the internal CG information to allow for restarting. If 0, this will never be written. Also controls whether existing information on disk will be used for restarting if avialable. If negative, restart information will be written, but not used.")
 
+# Special source handling
+config.default("src_handling", "none", "Special source handling. 'none' to disable, 'inpaint' to inpaint and 'full' to map srcs with a white noise model")
+config.default("src_handling_lim", 10000, "Minimum source amplitude to apply special source handling to it")
+config.default("src_handling_list", "", "Override source list")
+
 # Default signal parameters
 config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin", "Default parameters for sky map")
 config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin", "Default parameters for ground map")
@@ -88,6 +93,19 @@ ext   = config.get("map_format")
 tshape= (720,720)
 #tshape= (100,100)
 resume= config.get("resume")
+
+def parse_src_handling():
+	res = {}
+	res["mode"]   = config.get("src_handling")
+	if res["mode"] == "none": return None
+	res["amplim"] = config.get("src_handling_lim")
+	res["srcs"]   = None
+	srcfile = config.get("src_handling_list")
+	if srcfile:
+		res["srcs"] = pointsrcs.read(srcfile)
+	return res
+
+src_handling = parse_src_handling()
 
 filedb.init()
 db = filedb.data
@@ -374,52 +392,6 @@ def setup_extra_transforms(param):
 		extra.append(trf)
 	return extra
 
-# Point source handling:
-# We may want to do several different things:
-# 1. ignore them
-# 2. subtract them (-F src)
-# 3. mask them (currently handled with a config parameter in autocut)
-# 4. inpaint them
-# 5. map them with a white noise model
-#
-# It would be nice to have a unified user interface to these, but
-# they don't all fit into our standard way of doing things.
-# 4-5 in particular are quite complicated. Here's how they would work:
-#
-# src_cuts = make_cuts_selecting_the samples that hit the sources
-# cuts_orig = cuts
-# cuts = cuts+src_cuts
-# map = solve mapmaking equation()
-# for each tod:
-#  tod  = Pmap(map) + Pcut(cuts)
-#  nmat.white(tod)
-#  Pcut_orig.T(tod)
-#  rhs2 += Pmap.T(tod)
-# (and the same for div2)
-# map2 = rhs2/div2
-#
-# This produces a smoothly inpainted TOD based on the ML solution of
-# what's going on in the cut regions.
-#
-# Given this we can now produce the source white maps:
-# tod = d.tod - gapfill(d.tod, src_cuts)
-# where gapfill can be the jon gapfilling or perhaps the constrained
-# realization gapfilling.
-# src_white = map_white(tod, cuts_orig)
-# map2 += src_white
-#
-# Aside from the cuts juggling, #4-#5 can be done as a postfilter.
-# src_white would be computed in the constructor, while
-# the main function would do the inpainting projection
-# and src_white-adding. The main ugly thing
-# here is the cuts juggling. Since cuts are stored
-# in each signal, which are set up early, it's too late
-# to try to modify cuts in the postfilter constructor.
-# It has to be done at the point where this comment is, at
-# the latest.
-
-
-
 # UGLY HACK: Handle individual output file mode
 nouter = 1
 if args.individual:
@@ -454,6 +426,12 @@ for out_ind in range(nouter):
 		my_ginds = col[row==comm.rank]
 		myscans  = [myscans_tot[i] for i in my_ginds]
 		root = root_tot + "group%03d_%03d_" % (ocomm.rank//args.group, out_ind)
+
+	# Point source handling:
+	if src_handling is not None:
+		src_handler = mapmaking.SourceHandler(myscans, comm, dtype=dtype, **src_handling)
+	else: src_handler = None
+
 	# 1. Initialize signals
 	L.info("Initializing signals")
 	signals = []
@@ -516,6 +494,10 @@ for out_ind in range(nouter):
 			signal  = mapmaking.SignalNoiseRect(active_scans, area, drift, my_ys, comm, name=effname, mode=param["mode"], ofmt=param["ofmt"], output=param["output"]=="yes")
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
+		# Hack. Special source handling for some signals
+		if src_handler and param["type"] in ["map","dmap","fmap","fdmap"]:
+			src_handler.add_signal(signal)
+		# Add signal to our list of signals to map
 		signals.append(signal)
 
 	def matching_signals(params, signal_params, signals):
@@ -540,9 +522,9 @@ for out_ind in range(nouter):
 			if mode >= 2:
 				for sparam, signal in matching_signals(param, signal_params, signals):
 					if sparam["type"] == "map" or sparam["type"] == "bmap":
-						prec = mapmaking.PreconMapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
+						prec = mapmaking.PreconMapBinned(signal, myscans, weights=[], noise=False, hits=False)
 					elif sparam["type"] == "dmap":
-						prec = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights=[], noise=False, hits=False)
+						prec = mapmaking.PreconDmapBinned(signal, myscans, weights=[], noise=False, hits=False)
 					else:
 						raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
 					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec, daz=daz, nt=nt, weighted=weighted>0))
@@ -671,11 +653,24 @@ for out_ind in range(nouter):
 		else:
 			filters.append(filter)
 	# If any filters were added, append a gapfilling operation, since the filters may have
-	# put large values in the gaps, and these may not be representable by our cut model
+	# put large values in the gaps, and these may not be representable by our cut model.
+	# Hm.. Doesn't this undo all the hard work we've done to keep glitch cuts and normal
+	# cuts separate? As soon as we turn on any filter, we get normal gapfilling anyway.
+	# The main thing that would put large values in the gaps would be source injection/subtraction,
+	# I think. For source subtraction, the problem would be that the basic cut gapfilled tod
+	# is missing the source in the cut area. This could be fixed by using the basic cuts
+	# in FilterGapfill. For source injection we end up with large values anyway.
+	# I think the best thing would be to use basic cut gapfilling in filters and full cut
+	# gapfilling in filters2
 	if len(filters) > 0:
-		filters.append(mapmaking.FilterGapfill())
+		filters.append(mapmaking.FilterGapfill(basic=True))
 	if len(filters2) > 0:
 		filters2.append(mapmaking.FilterGapfill())
+
+	# Register the special source handler as a filter
+	if src_handler:
+		filters.append(src_handler.filter)
+		filters2.append(src_handler.filter2)
 
 	L.info("Initializing mapfilters")
 	for param in mapfilter_params:
@@ -702,6 +697,11 @@ for out_ind in range(nouter):
 	noise_stats = build_noise_stats(myscans, comm)
 	if comm.rank == 0: write_noise_stats(root + "noise.txt", noise_stats)
 
+	if src_handler:
+		# Finalize the source handler
+		src_handler.post_b()
+		src_handler.write(root)
+
 	#for si, scan in enumerate(myscans):
 	#	tod = np.zeros([scan.ndet, scan.nsamp], dtype)
 	#	imaps  = eqsys.dof.unzip(eqsys.b)
@@ -722,14 +722,14 @@ for out_ind in range(nouter):
 		elif param["type"] in ["map","bmap","fmap","noiserect"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
 			if param["prec"] == "bin":
-				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights)
+				signal.precon = mapmaking.PreconMapBinned(prec_signal, myscans, weights)
 			elif param["prec"] == "jacobi":
-				signal.precon = mapmaking.PreconMapBinned(prec_signal, signal_cut, myscans, weights, noise=False)
+				signal.precon = mapmaking.PreconMapBinned(prec_signal, myscans, weights, noise=False)
 			elif param["prec"] == "hit":
 				print "Warning: map and cut precon must have compatible units"
-				signal.precon = mapmaking.PreconMapHitcount(prec_signal, signal_cut, myscans)
+				signal.precon = mapmaking.PreconMapHitcount(prec_signal, myscans)
 			elif param["prec"] == "tod":
-				signal.precon = mapmaking.PreconMapTod(prec_signal, signal_cut, myscans, weights)
+				signal.precon = mapmaking.PreconMapTod(prec_signal, myscans, weights)
 			else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
 			if "nohor" in param and param["nohor"] != "no":
 				prior_weight = signal.precon.div[0,0]
@@ -740,11 +740,11 @@ for out_ind in range(nouter):
 				signal.prior = mapmaking.PriorNorm(float(param["unmix"]))
 		elif param["type"] in ["dmap","fdmap"]:
 			if param["prec"] == "bin":
-				signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights)
+				signal.precon = mapmaking.PreconDmapBinned(signal, myscans, weights)
 			elif param["prec"] == "jacobi":
-				signal.precon = mapmaking.PreconDmapBinned(signal, signal_cut, myscans, weights, noise=False)
+				signal.precon = mapmaking.PreconDmapBinned(signal, myscans, weights, noise=False)
 			elif param["prec"] == "hit":
-				signal.precon = mapmaking.PreconDmapHitcount(signal, signal_cut, myscans)
+				signal.precon = mapmaking.PreconDmapHitcount(signal, myscans)
 			else: raise ValueError("Unknown dmap preconditioner '%s'" % param["prec"])
 			if "nohor" in param and param["nohor"] != "no":
 				prior_weight  = signal.precon.div[0,0]
@@ -754,7 +754,7 @@ for out_ind in range(nouter):
 			if "unmix" in param and param["unmix"] != "no":
 				signal.prior = mapmaking.PriorNorm(float(param["unmix"]))
 		elif param["type"] == "scan":
-			signal.precon = mapmaking.PreconPhaseBinned(signal, signal_cut, myscans, weights)
+			signal.precon = mapmaking.PreconPhaseBinned(signal, myscans, weights)
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 
@@ -768,7 +768,7 @@ for out_ind in range(nouter):
 	for param, signal in zip(signal_params, signals):
 		if config.get("crossmap") and param["type"] in ["map","bmap","fmap","dmap"]:
 			L.info("Computing crosslink map")
-			cmap = mapmaking.calc_crosslink_map(signal, signal_cut, myscans, weights)
+			cmap = mapmaking.calc_crosslink_map(signal, myscans, weights)
 			signal.write(root, "crosslink", cmap)
 			del cmap
 		if config.get("icovmap") and param["type"] in ["map","bmap","fmap","dmap","noiserect"]:
@@ -796,7 +796,7 @@ for out_ind in range(nouter):
 			del icov
 		if src_filters and param["type"] in ["map","bmap","fmap","dmap"]:
 			L.info("Computing point source map")
-			srcmap = mapmaking.calc_ptsrc_map(signal, signal_cut, myscans, src_filters)
+			srcmap = mapmaking.calc_ptsrc_map(signal, myscans, src_filters)
 			signal.write(root, "srcs", srcmap)
 			del srcmap
 	if map_add_filters:

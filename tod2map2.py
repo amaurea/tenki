@@ -80,6 +80,7 @@ parser.add_argument("--individual", action="store_true")
 parser.add_argument("--group",      type=int, default=0)
 parser.add_argument("--tod-debug",  action="store_true")
 parser.add_argument("--prepost",    action="store_true")
+parser.add_argument("--define-planets", type=str, default=None)
 args = parser.parse_args()
 
 if args.dump_config:
@@ -93,6 +94,11 @@ ext   = config.get("map_format")
 tshape= (720,720)
 #tshape= (100,100)
 resume= config.get("resume")
+
+if args.define_planets:
+	for pdesc in args.define_planets.split(","):
+		name, elemfile = pdesc.split(":")
+		ephemeris.register_object(name, ephemeris.read_object(elemfile))
 
 def parse_src_handling():
 	res = {}

@@ -1,7 +1,7 @@
-import numpy as np, sys, os
+import numpy as np, sys, os, ephem
 from enlib import utils
 with utils.nowarn(): import h5py
-from enlib import config, pmat, mpi, errors, gapfill, enmap, bench
+from enlib import config, pmat, mpi, errors, gapfill, enmap, bench, ephemeris
 from enlib import fft, array_ops, sampcut, cg
 from enact import filedb, actscan, actdata, cuts, nmat_measure
 config.set("pmat_cut_type",  "full")
@@ -15,7 +15,8 @@ parser.add_argument("-R", "--dist", type=float, default=4)
 parser.add_argument("-y", "--ypad", type=float, default=3)
 parser.add_argument("-s", "--src",  type=int,   default=None, help="Only analyze given source")
 parser.add_argument("-c", "--cont", action="store_true")
-parser.add_argument("-m", "--model",type=str, default="joneig")
+parser.add_argument("-m", "--model",type=str, default="constrained")
+parser.add_argument("--hit-tol",    type=float, default=0.5)
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -24,6 +25,7 @@ R    = args.dist * utils.arcmin
 ypad = args.ypad * utils.arcmin
 csize= 100
 config.set("pmat_ptsrc_cell_res", 2*(R+ypad)/utils.arcmin)
+config.set("pmat_ptsrc_rsigma", 5)
 config.set("pmat_interpol_pad", 5+ypad/utils.arcmin)
 
 dtype = np.float32
@@ -38,19 +40,56 @@ if args.tag:  prefix += args.tag + "_"
 # go linearly from 1 to 0 at 2R, letting us use 0.5 as the 1R cutoff.
 beam = np.array([[0,1],[2*R,0]]).T
 
-# Get the source positions
-srcs = np.loadtxt(args.srcs)
-src_param = np.zeros((len(srcs),8))
-src_param[:,0:2] = srcs[:,1::-1]*utils.degree
-src_param[:,2]   = 1
-src_param[:,5:7] = 1
+src_dtype = [("ra","f"),("dec","f"),("type","S20"),("name","S20")]
+def load_srcs(desc):
+	# Reads in the set of sources to map, returning
+	# [nsrc,{ra,dec,type,name}]. type will be "fixed"
+	# for fixed sources and "planet" for moving sources.
+	# Moving sources will have their coordinates updated for
+	# each TOD.
+	if desc in ephem.__dict__:
+		res = np.zeros(1, src_dtype).view(np.recarray)
+		res.type = "planet"
+		res.name = desc
+		return res
+	try:
+		obj  = ephemeris.read_object(desc)
+		name = "obj000"
+		setattr(ephem, name, lambda: obj)
+		res = np.zeros(1, src_dtype).view(np.recarray)
+		res.type = "planet"
+		res.name = name
+		return res
+	except IOError:
+		srcs = np.loadtxt(args.srcs, usecols=[0,1])
+		res  = np.zeros(len(srcs), src_dtype)
+		res.ra, res.dec = srcs.T[:2]*utils.degree
+		res.type = "fixed"
+		return res
+
+srcs = load_srcs(args.srcs)
 
 # Find out which sources are hit by each tod
 db = filedb.scans.select(filedb.scans[args.sel])
 tod_srcs = {}
 for sid, src in enumerate(srcs):
 	if args.src is not None and sid != args.src: continue
-	for id in db["hits([%.6f,%6f])" % tuple(src[:2])]:
+	if src.type == "planet":
+		# This is a bit hacky, but sometimes the "t" member is unavailable
+		# in the database. This also ignores the planet movement during the
+		# TOD. We will take that into account in the final step in the mapping, though.
+		t = np.char.partition(db.ids,".")[:,0].astype(float)+300
+		ra, dec = ephemeris.ephem_pos(src.name, utils.ctime2mjd(t), dt=0)[:2]
+	else: ra, dec = src.ra, src.dec
+	points = np.array([ra, dec])
+	polys  = db.data["bounds"]*utils.degree
+	polys[0] = utils.rewind(polys[0], points[0])
+	polys[0] = utils.rewind(polys[0], polys[0,0])
+	inside   = utils.point_in_polygon(points.T, polys.T)
+	dists    = utils.poly_edge_dist(points.T, polys.T)
+	dists    = np.where(inside, 0, dists)
+	hit      = np.where(dists < args.hit_tol*utils.degree)[0]
+	for id in db.ids[hit]:
 		if not id in tod_srcs: tod_srcs[id] = []
 		tod_srcs[id].append(sid)
 
@@ -80,8 +119,11 @@ def calc_model_joneig(tod, cut, srate=400):
 	return smooth(gapfill.gapfill_joneig(tod, cut, inplace=False), srate)
 
 def calc_model_constrained(tod, cut, srate=400, mask_scale=0.3, lim=3e-4, maxiter=50, verbose=False):
+	# First do some simple gapfilling to avoid messing up the noise model
+	tod = sampcut.gapfill_linear(cut, tod, inplace=False)
 	ft = fft.rfft(tod) * tod.shape[1]**-0.5
 	iN = nmat_measure.detvecs_jon(ft, srate)
+	del ft
 	iV = iN.ivar*mask_scale
 	def A(x):
 		x   = x.reshape(tod.shape)
@@ -116,6 +158,9 @@ for ind in range(comm.rank, len(ids), comm.size):
 		with open("%s%s_empty.txt" % (prefix, bid),"w"): pass
 		continue
 	print "Processing %s [ndet:%d, nsamp:%d, nsrc:%d]" % (id, d.ndet, d.nsamp, len(tod_srcs[id]))
+	# Fill in representative ra, dec for planets for this tod
+	for sid in np.where(srcs.type == "planet")[0]:
+		srcs.ra[sid], srcs.dec[sid] = ephemeris.ephem_pos(srcs.name[sid], utils.ctime2mjd(d.boresight[0,d.nsamp//2]), dt=0)[:2]
 	# Very simple white noise model. This breaks if the beam has been tod-smoothed by this point.
 	with bench.show("ivar"):
 		tod  = d.tod
@@ -129,9 +174,16 @@ for ind in range(comm.rank, len(ids), comm.size):
 	with bench.show("actscan"):
 		scan = actscan.ACTScan(entry, d=d)
 	with bench.show("pmat1"):
+		# Build effective source parameters for this TOD. This will ignore planet motion,
+		# but this should only be a problem for very near objects like the moon or ISS
+		src_param = np.zeros((len(srcs),8))
+		src_param[:,0]   = srcs.dec
+		src_param[:,1]   = srcs.ra
+		src_param[:,2]   = 1
+		src_param[:,5:7] = 1
+		print srcs.ra/utils.degree, srcs.dec/utils.degree
+		# And use it to build our source model projector. This is only used for the cuts
 		psrc = pmat.PmatPtsrc(scan, src_param)
-		pcut = pmat.PmatCut(scan)
-		junk = np.zeros(pcut.njunk, dtype)
 	with bench.show("source mask"):
 		# Find the samples where the sources live
 		src_mask = np.zeros(tod.shape, np.bool)
@@ -154,6 +206,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		# Undo the hack here
 		psrc.scan.offsets = detoff
 		src_cut  = sampcut.from_mask(src_mask)
+		src_cut *= scan.cut
 		del src_mask
 	with bench.show("atm model"):
 		if   args.model == "joneig":
@@ -168,12 +221,16 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# Proceed to make simple binned map for each point source. We need a separate
 	# pointing matrix for each because each has its own local coordinate system.
 	tod *= ivar[:,None]
-	pcut.backward(tod, junk)
+	sampcut.gapfill_const(scan.cut, tod, inplace=True)
 	for sid in tod_srcs[id]:
+		src  = srcs[sid]
+		if   src.type == "fixed":  sys = "hor:%.6f_%.6f:cel/0_0:hor" % (src.ra/utils.degree, src.dec/utils.degree)
+		elif src.type == "planet": sys = "hor:%s/0_0" % src.name
+		else: raise ValueError("Invalid source type '%s'" % src.type)
 		rhs  = enmap.zeros((ncomp,)+shape, area.wcs, dtype)
 		div  = enmap.zeros((ncomp,ncomp)+shape, area.wcs, dtype)
 		with bench.show("pmat %s" % sid):
-			pmap = pmat.PmatMap(scan, area, sys="hor:%.6f_%.6f:cel/0_0:hor" % tuple(srcs[sid,:2]))
+			pmap = pmat.PmatMap(scan, area, sys=sys)
 		with bench.show("rhs %s" % sid):
 			pmap.backward(tod, rhs)
 		with bench.show("hits"):
@@ -181,7 +238,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 				div[i,i] = 1
 				pmap.forward(tod, div[i])
 				tod *= ivar[:,None]
-				pcut.backward(tod, junk)
+				sampcut.gapfill_const(scan.cut, tod, inplace=True)
 				div[i] = 0
 				pmap.backward(tod, div[i])
 		with bench.show("map %s" % sid):
@@ -192,4 +249,4 @@ for ind in range(comm.rank, len(ids), comm.size):
 			enmap.write_map("%s%s_src%03d_rhs.fits" % (prefix, bid, sid), rhs)
 			enmap.write_map("%s%s_src%03d_div.fits" % (prefix, bid, sid), div)
 		del rhs, div, idiv, map
-	del d, scan, pmap, pcut, tod, junk
+	del d, scan, pmap, tod

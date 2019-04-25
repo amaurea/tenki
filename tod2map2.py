@@ -22,7 +22,7 @@ config.default("map_format", "fits", "File format to use when writing maps. Can 
 config.default("resume", 0, "Interval at which to write the internal CG information to allow for restarting. If 0, this will never be written. Also controls whether existing information on disk will be used for restarting if avialable. If negative, restart information will be written, but not used.")
 
 # Special source handling
-config.default("src_handling", "none", "Special source handling. 'none' to disable, 'inpaint' to inpaint and 'full' to map srcs with a white noise model")
+config.default("src_handling", "none", "Special source handling. 'none' to disable, 'inpaint' to inpaint, 'full' to map srcs with a white noise model and 'solve' to solve for the model errors jointly with the map.")
 config.default("src_handling_lim", 10000, "Minimum source amplitude to apply special source handling to it")
 config.default("src_handling_list", "", "Override source list")
 
@@ -39,6 +39,7 @@ config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1.0,tol=0.5", "Default parameters for scan/pickup signal")
 config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
+config.default("signal_srcsamp_default",  "use=no,type=srcsamp,name=srcsamp,srcs=none,minamp=10000,ofmt={name}_{rank:03},output=no", "Default parameters for source model error handling signal")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
@@ -434,9 +435,9 @@ for out_ind in range(nouter):
 		root = root_tot + "group%03d_%03d_" % (ocomm.rank//args.group, out_ind)
 
 	# Point source handling:
-	if src_handling is not None:
-		src_handler = mapmaking.SourceHandler(myscans, comm, dtype=dtype, **src_handling)
-	else: src_handler = None
+	if src_handling is not None and src_handling["mode"] in ["inpaint","full"]:
+		white_src_handler = mapmaking.SourceHandler(myscans, comm, dtype=dtype, **src_handling)
+	else: white_src_handler = None
 
 	# 1. Initialize signals
 	L.info("Initializing signals")
@@ -498,11 +499,18 @@ for out_ind in range(nouter):
 			my_ys   = ys[offs[comm.rank]:offs[comm.rank+1]]
 			# That was surprisingly cumbersome
 			signal  = mapmaking.SignalNoiseRect(active_scans, area, drift, my_ys, comm, name=effname, mode=param["mode"], ofmt=param["ofmt"], output=param["output"]=="yes")
+		elif param["type"] == "srcsamp":
+			if param["srcs"] == "none": srcs = None
+			else: srcs = pointsrcs.read(param["srcs"])
+			minamp = float(param["minamp"])
+			signal = mapmaking.SignalSrcSamp(active_scans, dtype=dtype, comm=comm,
+					srcs=srcs, amplim=minamp)
+			signal_srcsamp = signal
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 		# Hack. Special source handling for some signals
-		if src_handler and param["type"] in ["map","dmap","fmap","fdmap"]:
-			src_handler.add_signal(signal)
+		if white_src_handler and param["type"] in ["map","dmap","fmap","fdmap"]:
+			white_src_handler.add_signal(signal)
 		# Add signal to our list of signals to map
 		signals.append(signal)
 
@@ -674,9 +682,9 @@ for out_ind in range(nouter):
 		filters2.append(mapmaking.FilterGapfill())
 
 	# Register the special source handler as a filter
-	if src_handler:
-		filters.append(src_handler.filter)
-		filters2.append(src_handler.filter2)
+	if white_src_handler:
+		filters.append(white_src_handler.filter)
+		filters2.append(white_src_handler.filter2)
 
 	L.info("Initializing mapfilters")
 	for param in mapfilter_params:
@@ -694,8 +702,18 @@ for out_ind in range(nouter):
 	if config.get("tod_window"):
 		weights.append(mapmaking.FilterWindow(config.get("tod_window")))
 
+	# Multiposts
+	multiposts = []
+	# HACK
+	for signal in signals:
+		if isinstance(signal, mapmaking.SignalSrcSamp):
+			target_signals = [tsig for tsig in signals if tsig.output and
+					not isinstance(tsig, (mapmaking.SignalCut, mapmaking.SignalSrcSamp))]
+			insert_srcsamp = mapmaking.MultiPostInsertSrcSamp(myscans, signal_srcsamp, target_signals, weights=weights)
+			multiposts.append(insert_srcsamp)
+
 	L.info("Initializing equation system")
-	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, filters2=filters2, weights=weights, dtype=dtype, comm=comm)
+	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, filters2=filters2, weights=weights, multiposts=multiposts, dtype=dtype, comm=comm)
 
 	L.info("Initializing RHS")
 	eqsys.calc_b()
@@ -703,10 +721,10 @@ for out_ind in range(nouter):
 	noise_stats = build_noise_stats(myscans, comm)
 	if comm.rank == 0: write_noise_stats(root + "noise.txt", noise_stats)
 
-	if src_handler:
+	if white_src_handler:
 		# Finalize the source handler
-		src_handler.post_b()
-		src_handler.write(root)
+		white_src_handler.post_b()
+		white_src_handler.write(root)
 
 	#for si, scan in enumerate(myscans):
 	#	tod = np.zeros([scan.ndet, scan.nsamp], dtype)
@@ -723,7 +741,7 @@ for out_ind in range(nouter):
 			signal.precon = mapmaking.PreconNull()
 			print "Warning: map and cut precon must have compatible units"
 			continue
-		if param["type"] == "cut":
+		if param["type"] in ["cut","srcsamp"]:
 			signal.precon = mapmaking.PreconCut(signal, myscans)
 		elif param["type"] in ["map","bmap","fmap","noiserect"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
@@ -736,6 +754,8 @@ for out_ind in range(nouter):
 				signal.precon = mapmaking.PreconMapHitcount(prec_signal, myscans)
 			elif param["prec"] == "tod":
 				signal.precon = mapmaking.PreconMapTod(prec_signal, myscans, weights)
+			elif param["prec"] == "none":
+				signal.precon = mapmaking.PreconNull()
 			else: raise ValueError("Unknown map preconditioner '%s'" % param["prec"])
 			if "nohor" in param and param["nohor"] != "no":
 				prior_weight = signal.precon.div[0,0]

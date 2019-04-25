@@ -557,10 +557,11 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# Format fit result in standard format
 	msg = ""
 	for si, sid in enumerate(sids):
+		print(sid, off_off.shape, doff.shape, amps.shape, meanamps.shape, meancovs.shape, srcpos.shape, L.P.off0.shape)
 		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %8.4f %6.2f %6.2f | %7.2f %7.2f | %5.2f %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
 				id, sid,
 				off_off[0]/utils.arcmin, off_off[1]/utils.arcmin, doff[0]/utils.arcmin, doff[1]/utils.arcmin,
-				amps[sid]/1e3, meanamps[si,0]/1e3, meancovs[si,0]**-0.5/1e3, meanamps[si,0]*meancovs[si,0]**0.5, tot_sn,
+				amps[sid]/1e3, meanamps[si]/1e3, meancovs[si]**-0.5/1e3, meanamps[si]*meancovs[si]**0.5, tot_sn,
 				srcpos[0,sid]/utils.degree, srcpos[1,sid]/utils.degree,
 				db.data["hour"][ind], db.data["baz"][ind], db.data["bel"][ind], db.data["waz"][ind],
 				L.P.off0[0]/utils.arcmin, L.P.off0[1]/utils.arcmin)

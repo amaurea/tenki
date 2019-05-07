@@ -598,8 +598,13 @@ for out_ind in range(nouter):
 				print "labels"
 				for b,l in zip(boxes, labels):
 					print "%8.3f %8.3f %8.3f %5d" % (b[0,0]/utils.degree,b[0,1]/utils.degree,b[1,1]/utils.degree,l)
-			pids  = utils.find(labels[:npat], labels[npat:])
+			pids  = utils.find(labels[:npat], labels[npat:], default=-1)
 			mypids= pids[rank==comm.rank]
+			if np.any(mypids < 0):
+				bad = np.where(mypids<0)[0]
+				for bi in bad:
+					print "Warning: No matching scanning pattern found for %s. Using pattern 0" % (myscans[bi].id)
+					mypids[bi] = 0
 			if param["name"] == "addphase":
 				filter = mapmaking.FilterAddPhase(myscans, phasemap, mypids, mmul=mul, tmul=tmul)
 			else:

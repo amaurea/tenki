@@ -49,6 +49,8 @@ parser.add_argument("-P", "--prior",   type=float, default=1.0, help="The streng
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-o", "--output",  type=str,   default="full,reg", help="What types of output to write to the output directory. Comma-separated list. 'full': Output the final, merged quantities. 'reg': Output per-region results. 'debug': Output lots of debug maps. 'maps': Output maps and not just catalogs at each level.")
 parser.add_argument(      "--ncomp",   type=int,   default=1, help="The number of stokes components to fit for in fit mode.")
+parser.add_argument(      "--prune",   type=int,   default=0)
+parser.add_argument(      "--rlim",    type=float, default=1)
 parser.add_argument("--hack",          type=float, default=0)
 args = parser.parse_args()
 import numpy as np, os
@@ -87,11 +89,16 @@ def work_around_stupid_mpi4py_bug(imap):
 	imap.dtype = np.dtype('=' + imap.dtype.char)
 	return imap
 
+def write_args(fname):
+	with open(fname, "w") as ofile:
+		ofile.write(" ".join(sys.argv))
+
 if args.mode == "find":
 	# Point source finding mode
 	results  = []
 	map_keys = ["map","snmap","model","resid","resid_snmap"]
 	utils.mkdir(args.odir)
+	write_args(args.odir + "/args.txt")
 	# Mpi-parallelization over regions is simple, but a bit lazy. It means that there will be
 	# no speedup for single-region maps
 	for ri in range(comm.rank, len(regions), comm.size):
@@ -112,7 +119,8 @@ if args.mode == "find":
 			result = dory.find_srcs(imap, idiv, beam, freq=args.freq, apod=args.apod, apod_margin=args.apod_margin,
 					snmin=args.nsigma, verbose=args.verbose, dump=dump_prefix)
 			# FIXME: artifacts are act-specific
-			result = dory.prune_artifacts(result)
+			if args.prune:
+				result = dory.prune_artifacts(result)
 		except Exception as e:
 			print "Exception for task %d region %d: %s" % (comm.rank, ri, e.message)
 			raise
@@ -135,7 +143,7 @@ if args.mode == "find":
 			my_cat   = np.zeros([0], dory.cat_dtype)
 		tot_cat  = dory.allgather_catalog(my_cat, comm)
 		# FIXME: duplicate merging radius depends on beam size
-		tot_cat  = dory.merge_duplicates(tot_cat)
+		tot_cat  = dory.merge_duplicates(tot_cat, rlim=args.rlim*utils.arcmin)
 		if comm.rank == 0:
 			print "Writing catalogue"
 			dory.write_catalog_fits(args.odir + "/cat.fits", tot_cat)
@@ -153,6 +161,7 @@ elif args.mode == "fit":
 	icat    = dory.read_catalog(args.icat)
 	reg_cats = []
 	utils.mkdir(args.odir)
+	write_args(args.odir + "/args.txt")
 	for ri in range(comm.rank, len(regions), comm.size):
 		reg_fid = regions[ri]
 		reg_pad = dory.pad_region(reg_fid, args.pad, fft=True)
@@ -205,7 +214,7 @@ elif args.mode == "fit":
 		if len(reg_cats) > 0: my_cat = np.concatenate(reg_cats)
 		else: my_cat = np.zeros([0], dory.cat_dtype)
 		tot_cat  = dory.allgather_catalog(my_cat, comm)
-		tot_cat  = dory.merge_duplicates(tot_cat)
+		tot_cat  = dory.merge_duplicates(tot_cat, rlim=1e-3*utils.arcmin)
 		# Sort by S/N catalog order
 		tot_cat = tot_cat[np.argsort(tot_cat.amp[:,0]/tot_cat.damp[:,0])[::-1]]
 		if comm.rank == 0:

@@ -212,8 +212,8 @@ for iname in sorted(datasets.keys()):
 			if "ivar" in outputs:
 				def foo(idiv, ovar, ovar_srcfree):
 					copy_mono(idiv, ovar, slice=".preflat[0]")
-					link(ovar, ovar_srcfree)
-				schedule(foo, ipre + "sky_div.fits", opre + "ivar.fits", opre + "ivar_srcfree.fits", slice=".preflat[0]")
+					#link(ovar, ovar_srcfree)
+				schedule(foo, ipre + "sky_div.fits", opre + "ivar.fits", opre + "ivar_srcfree.fits")
 		else:
 			if not has_srcs:
 				schedule(combine_srcmaps, [ipre + "sky_map%04d.fits" % sub.it], [ipre + "sky_srcmap.fits"],
@@ -248,7 +248,7 @@ for iname in sorted(datasets.keys()):
 					coadd_mono(ifree, idivs, ofree, odiv)
 					coadd_mono(isrcs, idivs, osrcs)
 					add_mono([ofree, osrcs], omap)
-					link(odiv, odiv_srcfree)
+					#link(odiv, odiv_srcfree)
 				schedule(map_src_full, imaps, isrcs, idivs,
 						opre + "map_srcfree.fits", opre + "srcs.fits", opre + "map.fits", opre + "ivar.fits", opre + "ivar_srcfree.fits")
 		else:

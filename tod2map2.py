@@ -584,7 +584,7 @@ for out_ind in range(nouter):
 			mode, fname, mul, tmul = int(param["value"]), param["map"], float(param["mul"]), float(param["tmul"])
 			tol = float(param["tol"])*utils.degree
 			# Read the info file to see which scanning patterns were used in the phase dir
-			phasemap = mapmaking.PhaseMap.read(fname)
+			phasemap = mapmaking.PhaseMap.read(fname, rewind=True)
 			npat     = len(phasemap.patterns)
 			# Find which phase map part each scan corresponds to. We get all the scan
 			# boxes, and then add our existing scanning pattern boxes as references.

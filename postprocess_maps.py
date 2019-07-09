@@ -91,14 +91,19 @@ def copy_mono(ifile, ofile, slice=None):
 	enmap.write_map(tfile, map)
 	shutil.move(tfile, ofile)
 
-def add_mono(ifiles, ofile, slice=None):
+def add_mono(ifiles, ofile, slice=None, factors=None):
 	if args.cont and os.path.exists(ofile): return
 	if verbose: print "%3d add_mono %s" % (comm.rank, ofile)
 	if args.dry: return
 	tfile = ofile + ".tmp"
-	omap  = read_map(ifiles[0], slice=slice)
-	for ifile in ifiles[1:]:
-		omap += read_map(ifile, slice=slice)
+	if factors is None:
+		omap  = read_map(ifiles[0], slice=slice)
+		for ifile in ifiles[1:]:
+			omap += read_map(ifile, slice=slice)
+	else:
+		omap  = read_map(ifiles[0], slice=slice)*factors[0]
+		for i in range(1, len(ifiles)):
+			omap += read_map(ifiles[i], slice=slice)*factors[i]
 	enmap.write_map(tfile, omap)
 	shutil.move(tfile, ofile)
 
@@ -115,6 +120,38 @@ def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
 		if omap is None: omap, odiv = imap*0, idiv*0
 		omap += imap*idiv
 		odiv += idiv
+	mask = odiv > 0
+	omap[...,mask] /= odiv[mask]
+	enmap.write_map(tmapfile, omap)
+	if odivfile: enmap.write_map(tdivfile, odiv)
+	shutil.move(tmapfile, omapfile)
+	if odivfile: shutil.move(tdivfile, odivfile)
+
+def combine_srcmaps(imapfiles, isrcmapfiles, idivfiles, isrcdivfiles, omapfile, odivfile=None, isrcfiles=None):
+	if args.cont and os.path.exists(omapfile) and (odivfile is None or os.path.exists(odivfile)): return
+	if verbose: print "%3d combine_srcmaps %s" % (comm.rank, omapfile)
+	if args.dry: return
+	omap, odiv = None, None
+	tmapfile = omapfile + ".tmp"
+	if odivfile: tdivfile = odivfile + ".tmp"
+	nfile = len(imapfiles)
+	for fi in range(nfile):
+		imap = read_map(imapfiles[fi])
+		isrcmap = read_map(isrcmapfiles[fi])
+		if isrcfiles is not None:
+			isrc     = read_map(isrcfiles[fi])
+			imap    += isrc
+			isrcmap += isrc
+			del isrc
+		idiv = read_map(idivfiles[fi], slice=".preflat[0]")
+		isrcdiv = read_map(isrcdivfiles[fi], slice=".preflat[0]")
+		idiv -= isrcdiv
+		if omap is None: omap, odiv = imap*0, idiv*0
+		omap += imap*idiv
+		omap += isrcmap*isrcdiv
+		odiv += idiv
+		odiv += isrcdiv
+		del imap, isrcmap, idiv, isrcdiv
 	mask = odiv > 0
 	omap[...,mask] /= odiv[mask]
 	enmap.write_map(tmapfile, omap)
@@ -139,6 +176,11 @@ def cat_files(ifiles, ofile):
 			with open(ifile, "r") as ifh:
 				shutil.copyfileobj(ifh, ofh)
 
+def link(ifile, ofile):
+	if args.cont and os.path.exists(ofile): return
+	if verbose: print "%d link %s" % (comm.rank, ofile)
+	os.symlink(ifile, ofile)
+
 queue = []
 def schedule(func, *fargs, **kwargs):
 	queue.append([func, fargs, kwargs])
@@ -156,17 +198,32 @@ for iname in sorted(datasets.keys()):
 		#print ipre, opre
 		# Do we have srcs? If so, our maps are source free, and the
 		# srcs must be added
-		has_srcs = os.path.exists(ipre + "sky_srcs.fits")
-		if not has_srcs:
-			if "map"  in outputs:
-				schedule(copy_mono, ipre + "sky_map%04d.fits" % sub.it, opre + "map.fits")
+		has_srcs   = os.path.exists(ipre + "sky_srcs.fits")
+		has_srcmap = os.path.exists(ipre + "sky_srcmap.fits")
+		if not has_srcmap:
+			if not has_srcs:
+				if "map"  in outputs:
+					schedule(copy_mono, ipre + "sky_map%04d.fits" % sub.it, opre + "map.fits")
+			else:
+				if "map"  in outputs:
+					schedule(copy_mono, ipre + "sky_map%04d.fits" % sub.it, opre + "map_srcfree.fits")
+					schedule(copy_mono, ipre + "sky_srcs.fits", opre + "srcs.fits")
+					schedule(add_mono,  [ipre + "sky_map%04d.fits" % sub.it, ipre + "sky_srcs.fits"], opre + "map.fits")
+			if "ivar" in outputs:
+				def foo(idiv, ovar, ovar_srcfree):
+					copy_mono(idiv, ovar, slice=".preflat[0]")
+					#link(ovar, ovar_srcfree)
+				schedule(foo, ipre + "sky_div.fits", opre + "ivar.fits", opre + "ivar_srcfree.fits")
 		else:
-			if "map"  in outputs:
-				schedule(copy_mono, ipre + "sky_map%04d.fits" % sub.it, opre + "map_srcfree.fits")
+			if not has_srcs:
+				schedule(combine_srcmaps, [ipre + "sky_map%04d.fits" % sub.it], [ipre + "sky_srcmap.fits"],
+						[ipre + "sky_div.fits"], [ipre + "sky_srcdiv.fits"], opre + "map.fits", opre + "ivar.fits")
+			else:
+				schedule(combine_srcmaps, [ipre + "sky_map%04d.fits" % sub.it], [ipre + "sky_srcmap.fits"],
+						[ipre + "sky_div.fits"], [ipre + "sky_srcdiv.fits"], opre + "map.fits", opre + "ivar.fits",
+						isrcfiles=[ipre + "sky_srcs.fits"])
 				schedule(copy_mono, ipre + "sky_srcs.fits", opre + "srcs.fits")
-				schedule(add_mono,  [ipre + "sky_map%04d.fits" % sub.it, ipre + "sky_srcs.fits"], opre + "map.fits")
-		if "ivar" in outputs:
-			schedule(copy_mono, ipre + "sky_div.fits", opre + "ivar.fits", slice=".preflat[0]")
+			schedule(add_mono, [ipre + "sky_div.fits", ipre + "sky_srcdiv.fits"], opre + "ivar_srcfree.fits", slice=".preflat[0]", factors=[1,-1])
 		if "hits"  in outputs:
 			schedule(copy_mono, ipre + "sky_hits.fits", opre + "hits.fits")
 		if "xlink" in outputs:
@@ -183,15 +240,27 @@ for iname in sorted(datasets.keys()):
 		imaps = [args.idir + "/" + sub.name + "_sky_map%04d.fits" % sub.it for sub in d]
 		isrcs = [args.idir + "/" + sub.name + "_sky_srcs.fits" for sub in d]
 		idivs = [args.idir + "/" + sub.name + "_sky_div.fits" for sub in d]
-		if not has_srcs:
-			schedule(coadd_mono, imaps, idivs, opre + "map.fits", opre + "ivar.fits")
+		if not has_srcmap:
+			if not has_srcs:
+				schedule(coadd_mono, imaps, idivs, opre + "map.fits", opre + "ivar.fits")
+			else:
+				def map_src_full(ifree, isrcs, idivs, ofree, osrcs, omap, odiv, odiv_srcfree):
+					coadd_mono(ifree, idivs, ofree, odiv)
+					coadd_mono(isrcs, idivs, osrcs)
+					add_mono([ofree, osrcs], omap)
+					#link(odiv, odiv_srcfree)
+				schedule(map_src_full, imaps, isrcs, idivs,
+						opre + "map_srcfree.fits", opre + "srcs.fits", opre + "map.fits", opre + "ivar.fits", opre + "ivar_srcfree.fits")
 		else:
-			def map_src_full(ifree, isrcs, idivs, ofree, osrcs, omap, odiv):
-				coadd_mono(ifree, idivs, ofree, odiv)
-				coadd_mono(isrcs, idivs, osrcs)
-				add_mono([ofree, osrcs], omap)
-			schedule(map_src_full, imaps, isrcs, idivs,
-					opre + "map_srcfree.fits", opre + "srcs.fits", opre + "map.fits", opre + "ivar.fits")
+			isrcmaps = [args.idir + "/" + sub.name + "_sky_srcmap.fits" for sub in d]
+			isrcdivs = [args.idir + "/" + sub.name + "_sky_srcdiv.fits" for sub in d]
+			if has_srcs: coadd_mono(isrcs, idivs, opre + "srcs.fits")
+			else:        isrcs = None
+			schedule(coadd_mono, imaps, idivs, opre + "map_srcfree.fits")
+			schedule(combine_srcmaps, imaps, isrcmaps, idivs, isrcdivs,
+					opre + "map.fits", opre + "ivar.fits", isrcfiles=isrcs)
+			schedule(add_mono, idivs + isrcdivs, opre + "ivar_srcfree.fits",
+					slice=".preflat[0]", factors=[1 for idiv in idivs]+[-1 for isrcdiv in isrcdivs])
 	if "tothits" in outputs:
 		imaps = [args.idir + "/" + sub.name + "_sky_hits.fits" for sub in d]
 		schedule(add_mono, imaps, opre + "hits.fits")

@@ -51,7 +51,12 @@ parser.add_argument("-o", "--output",  type=str,   default="full,reg", help="Wha
 parser.add_argument(      "--ncomp",   type=int,   default=1, help="The number of stokes components to fit for in fit mode.")
 parser.add_argument(      "--prune",   type=int,   default=0)
 parser.add_argument(      "--rlim",    type=float, default=0.25)
-parser.add_argument("--hack",          type=float, default=0)
+parser.add_argument(      "--hack",    type=float, default=0)
+parser.add_argument(      "--split",   action="store_true")
+parser.add_argument(      "--split-nimage", type=int,   default=16)
+parser.add_argument(      "--split-dist",   type=float, default=1)
+parser.add_argument(      "--split-minflux",type=float, default=300)
+
 args = parser.parse_args()
 import numpy as np, os
 from enlib import dory
@@ -151,6 +156,10 @@ elif args.mode == "fit":
 	icat      = dory.read_catalog(args.icat)
 	if args.nsigma is not None:
 		icat  = icat[icat.flux[:,0] >= icat.dflux[:,0]*args.nsigma]
+	if args.split:
+		npre  = len(icat)
+		icat  = dory.split_sources(icat, nimage=args.split_nimage, dist=args.split_dist*utils.arcmin, minflux=args.split_minflux/1e3)
+		print "Added %d extra images around %d sources > %f mJy" % (len(icat)-npre, (len(icat)-npre)/args.split_nimage, args.split_minflux)
 	beam_prof = dory.get_beam_profile(beam)
 	barea     = dory.calc_beam_profile_area(beam_prof)
 	reg_cats  = []

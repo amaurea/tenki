@@ -13,6 +13,7 @@ parser.add_argument("--fslice",        type=str, default="")
 parser.add_argument("-c", "--cont",          action="store_true")
 parser.add_argument("-M", "--allow-missing", action="store_true")
 parser.add_argument("-T", "--transpose",     action="store_true")
+parser.add_argument("-s", "--scalar-div",    action="store_true")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -30,13 +31,19 @@ ihits = eval("ihits" + args.fslice)
 
 apod_params = [float(w) for w in args.apod.split(":")] if args.apod else None
 
-def read_map(fname):
-	m = nonan(enmap.read_map(fname))
+def read_helper(fname, shape=None, wcs=None):
+	if shape is None: return enmap.read_map(fname)
+	mshape, mwcs = enmap.read_map_geometry(fname)
+	pixbox = enmap.pixbox_of(mwcs, shape, wcs)
+	return enmap.read_map(fname, pixbox=pixbox)
+
+def read_map(fname, shape=None, wcs=None):
+	m = nonan(read_helper(fname, shape, wcs))
 	#return m.preflat[:1]
 	return m.reshape(-1, m.shape[-2], m.shape[-1])
-def read_div(fname):
-	m = nonan(enmap.read_map(fname))*1.0
-	return m
+def read_div(fname, shape=None, wcs=None, padlen=3):
+	m = nonan(read_helper(fname, shape, wcs))*1.0
+	if args.scalar_div: return m.preflat[0]
 	#return m.preflat[:1][None]
 	if m.ndim == 2:
 		res = enmap.zeros((padlen,padlen)+m.shape[-2:], m.wcs, m.dtype)
@@ -105,6 +112,11 @@ def apply_edge(div):
 	return div*apod
 
 def coadd_maps(imaps, ihits, omap, ohit, cont=False):
+	for m,h in zip(imaps, ihits):
+		print m, h
+
+
+
 	# The first map will be used as a reference. All subsequent maps
 	# must fit in its boundaries.
 	if cont and os.path.exists(omap): return
@@ -117,7 +129,7 @@ def coadd_maps(imaps, ihits, omap, ohit, cont=False):
 	for mif,wif in zip(imaps[1:],ihits[1:]):
 		if args.verbose: print"Reading %s" % mif
 		try:
-			mi = read_map(mif)
+			mi = read_map(mif, m.shape, m.wcs)
 		except IOError:
 			if args.allow_missing:
 				print "Can't read %s. Skipping" % mif
@@ -125,11 +137,11 @@ def coadd_maps(imaps, ihits, omap, ohit, cont=False):
 			else: raise
 		if args.verbose: print"Reading %s" % wif
 
-		wi = apply_edge(apply_apod(apply_trim(read_div(wif))))
-		# We may need to reproject maps
-		if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
-			mi = enmap.project(mi, m.shape, m.wcs, mode="constant")
-			wi = enmap.project(wi, w.shape, w.wcs, mode="constant")
+		wi = apply_edge(apply_apod(apply_trim(read_div(wif, m.shape, m.wcs))))
+		## We may need to reproject maps
+		#if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
+		#	mi = enmap.extract(mi, m.shape, m.wcs)
+		#	wi = enmap.extract(wi, w.shape, w.wcs)
 		w  = add(w,wi)
 		wm = add(wm,mul(wi,mi))
 
@@ -155,4 +167,4 @@ else:
 		tihits = ["%s/%s" % (ihit,tilename) for ihit in ihits]
 		print "%3d %s" % (comm.rank, tilename)
 		coadd_maps(timaps, tihits, args.omap + "/" + tilename, args.ohit + "/" + tilename, cont=args.cont)
-	if args.verbose: print"Done"
+	if args.verbose: print "Done"

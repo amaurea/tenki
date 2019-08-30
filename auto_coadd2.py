@@ -12,6 +12,7 @@ parser.add_argument("-C", "--ncomp",  type=int,   default=3)
 parser.add_argument("-B", "--obeam",  type=str,   default=None)
 parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("-v", "--verbose", action="store_true")
+parser.add_argument("-W", "--wiener",  action="store_true")
 parser.add_argument("--filter-mode",  type=str,   default="weight")
 args = parser.parse_args()
 
@@ -70,12 +71,13 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 	jointmap.setup_filter(mapset, mode=args.filter_mode)
 	jointmap.setup_background_spectrum(mapset)
 	mask    = jointmap.get_mask_insufficient(mapset)
-	coadder = jointmap.Coadder(mapset)
+	if args.wiener: coadder = jointmap.Wiener(mapset)
+	else:           coadder = jointmap.Coadder(mapset)
 	rhs     = coadder.calc_rhs()
 	if dump_dir:
 		enmap.write_map(dump_dir + "/rhs.fits", rhs)
 		enmap.write_map(dump_dir + "/ps_rhs.fits", np.abs(enmap.fft(rhs.preflat[0]))**2)
-	map     = coadder.calc_coadd(rhs, dump_dir=dump_dir, verbose=verbose)#, maxiter=1)
+	map     = coadder.calc_map(rhs, dump_dir=dump_dir, verbose=verbose)#, maxiter=1)
 	if dump_dir:
 		enmap.write_map(dump_dir + "/ps_map.fits", np.abs(enmap.fft(mapdiag(map)))**2)
 	div     = coadder.tot_div

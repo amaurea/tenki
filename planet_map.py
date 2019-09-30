@@ -19,6 +19,7 @@ parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("--sim",           type=str,   default=None, help="Passing a sel here sets up simulation mode. The simulations will consist of data from the sim sel TODs with the scanning pattern of the real TODs, and with the signal read off from the area map")
 parser.add_argument("--noiseless",      action="store_true", help="Replace signal with simulation instead of adding them. This can be used to get noise free transfer functions")
 parser.add_argument("--dbox",          type=str,   default=None, help="Select only detectors in y1:y2,x1:x2 in the focalplane, relative to the center of the array, in degrees.")
+parser.add_argument("--tags",          type=str,   default=None)
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -69,6 +70,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
 	bid   = id.replace(":","_")
 	entry = filedb.data[id]
+	if args.tags: entry.tag = args.tags
 	oname = "%s%s_map.fits" % (prefix, bid)
 	if args.cont and os.path.isfile(oname):
 		print "Skipping %s (already done)" % (id)

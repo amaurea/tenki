@@ -13,6 +13,7 @@ parser.add_argument("-B", "--obeam",  type=str,   default=None)
 parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-W", "--wiener",  action="store_true")
+parser.add_argument("-m", "--mask",   type=str,   default=None)
 parser.add_argument("--filter-mode",  type=str,   default="weight")
 args = parser.parse_args()
 

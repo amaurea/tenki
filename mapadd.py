@@ -24,7 +24,9 @@ def add_maps(imaps, omap):
 	m = nonan(enmap.read_map(imaps[0]))*scales[0]
 	for scale, mif in zip(scales[1:],imaps[1:]):
 		if args.verbose: print "Reading %s" % mif
-		m += nonan(enmap.read_map(mif))*scale
+		m2 = nonan(enmap.read_map(mif, geometry=(m.shape,m.wcs)))*scale
+		n  = min(len(m.preflat),len(m2.preflat))
+		m.preflat[:n] += m2.preflat[:n]
 	if args.mean: m /= len(imaps)
 	if args.verbose: "Writing %s" % omap
 	enmap.write_map(omap, m)

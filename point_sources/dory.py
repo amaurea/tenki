@@ -101,8 +101,6 @@ if args.mode == "find":
 			# We only use T to find sources in find mode for now. P usually has much lower S/N and
 			# doesn't help much. Should add it later, though.
 			imap   = enmap.read_map(args.imap, pixbox=reg_pad).preflat[0]
-			print("A")
-			print(imap.box()/utils.degree)
 			idiv   = enmap.read_map(args.idiv, pixbox=reg_pad).preflat[0]
 			if args.mask:
 				mshape, mwcs = enmap.read_map_geometry(args.mask)
@@ -127,8 +125,8 @@ if args.mode == "find":
 			if "maps" in args.output:
 				for name in map_keys:
 					enmap.write_map(prefix + name + ".fits", result[name])
-			if "full" in args.output:
-				results.append(result)
+		if "full" in args.output:
+			results.append(result)
 
 	if "full" in args.output:
 		# First build the full catalog

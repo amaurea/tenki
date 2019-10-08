@@ -13,11 +13,11 @@
 # by ffts, and can't improve much.
 from __future__ import division, print_function
 import numpy as np, time, astropy.io.fits, os, sys
-from scipy import optimize
+from scipy import optimize, integrate
 from enlib import utils
 with utils.nowarn(): import h5py
 from enlib import mpi, errors, fft, mapmaking, config, jointmap, pointsrcs
-from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill, wcsutils
+from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill, wcsutils, array_ops
 from enact import filedb, actdata, actscan, nmat_measure
 
 config.set("downsample", 1, "Amount to downsample tod by")
@@ -40,9 +40,14 @@ parser.add_argument("-A", "--minamp",    type=float, default=None)
 parser.add_argument("-v", "--verbose",   action="count", default=0)
 parser.add_argument("-q", "--quiet",     action="count", default=0)
 parser.add_argument("-p", "--perdet",    type=int,   default=None)
+parser.add_argument("-g", "--group",     type=str,   default="tod")
+parser.add_argument("-H", "--highpass",  type=float, default=None)
 parser.add_argument(      "--minsn",     type=float, default=1)
 parser.add_argument(      "--dump-tod",  action="store_true")
 parser.add_argument(      "--dump-tod-ndet", type=int, default=8)
+parser.add_argument("-G", "--nogrid",    action="store_true")
+parser.add_argument(      "--ncomp",     type=int, default=3)
+parser.add_argument(      "--force",     type=float, default=None)
 args = parser.parse_args()
 
 #config.default("pmat_accuracy", 10.0, "Factor by which to lower accuracy requirement in pointing interpolation. 1.0 corresponds to 1e-3 pixels and 0.1 arc minute in polangle")
@@ -68,6 +73,9 @@ grid_res    = 0.75*utils.arcmin
 #grid_bounds = np.array([[-3,-3],[3,2]])*utils.arcmin
 #grid_res    = 0.25*utils.arcmin
 utils.mkdir(args.odir)
+
+if args.highpass: highpass = [args.highpass, 8]
+else:             highpass = None
 
 # Set up our mode-dependent arguments
 if args.mode == "srcs":
@@ -117,42 +125,45 @@ else:
 #    For linear gapfilling G' = 0 for cut samples, ncut/w for context
 #    samples and 1 for other samples. Should implement this.
 
+# Amplitude parameters are stored as params[nsrc,ndir,ndet or 1,nparam].
+# The amps we fit for will be amps[nsrc,ndir,ndet or 1,npol].
+# Easiest to always keep all these axes, and let them be length
+# 1 when they aren't relevant. This results in amps always being 4d
+
 class PmatTot:
 	def __init__(self, data, srcpos, ndir=1, perdet=False):
 		# Build source parameter struct for PmatPtsrc
-		self.params = np.zeros([srcpos.shape[-1],ndir,8],np.float)
-		self.params[:,:,:2] = srcpos[::-1,None,:].T
-		self.params[:,:,5:7] = 1
-		# Allow per-detector amplitudes
-		if perdet:
-			self.params = np.tile(self.params[:,:,None,:],(1,1,data.ndet,1))
+		self.params = np.zeros([srcpos.shape[-1],ndir,data.ndet if perdet else 1,8],np.float)
+		self.params[:,:,:,:2] = srcpos[::-1,None,None,:].T
+		self.params[:,:,:,5:7] = 1
 		scan = actscan.ACTScan(data.entry, d=data)
 		self.psrc = pmat.PmatPtsrc(scan, self.params, sys=src_sys)
 		self.pcut = pmat.PmatCut(scan)
 		# Extract basic offset
 		self.off0 = data.point_correction
-		self.off  = self.off0*1
+		self.off  = self.off0*0
 		self.el   = np.mean(data.boresight[2,::100])
 		self.point_template = data.point_template
 		self.cut = data.cut
 	def set_offset(self, off):
 		self.off = off*1
-		self.psrc.scan.offsets[:,1:] = actdata.offset_to_dazel(self.point_template + off, [0,self.el])
+		self.psrc.scan.offsets[:,1:] = actdata.offset_to_dazel(self.point_template + off + self.off0, [0,self.el])
 	def forward(self, tod, amps, pmul=1):
+		# Amps should be [nsrc,ndir,ndet|1,npol]
 		params = self.params.copy()
-		params[...,2]   = amps
+		params[...,2:2+amps.shape[-1]]   = amps
 		self.psrc.forward(tod, params, pmul=pmul)
 		sampcut.gapfill_linear(self.cut, tod, inplace=True)
-	def backward(self, tod, amps=None, pmul=1):
+	def backward(self, tod, amps=None, pmul=1, ncomp=3):
 		params = self.params.copy()
 		tod = sampcut.gapfill_linear(self.cut, tod, inplace=False, transpose=True)
 		self.psrc.backward(tod, params, pmul=pmul)
-		if amps is None: amps = params[...,2]
-		else: amps[:] = params[...,2]
+		if amps is None: amps = params[...,2:2+ncomp]
+		else: amps[:] = params[...,2:2+amps.shape[-1]]
 		return amps
 
 class NmatTot:
-	def __init__(self, data, model=None, window=None):
+	def __init__(self, data, model=None, window=None, filter=None):
 		model  = config.get("noise_model", model)
 		window = config.get("tod_window", window)*data.srate
 		nmat.apply_window(data.tod, window)
@@ -162,11 +173,25 @@ class NmatTot:
 		self.model, self.window = model, window
 		self.ivar = self.nmat.ivar
 		self.cut  = data.cut
+		# Optional extra filter
+		if filter:
+			freq = fft.rfftfreq(data.nsamp, 1/data.srate)
+			fknee, alpha = filter
+			with utils.nowarn():
+				self.filter = (1 + (freq/fknee)**-alpha)**-1
+		else: self.filter = None
 	def apply(self, tod):
 		nmat.apply_window(tod, self.window)
-		self.nmat.apply(tod)
+		ft = fft.rfft(tod)
+		self.nmat.apply_ft(ft, tod.shape[-1], tod.dtype)
+		if self.filter is not None: ft *= self.filter
+		fft.irfft(ft, tod, flags=['FFTW_ESTIMATE','FFTW_DESTROY_INPUT'])
 		nmat.apply_window(tod, self.window)
 		return tod
+	def white(self, tod):
+		nmat.apply_window(tod, self.window)
+		self.nmat.white(tod)
+		nmat.apply_window(tod, self.window)
 
 class PmatThumbs:
 	def __init__(self, data, srcpos, res=0.25*utils.arcmin, rad=20*utils.arcmin, perdet=False, detoff=10*utils.arcmin):
@@ -229,47 +254,56 @@ class ThumbMapper:
 # dchisq = -2*d(Pa)'N"(d-Pa/2) + (Pa')N"dPa = 
 
 class Likelihood:
-	def __init__(self, data, srcpos, srcamp, perdet=False, thumbs=False, N=None, method="fixamp"):
+	def __init__(self, data, srcpos, srcamp, perdet=False, ncomp=1, thumbs=False, N=None, method="fixamp", filter=None):
 		# Set up fiducial source model. These source parameters
 		# are not the same as those we will be optimizing.
 		with bench.show("PmatTot"):
 			self.P = PmatTot(data, srcpos, perdet=perdet)
 		with bench.show("NmatTot"):
-			self.N = N if N else NmatTot(data)
+			self.N = N if N else NmatTot(data, filter=filter)
 		self.tod  = data.tod # might only need the one below
 		with bench.show("Nmat apply"):
 			self.Nd   = self.N.apply(self.tod.copy())
 		self.i    = 0
-		# Initial values
-		self.amp0   = srcamp[:,None]
+		# Initial values. We have room for 3 stokes parameters, but for now the input
+		# amplitudes are always T-only
+		self.amp0   = np.zeros(self.P.params.shape[:-1]+(ncomp,))
+		self.amp0[...,0] = srcamp[:,None,None]
 		self.off0   = self.P.off0
 		self.chisq0 = None
 		# These are for internal mapmaking
 		self.thumb_mapper = None
 		if thumbs:
 			with bench.show("ThumbMapper"):
-				self.thumb_mapper = ThumbMapper(data, srcpos, self.P.pcut, self.N.nmat, perdet=perdet)
+				self.thumb_mapper = ThumbMapper(data, srcpos, self.P.pcut, self.N, perdet=perdet)
 		self.amp_unit, self.off_unit = 1e3, utils.arcmin
 		# Save samples from the wrapper, so we can use them to estimate uncertainty
 		self.samples = bunch.Bunch(offs=[], amps=[], aicovs=[], chisqs=[])
 		self.method  = method
+		self.ncomp   = ncomp
 	#def zip(self, off, amps): return np.concatenate([off/self.off_unit, amps[:,0]/self.amp_unit],0)
 	#def unzip(self, x): return x[:2]*self.off_unit, x[2:,None]*self.amp_unit
 	def zip(self, off): return off/self.off_unit
 	def unzip(self, x): return x*self.off_unit
-	def fit_amp(self, off=None):
+	def fit_amp(self, off=None, ncomp=None):
 		"""Compute the ML amplitude for each point source, along with their covariance.
 		This assumes independent source amplitudes. For perdet mapping, this means we may
-		need to use detector-diagonal noise."""
+		need to use detector-diagonal noise. The ncomp argument lets us override the
+		ncomp used for the rest of the operations in this class. This can be useful for
+		getting polarized amplitudes at the end of a long unpolarized fit."""
+		if ncomp is None:   ncomp = self.ncomp
 		if off is not None: self.P.set_offset(off)
-		rhs = self.P.backward(self.Nd)
-		work = np.zeros(self.tod.shape, self.tod.dtype)
-		self.P.forward(work, rhs*0+1)
-		self.N.apply(work)
-		div  = self.P.backward(work)
-		safediv = div.copy()
-		safediv[div==0] = 1
-		return rhs/safediv, div
+		rhs = self.P.backward(self.Nd, ncomp=ncomp)
+		div = np.zeros(rhs.shape + rhs.shape[-1:], rhs.dtype)
+		for comp in range(ncomp):
+			work = np.zeros(self.tod.shape, self.tod.dtype)
+			amps = rhs*0; amps[...,comp] = 1
+			self.P.forward(work, amps)
+			self.N.apply(work)
+			self.P.backward(work, div[...,comp,:])
+		idiv = safe_invert(div)
+		amps = amatmul(idiv, rhs)
+		return amps, div
 	def calc_chisq_fixamp(self, off):
 		# Compute (the nonstatic part of) the chisquare for the given offset, while
 		# keeping the amplitudes fixed to their fiducial values.
@@ -280,9 +314,10 @@ class Likelihood:
 		Nr = self.tod.copy()
 		self.P.forward(Nr, -self.amp0/2, pmul=1)
 		self.N.apply(Nr)
-		PNr = self.P.backward(Nr)
+		PNr = self.P.backward(Nr, ncomp=self.ncomp)
 		chisq = -2 * np.sum(self.amp0*PNr)
-		return chisq, self.amp0, self.amp0*0
+		aicov = np.zeros(self.amp0.shape+self.amp0.shape[-1:])
+		return chisq, self.amp0, aicov
 	def calc_chisq_fixamp_simple(self, off):
 		# Computes r'N"r directly in time domain. Numerically lossy
 		self.P.set_offset(off)
@@ -293,16 +328,17 @@ class Likelihood:
 		chisq = np.sum(r*Nr)
 		self.r = r
 		self.Nr = Nr
-		return chisq, self.amp0, self.amp0*0
+		aicov = np.zeros(self.amp0.shape+self.amp0.shape[-1:])
+		return chisq, self.amp0, aicov
 	def calc_chisq_fitamp(self, off):
 		self.P.set_offset(off)
 		ahat, aicov = self.fit_amp()
-		chisq = -np.sum(ahat**2*aicov)
+		chisq = -np.sum(amatmul(aicov,ahat)*ahat)
 		return chisq, ahat, aicov
 	def calc_chisq_posamp(self, off):
 		chisq, ahat, aicov = self.calc_chisq_fitamp(off)
 		prior = 0
-		positivity = (ahat*aicov**0.5).reshape(-1)
+		positivity = (ahat[...,0]*aicov[...,0,0]**0.5).reshape(-1)
 		for p in positivity:
 			prior -= 2*jointmap.log_prob_gauss_positive_single(p)
 		chisq += prior
@@ -334,13 +370,14 @@ class Likelihood:
 				enmap.write_map(thumb_path % self.i, thumbs)
 			if self.chisq0 is None: self.chisq0 = chisq
 			if verbose:
-				doff = (off - self.off0)/utils.arcmin
+				doff = off/utils.arcmin
 				msg = "%4d %8.5f %8.5f" % (self.i,doff[0],doff[1])
 				msg += " %12.5e %7.3f" % (self.chisq0-chisq, t2-t1)
-				famps, faicov = amps.reshape(-1), aicov.reshape(-1)
+				famps  = amps.reshape(-1,amps.shape[-1])
+				faicov = aicov.reshape((-1,)+aicov.shape[-2:])
 				for i in range(len(famps)):
-					nsigma = (famps[i]**2*faicov[i])**0.5
-					msg += " %10.3f %8.1f" % (famps[i]/self.amp_unit, nsigma)
+					nsigma = np.sum(amatmul(faicov[i],famps[i])*famps[i])**0.5
+					msg += " %10.3f %8.1f" % (famps[i,0]/self.amp_unit, nsigma)
 				print(msg)
 				self.samples.offs.append(off)
 				self.samples.amps.append(amps)
@@ -372,6 +409,17 @@ class Likelihood:
 		tod2 = self.tod*0
 		self.P.forward(tod2, amps, pmul=1)
 		return tod2
+
+def safe_invert(div):
+	if div.shape[-1] == 1:
+		idiv = div.copy()
+		idiv[div==0] = 1
+		idiv[div!=0] = 1/idiv[div!=0]
+	else:
+		idiv = array_ops.eigpow(div, -1, axes=[-2,-1], lim=1e-3, fallback="scalar")
+	return idiv
+
+def amatmul(M,v): return np.einsum("...ab,...b->...a",M,v)
 
 def build_grid_geometry(bounds, res):
 	"""bounds: [[y1,x1],[y2,x2]] in rads
@@ -419,6 +467,43 @@ def pad_polygon(poly, pad):
 	vort  = np.array([-vecs[:,1],vecs[:,0]]).T
 	return poly + vort * sign * pad
 
+def get_groups(ids, mode):
+	if   mode == "tod":
+		return [[i] for i, id in enumerate(ids)]
+	elif mode == "array":
+		# Group tods across arrays
+		ids = np.asarray(ids)
+		tids,  arr = np.char.partition(ids, ":").T[[0,2]]
+		groups = utils.find_equal_groups(tids)
+		return groups
+	else:
+		raise ValueError("Unknown group mode '%s'" % mode)
+
+def get_sids_in_tod(id, src_pos, bounds, ind, isids=None, src_sys="cel"):
+	if isids is None: isids = list(range(src_pos.shape[-1]))
+	if bounds is not None:
+		poly      = bounds[:,:,ind]*utils.degree
+		poly[0]   = utils.rewind(poly[0],poly[0,0])
+		# bounds are defined in celestial coordinates. Must convert srcpos for comparison
+		mjd       = utils.ctime2mjd(float(id.split(".")[0]))
+		srccel    = coordinates.transform(src_sys, "cel", src_pos, time=mjd)
+		srccel[0] = utils.rewind(srccel[0], poly[0,0])
+		poly      = pad_polygon(poly.T, poly_pad).T
+		accepted  = np.where(utils.point_in_polygon(srccel.T, poly.T))[0]
+		sids      = [isids[i] for i in accepted]
+	else:
+		sids = isids
+	return sids
+
+def get_beam_area(beam):
+	r, b = beam
+	return integrate.simps(2*np.pi*r*b,r)
+
+def padto(a, n):
+	res = np.zeros(a.shape[:-1]+(n,))
+	res[...,:a.shape[-1]] = a
+	return res
+
 # (d-Pa)'N"(d-Pa) = d'N"d + (Pa)'N"(Pa) - 2*d'N"Pa
 
 # If the point sources are far enough away from each other, then they will
@@ -438,146 +523,206 @@ def pad_polygon(poly, pad):
 
 # (d-Pa)'N"(d-Pa) = d'N"d - 2d'N"Pa + (Pa)'N"Pa
 
+# Set up our tod groups
+groups = get_groups(ids, args.group)
+
 # Load source database
 srcpos, amps = srcdata[:2], srcdata[2]
 # Which sources pass our requirements?
-allowed  = set(range(amps.size))
-allowed &= set(np.where(amps > args.minamp)[0])
+base_sids  = set(range(amps.size))
+base_sids &= set(np.where(amps > args.minamp)[0])
 if args.srcs is not None:
 	selected = [int(w) for w in args.srcs.split(",")]
-	allowed &= set(selected)
+	base_sids &= set(selected)
+base_sids = list(base_sids)
 
-f = open(args.odir + "/fits_%03d.txt" % comm.rank, "w")
+f = open(args.odir + "/fits_%03d.txt" % comm.rank, "w" if not args.cont else "a")
 
-# Iterate over tods
-for ind in range(comm.rank, len(ids), comm.size):
-	id    = ids[ind]
-	oid   = id.replace(":","_")
+# Iterate over groups
+for gid in range(comm.rank, len(groups), comm.size):
+	group = groups[gid]
 
-	# Check if we hit any of the sources. We first make sure
-	# there's no angle wraps in the bounds, and then move the sources
-	# to the same side of the sky. bounds are pretty approximate, so
-	# might not actually hit all these sources
-	if bounds is not None:
-		poly      = bounds[:,:,ind]*utils.degree
-		poly[0]   = utils.rewind(poly[0],poly[0,0])
-		# bounds are defined in celestial coordinates. Must convert srcpos for comparison
-		mjd       = utils.ctime2mjd(float(id.split(".")[0]))
-		srccel    = coordinates.transform(src_sys, "cel", srcpos, time=mjd)
-		srccel[0] = utils.rewind(srccel[0], poly[0,0])
-		poly      = pad_polygon(poly.T, poly_pad).T
-		sids      = np.where(utils.point_in_polygon(srccel.T, poly.T))[0]
-		sids      = sorted(list(set(sids)&allowed))
-	else:
-		sids = sorted(list(allowed))
-	if len(sids) == 0:
-		print("%s has 0 srcs: skipping" % id)
+	if args.cont:
+		done = [os.path.exists(args.odir + "/fit_%s.hdf" % ids[ind].replace(":","_")) for ind in group]
+		print("done", done)
+		for ind in group:
+			print(args.odir + "/fit_%s.hdf" % ids[ind].replace(":","_"))
+		if all(done): continue
+
+	group_data = []
+	# Handle each tod in the group
+	for ind in group:
+		id   = ids[ind]
+		oid  = id.replace(":","_")
+		sids = get_sids_in_tod(id, srcpos[:,base_sids], bounds, ind, base_sids, src_sys)
+		if len(sids) == 0:
+			print("%s has 0 srcs: skipping" % id)
+			continue
+		try:
+			nsrc = len(sids)
+			print("%s has %d srcs: %s" % (id,nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
+		except TypeError as e:
+			print("Weird: %s" % e)
+			print(sids)
+			print(amps)
+			continue
+
+		# Read the data
+		entry = filedb.data[id]
+		try:
+			data = actdata.read(entry, exclude=["tod"], verbose=verbose)
+			data+= actdata.read_tod(entry)
+			data = actdata.calibrate(data, verbose=verbose)
+			#print("fixme") # FIXME
+			#data.restrict(dets=data.dets[100:150])
+			# Avoid planets while building noise model
+			if planet is not None:
+				data.cut_noiseest *= actdata.cuts.avoidance_cut(data.boresight, data.point_offset, data.site, planet, R)
+			if data.ndet < 2 or data.nsamp < 1: raise errors.DataMissing("no data in tod")
+		except errors.DataMissing as e:
+			print("%s skipped: %s" % (id, e))
+			continue
+		# Prepeare our samples
+		#data.tod -= np.mean(data.tod,1)[:,None]
+		data.tod -= data.tod[:,None,0].copy()
+		data.tod  = data.tod.astype(dtype)
+		# Set up our likelihood
+		L = Likelihood(data, srcpos[:,sids], amps[sids], filter=highpass)
+		# Find out which sources are reliable, so we don't waste time on bad ones
+		if prune_unreliable_srcs:
+			_, aicov = L.fit_amp()
+			good = amps[sids]**2*aicov[:,0,0,0,0] > args.minsn**2
+			sids = [sid for sid,g in zip(sids,good) if g]
+			nsrc = len(sids)
+			print("Restricted to %d srcs: %s" % (nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
+		if nsrc == 0: continue
+		L    = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=True, N=L.N, method=args.method, filter=highpass)
+		beam_area = get_beam_area(data.beam)
+		_, uids   = actdata.split_detname(data.dets) # Argh, stupid detnames
+		freq      = data.array_info.info.nom_freq[uids[0]]
+		fluxconv  = utils.flux_factor(beam_area, freq*1e9)
+		group_data.append(bunch.Bunch(data=data, sids=sids, lik=L, id=id, oid=oid, ind=ind, beam_area=beam_area, freq=freq, fluxconv=fluxconv))
+
+	if len(group_data) == 0:
+		print("No usable tods in group %s. Skipping" % ",".join([ids[i] for i in group]))
 		continue
-	try:
-		nsrc = len(sids)
-		print("%s has %d srcs: %s" % (id,nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
-	except TypeError as e:
-		print("Weird: %s" % e)
-		print(sids)
-		print(amps)
-		continue
 
-	# Read the data
-	entry = filedb.data[id]
-	try:
-		data = actdata.read(entry, exclude=["tod"], verbose=verbose)
-		data+= actdata.read_tod(entry)
-		data = actdata.calibrate(data, verbose=verbose)
-		#print("fixme") # FIXME
-		#data.restrict(dets=data.dets[100:150])
-		# Avoid planets while building noise model
-		if planet is not None:
-			data.cut_noiseest *= actdata.cuts.avoidance_cut(data.boresight, data.point_offset, data.site, planet, R)
-		if data.ndet < 2 or data.nsamp < 1: raise errors.DataMissing("no data in tod")
-	except errors.DataMissing as e:
-		print("%s skipped: %s" % (id, e))
-		continue
-	# Prepeare our samples
-	#data.tod -= np.mean(data.tod,1)[:,None]
-	data.tod -= data.tod[:,None,0].copy()
-	data.tod  = data.tod.astype(dtype)
-	# Set up our likelihood
-	L = Likelihood(data, srcpos[:,sids], amps[sids])
-	# Find out which sources are reliable, so we don't waste time on bad ones
-	if prune_unreliable_srcs:
-		_, aicov = L.fit_amp()
-		good = amps[sids]**2*aicov[:,0] > args.minsn**2
-		sids = [sid for sid,g in zip(sids,good) if g]
-		nsrc = len(sids)
-		print("Restricted to %d srcs: %s" % (nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
-	if nsrc == 0: continue
-	L = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=True, N=L.N, method=args.method)
-	# And minimize chisq
+	# Set up the full likelihood
 	progress_thumbs = args.minimaps and verbose >= 3
-	likfun = L.chisq_wrapper(thumb_path=args.odir + "/" + oid + "_thumb%03d.fits", thumb_interval=progress_thumbs)
-	grid_shape, grid_wcs = build_grid_geometry(grid_bounds, grid_res)
-	grid_pos = enmap.posmap(grid_shape, grid_wcs) + L.off0[:,None,None]
-	grid_lik = eval_offs(L, likfun, grid_pos)
-	enmap.write_map(args.odir + "/grid_%s.fits" % oid, grid_lik)
-	x0 = enmap.argmin(grid_lik) + L.off0
-	x0 = L.zip(x0)
-	off    = L.unzip(optimize.fmin_powell(likfun,x0))
-	# Evaluate the ampitude at the ML point
-	oamps, oaicov = L.fit_amp(off)
-	#chisq, oamps, oaicov = likfun(off, full=True)
-	if args.minimaps:
-		thumbs = L.make_thumbs(off, oamps)
-		enmap.write_map(args.odir + "/" + oid + "_thumb.fits", thumbs)
+	chisq_wrappers  = [data.lik.chisq_wrapper(thumb_path=args.odir + "/" + data.oid + "_thumb%03d.fits", thumb_interval=progress_thumbs) for data in group_data]
+	def likfun(off): return sum([chisq_wrapper(off) for chisq_wrapper in chisq_wrappers])
+	# Representaive individual lik for stuff that's common to them. This is a bit hacky.
+	# A single joint lik class would have been cleaner.
+	L = group_data[0].lik
+
+	if not args.nogrid:
+		# Do a grid search first to avoid false minima
+		grid_shape, grid_wcs = build_grid_geometry(grid_bounds, grid_res)
+		grid_pos = enmap.posmap(grid_shape, grid_wcs)
+		grid_lik = eval_offs(L, likfun, grid_pos)
+		enmap.write_map(args.odir + "/grid_%s.fits" % oid, grid_lik)
+		x0  = enmap.argmin(grid_lik)
+	else:
+		x0  = np.zeros(2)
+
+	# Then do the actual likelihood search
+	off  = L.unzip(optimize.fmin_powell(likfun,L.zip(x0)))
+	# and estimate the position error using a few extra samples
 	# Estimate position errors using a few extra samples
-	doff = L.estimate_error(off)
+	doff = np.sum([data.lik.estimate_error(off)**-2 for data in group_data],0)**-0.5
+
+	# Now that we have the best fit position we can get the amplitudes for
+	# each individual tod in the group
+	tot_dchisq = 0
+	for di, data in enumerate(group_data):
+		L = data.lik
+		# Evaluate the ampitude at the ML point
+		data.oamps, data.oaicov = L.fit_amp(off, ncomp=args.ncomp)
+		if args.force:
+			data.oamps[0,...,0] = args.force
+		#chisq, oamps, oaicov = likfun(off, full=True)
+		if args.minimaps:
+			thumbs = L.make_thumbs(off, data.oamps)
+			enmap.write_map(args.odir + "/" + data.oid + "_thumb.fits", thumbs)
 	
-	# Estimate our total S/N. We know that our amplitudes should be positive, so
-	# degrade the S/N 
-	zs = (oamps * oaicov**0.5).reshape(-1)
-	chisqs = np.array([z**2 + 2*jointmap.log_prob_gauss_positive_single(z) for z in zs])
-	tot_sn = max(0,np.sum(chisqs))**0.5
+		# Estimate our total S/N. We know that our amplitudes should be positive, so
+		# degrade the S/N 
+		zs = (data.oamps[...,0] * data.oaicov[...,0,0]**0.5).reshape(-1)
+		chisqs = np.array([z**2 + 2*jointmap.log_prob_gauss_positive_single(z) for z in zs])
+		tot_dchisq += np.sum(chisqs)
 
-	off_off = off - L.P.off0
+	tot_sn  = max(0, tot_dchisq)**0.5
 
-	# Output our fit
-	with h5py.File(args.odir + "/fit_%s.hdf" % oid, "w") as ofile:
-		ofile["off"]  = off
-		ofile["doff"] = doff
-		ofile["fidoff"] = L.P.off0
-		ofile["amps"] = oamps
-		ofile["aicov"] = oaicov
-		ofile["ivar"] = L.N.ivar
-		ofile["dets"] = data.dets
-		ofile["srcs"] = sids
-		ofile["srcpos"] = srcpos[:,sids]
-		ofile["fidamp"] = amps[sids]
+	for di, data in enumerate(group_data):
+		L = data.lik
 
-	meanamps = np.mean(oamps, -1)
-	meancovs = np.mean(oaicov,-1)
-	# Format fit result in standard format
-	msg = ""
-	for si, sid in enumerate(sids):
-		print(sid, off_off.shape, doff.shape, amps.shape, meanamps.shape, meancovs.shape, srcpos.shape, L.P.off0.shape)
-		msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %8.4f %6.2f %6.2f | %7.2f %7.2f | %5.2f %7.2f %7.2f %7.2f | %8.4f %8.4f\n" % (
-				id, sid,
-				off_off[0]/utils.arcmin, off_off[1]/utils.arcmin, doff[0]/utils.arcmin, doff[1]/utils.arcmin,
-				amps[sid]/1e3, meanamps[si]/1e3, meancovs[si]**-0.5/1e3, meanamps[si]*meancovs[si]**0.5, tot_sn,
-				srcpos[0,sid]/utils.degree, srcpos[1,sid]/utils.degree,
-				db.data["hour"][ind], db.data["baz"][ind], db.data["bel"][ind], db.data["waz"][ind],
-				L.P.off0[0]/utils.arcmin, L.P.off0[1]/utils.arcmin)
-	print(msg)
-	f.write(msg + "\n")
-	f.flush()
+		# Measure a detector's signal-weighted signal strength.
+		# This tells us at what strength the detector saw the source
+		# in the periods that contributed most to the measurement
+		# This is effectively just np.sum(model**2)/np.sum(model)
+		adummy = data.oamps*0; adummy[...,0] = 1
+		model  = np.zeros(L.tod.shape, L.tod.dtype)
+		L.P.forward(model, adummy)
+		with utils.nowarn():
+			mean_bval = np.sum(model**2,1)/np.sum(model,1)
+		mean_bval[~np.isfinite(mean_bval)] = 0
+		del model
 
-	if args.dump_tod:
-		data_dump  = data.tod
-		model_dump = L.get_model(off, oamps)
-		resid_dump = data_dump - model_dump
-		best = np.argsort(np.max(model_dump,1))[::-1]
-		with h5py.File(args.odir + "/dump_%s.hdf" % oid, "w") as ofile:
-			ofile["data"]  = data_dump[best[:args.dump_tod_ndet]]
-			ofile["model"] = model_dump[best[:args.dump_tod_ndet]]
-			ofile["resid"] = resid_dump[best[:args.dump_tod_ndet]]
+		# Output our fit to hdf file
+		_, uid = actdata.split_detname(data.data.dets) # :(
+		row = data.data.array_info.info.row[uid]
+		col = data.data.array_info.info.col[uid]
+		with h5py.File(args.odir + "/fit_%s.hdf" % data.oid, "w") as ofile:
+			ofile["off"]  = off
+			ofile["doff"] = doff
+			ofile["0fidoff"] = L.P.off0
+			ofile["amps"]  = data.oamps
+			ofile["aicov"] = data.oaicov
+			ofile["bval"]  = mean_bval
+			ofile["ivar"] = L.N.ivar
+			ofile["dets"] = uid
+			ofile["row"]  = row
+			ofile["col"]  = col
+			ofile["srcs"] = data.sids
+			ofile["srcpos"] = srcpos[:,data.sids]
+			ofile["fidamp"] = amps[data.sids]
+			ofile["beam_area"] = data.beam_area
+			ofile["freq"] = data.freq
+			ofile["fluxconv"] = data.fluxconv
+			ofile["detoff"] = data.data.point_template
+
+		meanamps  = padto(np.mean(data.oamps, (1,2)),3)
+		# mean here because we want to show the typical error bars, not the error on the mean
+		meandamps = padto(np.einsum("...aa->...a",safe_invert(np.mean(data.oaicov,(1,2))))**0.5,3)
+		# Format fit result in standard format
+		msg = ""
+		for si, sid in enumerate(data.sids):
+			sn_T = meanamps[si,0]/meandamps[si,0]
+			sn_P = np.sum((meanamps[si,1:]/meandamps[si,1:])**2)**0.5 - (meanamps.shape[-1]-1)
+			#       id sid | offx  doffx offy  doffy | fidT  T     dT    Q     dQ    U     dU    snT   snP   sntot | ra    dec   | hour  baz   bel   waz   | fidx   fidy | beam  freq  fconv
+			msg += "%s %4d | %8.4f %8.4f %8.4f %8.4f | %8.4f %8.4f %8.4f %7.4f %7.4f %7.4f %7.4f %6.2f %6.2f %6.2f | %7.2f %7.2f | %5.2f %7.2f %7.2f %7.2f | %8.4f %8.4f | %8.4f %8.4f %8.4f\n" % (
+					data.id, sid,
+					off[0]/utils.arcmin, off[1]/utils.arcmin, doff[0]/utils.arcmin, doff[1]/utils.arcmin,
+					amps[sid]/1e3, meanamps[si,0]/1e3, meandamps[si,0]/1e3, meanamps[si,1]/1e3, meandamps[si,1]/1e3, meanamps[si,2]/1e3, meandamps[si,2]/1e3, sn_T, sn_P, tot_sn,
+					srcpos[0,sid]/utils.degree, srcpos[1,sid]/utils.degree,
+					db.data["hour"][ind], db.data["baz"][ind], db.data["bel"][ind], db.data["waz"][ind],
+					L.P.off0[0]/utils.arcmin, L.P.off0[1]/utils.arcmin,
+					data.beam_area*1e9, data.freq, data.fluxconv)
+		print(msg)
+		f.write(msg + "\n")
+		f.flush()
+
+		if args.dump_tod:
+			data_dump  = data.data.tod
+			model_dump = L.get_model(off, data.oamps)
+			resid_dump = data_dump - model_dump
+			best = np.argsort(np.max(model_dump,1))[::-1]
+			with h5py.File(args.odir + "/dump_%s.hdf" % data.oid, "w") as ofile:
+				ofile["data"]  = data_dump[best[:args.dump_tod_ndet]]
+				ofile["model"] = model_dump[best[:args.dump_tod_ndet]]
+				ofile["resid"] = resid_dump[best[:args.dump_tod_ndet]]
 
 f.close()
+print("%4d done, waiting for others" % comm.rank)
 comm.Barrier()
+if comm.rank == 0: print("All done")

@@ -13,6 +13,7 @@ parser.add_argument("--fslice",        type=str, default="")
 parser.add_argument("-c", "--cont",          action="store_true")
 parser.add_argument("-M", "--allow-missing", action="store_true")
 parser.add_argument("-T", "--transpose",     action="store_true")
+parser.add_argument("-N", "--ncomp",   type=int, default=-1)
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -30,17 +31,29 @@ ihits = eval("ihits" + args.fslice)
 
 apod_params = [float(w) for w in args.apod.split(":")] if args.apod else None
 
-def read_map(fname):
-	m = nonan(enmap.read_map(fname))
+def read_helper(fname, shape=None, wcs=None):
+	if shape is None: return enmap.read_map(fname)
+	mshape, mwcs = enmap.read_map_geometry(fname)
+	pixbox = enmap.pixbox_of(mwcs, shape, wcs)
+	return enmap.read_map(fname, pixbox=pixbox)
+
+def read_map(fname, shape=None, wcs=None, ncomp=3):
+	m = nonan(read_helper(fname, shape, wcs))
 	#return m.preflat[:1]
-	return m.reshape(-1, m.shape[-2], m.shape[-1])
-def read_div(fname):
-	m = nonan(enmap.read_map(fname))*1.0
-	return m
+	m = m.reshape(-1, m.shape[-2], m.shape[-1])
+	if ncomp == 0: return m[0]
+	if len(m) == 1:
+		res = enmap.zeros((ncomp,)+m.shape[1:],m.wcs,m.dtype)
+		res[0] = m
+		return res
+	else: return m
+def read_div(fname, shape=None, wcs=None, ncomp=3):
+	m = nonan(read_helper(fname, shape, wcs))*1.0
+	if ncomp == 0: return m.preflat[0]
 	#return m.preflat[:1][None]
 	if m.ndim == 2:
-		res = enmap.zeros((padlen,padlen)+m.shape[-2:], m.wcs, m.dtype)
-		for i in range(padlen):
+		res = enmap.zeros((ncomp,ncomp)+m.shape[-2:], m.wcs, m.dtype)
+		for i in range(ncomp):
 			res[i,i] = m
 		return res
 	elif m.ndim == 4: return m
@@ -104,20 +117,23 @@ def apply_edge(div):
 	apod = np.minimum(1,dists/float(args.edge))
 	return div*apod
 
-def coadd_maps(imaps, ihits, omap, ohit, cont=False):
+def coadd_maps(imaps, ihits, omap, ohit, cont=False, ncomp=-1):
 	# The first map will be used as a reference. All subsequent maps
 	# must fit in its boundaries.
 	if cont and os.path.exists(omap): return
 	if args.verbose: print "Reading %s" % imaps[0]
-	m = read_map(imaps[0])
+	if ncomp < 0:
+		shape, wcs = enmap.read_map_geometry(imaps[0])
+		ncomp = 0 if len(shape) == 2 else shape[0]
+	m = read_map(imaps[0], ncomp=ncomp)
 	if args.verbose: print"Reading %s" % ihits[0]
-	w = apply_edge(apply_apod(apply_trim(read_div(ihits[0]))))
+	w = apply_edge(apply_apod(apply_trim(read_div(ihits[0], ncomp=ncomp))))
 	wm = mul(w,m)
 
 	for mif,wif in zip(imaps[1:],ihits[1:]):
 		if args.verbose: print"Reading %s" % mif
 		try:
-			mi = read_map(mif)
+			mi = read_map(mif, m.shape, m.wcs, ncomp=ncomp)
 		except IOError:
 			if args.allow_missing:
 				print "Can't read %s. Skipping" % mif
@@ -125,11 +141,11 @@ def coadd_maps(imaps, ihits, omap, ohit, cont=False):
 			else: raise
 		if args.verbose: print"Reading %s" % wif
 
-		wi = apply_edge(apply_apod(apply_trim(read_div(wif))))
-		# We may need to reproject maps
-		if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
-			mi = enmap.project(mi, m.shape, m.wcs, mode="constant")
-			wi = enmap.project(wi, w.shape, w.wcs, mode="constant")
+		wi = apply_edge(apply_apod(apply_trim(read_div(wif, m.shape, m.wcs, ncomp=ncomp))))
+		## We may need to reproject maps
+		#if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
+		#	mi = enmap.extract(mi, m.shape, m.wcs)
+		#	wi = enmap.extract(wi, w.shape, w.wcs)
 		w  = add(w,wi)
 		wm = add(wm,mul(wi,mi))
 
@@ -143,7 +159,7 @@ def coadd_maps(imaps, ihits, omap, ohit, cont=False):
 # Two cases: Normal enmaps or dmaps
 if not os.path.isdir(imaps[0]):
 	# Normal monotlithic map
-	coadd_maps(imaps, ihits, args.omap, args.ohit, cont=args.cont)
+	coadd_maps(imaps, ihits, args.omap, args.ohit, cont=args.cont, ncomp=args.ncomp)
 else:
 	# Dmap. Each name is actually a directory, but they
 	# all have compatible tile names.
@@ -154,5 +170,5 @@ else:
 		timaps = ["%s/%s" % (imap,tilename) for imap in imaps]
 		tihits = ["%s/%s" % (ihit,tilename) for ihit in ihits]
 		print "%3d %s" % (comm.rank, tilename)
-		coadd_maps(timaps, tihits, args.omap + "/" + tilename, args.ohit + "/" + tilename, cont=args.cont)
-	if args.verbose: print"Done"
+		coadd_maps(timaps, tihits, args.omap + "/" + tilename, args.ohit + "/" + tilename, cont=args.cont, ncomp=args.ncomp)
+	if args.verbose: print "Done"

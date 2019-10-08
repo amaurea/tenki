@@ -51,7 +51,12 @@ parser.add_argument("-o", "--output",  type=str,   default="full,reg", help="Wha
 parser.add_argument(      "--ncomp",   type=int,   default=1, help="The number of stokes components to fit for in fit mode.")
 parser.add_argument(      "--prune",   type=int,   default=0)
 parser.add_argument(      "--rlim",    type=float, default=0.25)
-parser.add_argument("--hack",          type=float, default=0)
+parser.add_argument(      "--hack",    type=float, default=0)
+parser.add_argument(      "--split",   action="store_true")
+parser.add_argument(      "--split-nimage", type=int,   default=16)
+parser.add_argument(      "--split-dist",   type=float, default=1)
+parser.add_argument(      "--split-minflux",type=float, default=300)
+
 args = parser.parse_args()
 import numpy as np, os
 from enlib import dory
@@ -96,8 +101,6 @@ if args.mode == "find":
 			# We only use T to find sources in find mode for now. P usually has much lower S/N and
 			# doesn't help much. Should add it later, though.
 			imap   = enmap.read_map(args.imap, pixbox=reg_pad).preflat[0]
-			print("A")
-			print(imap.box()/utils.degree)
 			idiv   = enmap.read_map(args.idiv, pixbox=reg_pad).preflat[0]
 			if args.mask:
 				mshape, mwcs = enmap.read_map_geometry(args.mask)
@@ -122,8 +125,8 @@ if args.mode == "find":
 			if "maps" in args.output:
 				for name in map_keys:
 					enmap.write_map(prefix + name + ".fits", result[name])
-			if "full" in args.output:
-				results.append(result)
+		if "full" in args.output:
+			results.append(result)
 
 	if "full" in args.output:
 		# First build the full catalog
@@ -151,6 +154,10 @@ elif args.mode == "fit":
 	icat      = dory.read_catalog(args.icat)
 	if args.nsigma is not None:
 		icat  = icat[icat.flux[:,0] >= icat.dflux[:,0]*args.nsigma]
+	if args.split:
+		npre  = len(icat)
+		icat  = dory.split_sources(icat, nimage=args.split_nimage, dist=args.split_dist*utils.arcmin, minflux=args.split_minflux/1e3)
+		print "Added %d extra images around %d sources > %f mJy" % (len(icat)-npre, (len(icat)-npre)/args.split_nimage, args.split_minflux)
 	beam_prof = dory.get_beam_profile(beam)
 	barea     = dory.calc_beam_profile_area(beam_prof)
 	reg_cats  = []

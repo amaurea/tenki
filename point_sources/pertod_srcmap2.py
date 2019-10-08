@@ -4,6 +4,7 @@ with utils.nowarn(): import h5py
 from enlib import config, pmat, mpi, errors, gapfill, enmap, bench, ephemeris
 from enlib import fft, array_ops, sampcut, cg
 from enact import filedb, actscan, actdata, cuts, nmat_measure
+from astropy.io import fits
 config.set("pmat_cut_type",  "full")
 parser = config.ArgumentParser()
 parser.add_argument("sel")
@@ -11,12 +12,13 @@ parser.add_argument("srcs")
 parser.add_argument("area")
 parser.add_argument("odir")
 parser.add_argument("tag", nargs="?")
-parser.add_argument("-R", "--dist", type=float, default=4)
-parser.add_argument("-y", "--ypad", type=float, default=3)
-parser.add_argument("-s", "--src",  type=int,   default=None, help="Only analyze given source")
-parser.add_argument("-c", "--cont", action="store_true")
-parser.add_argument("-m", "--model",type=str, default="constrained")
-parser.add_argument("--hit-tol",    type=float, default=0.5)
+parser.add_argument("-R", "--dist",   type=float, default=4)
+parser.add_argument("-y", "--ypad",   type=float, default=3)
+parser.add_argument("-s", "--src",    type=int,   default=None, help="Only analyze given source")
+parser.add_argument("-m", "--model",  type=str,   default="constrained")
+parser.add_argument("-o", "--output", type=str,   default="individual")
+parser.add_argument("--hit-tol",      type=float, default=0.5)
+parser.add_argument("-c", "--cont",   action="store_true")
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
@@ -24,9 +26,11 @@ filedb.init()
 R    = args.dist * utils.arcmin
 ypad = args.ypad * utils.arcmin
 csize= 100
+config.set("pmat_accuracy", 25)
 config.set("pmat_ptsrc_cell_res", 2*(R+ypad)/utils.arcmin)
 config.set("pmat_ptsrc_rsigma", 5)
 config.set("pmat_interpol_pad", 5+ypad/utils.arcmin)
+osys = config.get("tod_sys")
 
 dtype = np.float32
 area  = enmap.read_map(args.area).astype(dtype)
@@ -61,8 +65,8 @@ def load_srcs(desc):
 		res.name = name
 		return res
 	except IOError:
-		srcs = np.loadtxt(args.srcs, usecols=[0,1])
-		res  = np.zeros(len(srcs), src_dtype)
+		srcs = np.loadtxt(args.srcs, usecols=[0,1], ndmin=2)
+		res  = np.zeros(len(srcs), src_dtype).view(np.recarray)
 		res.ra, res.dec = srcs.T[:2]*utils.degree
 		res.type = "fixed"
 		return res
@@ -139,30 +143,61 @@ def calc_model_constrained(tod, cut, srate=400, mask_scale=0.3, lim=3e-4, maxite
 			print "%5d %15.7e" % (solver.i, solver.err)
 	return solver.x.reshape(tod.shape)
 
+def map_to_header(map):
+	header = map.wcs.to_header(relax=True)
+	# Add our map headers
+	header['NAXIS'] = map.ndim
+	for i,n in enumerate(map.shape[::-1]):
+		header['NAXIS%d'%(i+1)] = n
+	return header
+
+def write_package(fname, maps, divs, src_ids, d):
+	header = map_to_header(maps)
+	header["id"] = d.entry.id + ":" + entry.tag
+	header["off_x"] = d.point_correction[0]/utils.arcmin
+	header["off_y"] = d.point_correction[1]/utils.arcmin
+	header["t1"]     = d.boresight[0,0]
+	header["t2"]     = d.boresight[0,-1]
+	meanoff = np.mean(d.point_offset,0)/utils.degree
+	header["az1"]    = np.min(d.boresight[1,:])/utils.degree + meanoff[0]
+	header["az2"]    = np.max(d.boresight[1,:])/utils.degree + meanoff[1]
+	header["el"]     = np.mean(d.boresight[2,::100])/utils.degree
+
+	hdu_maps = astropy.io.fits.PrimaryHDU(maps, header)
+	hdu_divs = astropy.io.fits.ImageHDU(divs, map_to_header(divs), name="div"),
+	hdu_ids  = astropy.io.fits.TableHDU(src_ids, name="ids")
+
+	hdus = astropy.io.fits.HDUList([hdu_maps, hdu_divs, hdu_ids])
+	with utils.nowarn():
+		hdus.writeto(fname, clobber=True)
+
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
+	print "A", id, comm.rank
 	bid   = id.replace(":","_")
 	entry = filedb.data[id]
 	# Read the tod as usual
 	try:
-		with bench.show("read"):
+		with bench.mark("read"):
 			d = actdata.read(entry)
-		with bench.show("calibrate"):
+		with bench.mark("calibrate"):
 			d = actdata.calibrate(d, exclude=["autocut"])
 		# Replace the beam with our dummy beam
 		d.beam = beam
-		if d.ndet == 0 or d.nsamp < 2: raise errors.DataMissing("no data in tod")
+		if d.ndet < 2 or d.nsamp < 2: raise errors.DataMissing("no data in tod")
 	except errors.DataMissing as e:
-		print "Skipping %s (%s)" % (id, e.message)
+		print "Skipping %s (%s)" % (id, comm.rank, e.message)
 		# Make a dummy output file so we can skip this tod in the future
 		with open("%s%s_empty.txt" % (prefix, bid),"w"): pass
 		continue
-	print "Processing %s [ndet:%d, nsamp:%d, nsrc:%d]" % (id, d.ndet, d.nsamp, len(tod_srcs[id]))
+	print "%3d Processing %s [ndet:%d, nsamp:%d, nsrc:%d]" % (comm.rank, id, d.ndet, d.nsamp, len(tod_srcs[id]))
+	print "B", id, comm.rank
 	# Fill in representative ra, dec for planets for this tod
 	for sid in np.where(srcs.type == "planet")[0]:
 		srcs.ra[sid], srcs.dec[sid] = ephemeris.ephem_pos(srcs.name[sid], utils.ctime2mjd(d.boresight[0,d.nsamp//2]), dt=0)[:2]
 	# Very simple white noise model. This breaks if the beam has been tod-smoothed by this point.
-	with bench.show("ivar"):
+	print "C", id, comm.rank
+	with bench.mark("ivar"):
 		tod  = d.tod
 		del d.tod
 		tod -= np.mean(tod,1)[:,None]
@@ -171,9 +206,11 @@ for ind in range(comm.rank, len(ids), comm.size):
 		diff = diff[:,:diff.shape[-1]/csize*csize].reshape(d.ndet,-1,csize)
 		ivar = 1/(np.median(np.mean(diff**2,-1),-1)/2**0.5)
 		del diff
-	with bench.show("actscan"):
+	print "D", id, comm.rank
+	with bench.mark("actscan"):
 		scan = actscan.ACTScan(entry, d=d)
-	with bench.show("pmat1"):
+	print "E", id, comm.rank
+	with bench.mark("pmat1"):
 		# Build effective source parameters for this TOD. This will ignore planet motion,
 		# but this should only be a problem for very near objects like the moon or ISS
 		src_param = np.zeros((len(srcs),8))
@@ -181,10 +218,10 @@ for ind in range(comm.rank, len(ids), comm.size):
 		src_param[:,1]   = srcs.ra
 		src_param[:,2]   = 1
 		src_param[:,5:7] = 1
-		print srcs.ra/utils.degree, srcs.dec/utils.degree
 		# And use it to build our source model projector. This is only used for the cuts
 		psrc = pmat.PmatPtsrc(scan, src_param)
-	with bench.show("source mask"):
+	print "F", id, comm.rank
+	with bench.mark("source mask"):
 		# Find the samples where the sources live
 		src_mask = np.zeros(tod.shape, np.bool)
 		# Allow elongating the mask vertically
@@ -208,32 +245,42 @@ for ind in range(comm.rank, len(ids), comm.size):
 		src_cut  = sampcut.from_mask(src_mask)
 		src_cut *= scan.cut
 		del src_mask
-	with bench.show("atm model"):
-		if   args.model == "joneig":
-			model = calc_model_joneig(tod, src_cut, d.srate)
-		elif args.model == "constrained":
-			model = calc_model_constrained(tod, src_cut, d.srate, verbose=True)
-	with bench.show("atm subtract"):
+	print "G", id, comm.rank
+	try:
+		with bench.mark("atm model"):
+			if   args.model == "joneig":
+				model = calc_model_joneig(tod, src_cut, d.srate)
+			elif args.model == "constrained":
+				model = calc_model_constrained(tod, src_cut, d.srate, verbose=True)
+	except np.linalg.LinAlgError as e:
+		print "%3d %s Error building noide model: %s" % (comm.rank, id, e.message)
+		continue
+	with bench.mark("atm subtract"):
 		tod -= model
 		del model
 		tod  = tod.astype(dtype, copy=False)
 	# Should now be reasonably clean of correlated noise.
 	# Proceed to make simple binned map for each point source. We need a separate
 	# pointing matrix for each because each has its own local coordinate system.
+	print "H", id, comm.rank
 	tod *= ivar[:,None]
 	sampcut.gapfill_const(scan.cut, tod, inplace=True)
-	for sid in tod_srcs[id]:
+	nsrc  = len(tod_srcs[id])
+	omaps = enmap.zeros((nsrc,ncomp)+shape, area.wcs, dtype)
+	odivs = enmap.zeros((nsrc,ncomp,ncomp)+shape, area.wcs, dtype)
+	print "I", id, comm.rank
+	for si, sid in enumerate(tod_srcs[id]):
 		src  = srcs[sid]
-		if   src.type == "fixed":  sys = "hor:%.6f_%.6f:cel/0_0:hor" % (src.ra/utils.degree, src.dec/utils.degree)
-		elif src.type == "planet": sys = "hor:%s/0_0" % src.name
+		if   src.type == "fixed":  sys = "%s:%.6f_%.6f:cel/0_0:%s" % (osys, src.ra/utils.degree, src.dec/utils.degree, osys)
+		elif src.type == "planet": sys = "%s:%s/0_0" % (osys, src.name)
 		else: raise ValueError("Invalid source type '%s'" % src.type)
 		rhs  = enmap.zeros((ncomp,)+shape, area.wcs, dtype)
 		div  = enmap.zeros((ncomp,ncomp)+shape, area.wcs, dtype)
-		with bench.show("pmat %s" % sid):
+		with bench.mark("pmat %s" % sid):
 			pmap = pmat.PmatMap(scan, area, sys=sys)
-		with bench.show("rhs %s" % sid):
+		with bench.mark("rhs %s" % sid):
 			pmap.backward(tod, rhs)
-		with bench.show("hits"):
+		with bench.mark("hits"):
 			for i in range(ncomp):
 				div[i,i] = 1
 				pmap.forward(tod, div[i])
@@ -241,12 +288,24 @@ for ind in range(comm.rank, len(ids), comm.size):
 				sampcut.gapfill_const(scan.cut, tod, inplace=True)
 				div[i] = 0
 				pmap.backward(tod, div[i])
-		with bench.show("map %s" % sid):
+		with bench.mark("map %s" % sid):
 			idiv = array_ops.eigpow(div, -1, axes=[0,1], lim=1e-5, fallback="scalar")
 			map  = enmap.map_mul(idiv, rhs)
-		with bench.show("write"):
-			enmap.write_map("%s%s_src%03d_map.fits" % (prefix, bid, sid), map)
-			enmap.write_map("%s%s_src%03d_rhs.fits" % (prefix, bid, sid), rhs)
-			enmap.write_map("%s%s_src%03d_div.fits" % (prefix, bid, sid), div)
+		omaps[si] = map
+		odivs[si] = div
 		del rhs, div, idiv, map
-	del d, scan, pmap, tod
+	print "J", id, comm.rank
+	# Write out the resulting maps
+	if args.output == "individual":
+		with bench.mark("write"):
+			for si, sid in enumerate(tod_srcs[id]):
+				print "K", id, comm.rank, sid
+				enmap.write_map("%s%s_src%03d_map.fits" % (prefix, bid, sid), omaps[si])
+				enmap.write_map("%s%s_src%03d_div.fits" % (prefix, bid, sid), odivs[si])
+				#enmap.write_map("%s%s_src%03d_rhs.fits" % (prefix, bid, sid), rhs)
+	elif args.output == "grouped":
+		with bench.mark("write"):
+			write_package("%s%s.fits" % (prefix, bid), omaps, odivs, tod_srcs[id], d)
+	del d, scan, pmap, tod, omaps, odivs
+
+comm.Barrier()

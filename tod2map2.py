@@ -3,7 +3,7 @@ from enlib import utils
 with utils.nowarn(): import h5py
 from enlib import enmap, pmat, fft, config, array_ops, mapmaking, nmat, errors, mpi
 from enlib import log, bench, dmap, coordinates, scan as enscan, scanutils
-from enlib import pointsrcs, bunch, planet9, ephemeris, parallax
+from enlib import pointsrcs, bunch, ephemeris, parallax
 from enlib.cg import CG
 from enlib.source_model import SourceModel
 from enact import actscan, nmat_measure, filedb, todinfo
@@ -374,21 +374,6 @@ def write_noise_stats(fname, stats):
 
 def setup_extra_transforms(param):
 	extra = []
-	if "p9" in param:
-		# Planet 9 search coordinate system: p9=elemfile:tref. Includes
-		# both parallax and motion compensation
-		toks     = param["p9"].split(":")
-		elemfile = toks[0]
-		tref     = float(toks[1]) if len(toks)>1 else 1380000000.0
-		tref     = utils.ctime2mjd(tref)
-		obj      = ephemeris.read_object(elemfile)
-		p9       = planet9.MotionCompensator(obj)
-		def trf(pos, time):
-			# We ignore the polarization rotation for now
-			opos = pos.copy()
-			opos[:2] = p9.compensate(pos[:2], time, tref)
-			return opos
-		extra.append(trf)
 	if "parallax" in param:
 		# Simple parallax compensation. parallax=dist, with dist in AU
 		dist = float(param["parallax"])

@@ -1,0 +1,85 @@
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("ifiles", nargs="+")
+parser.add_argument("-q", "--quantum", type=float, default=1, help="The quantization to use in the fixed-point representation of the image data. Higher values reduce image size by discarding more noise and allows higher extremes in the map, but reduces the fidelity of the map. 1 uK, the current default, effectively increases the noise by 0.5% in the very deepest parts of our maps, and by less in shallower regions. Compared to a more conservative 0.1 it results in 25% smaller images. The quantization level is stored in the high bit of the first 32 pixels of the image.")
+parser.add_argument(      "--suffix",  type=str,   default="")
+parser.add_argument(      "--ext",     type=str,   default=".png")
+args = parser.parse_args()
+import numpy as np, glob
+from pixell import enmap, utils, mpi
+from PIL import Image
+
+def pack_bits_lowsign(qmap):
+	"""Given a np.int32 map (two's complement), return an
+	np.uint32 map where the sign bit has been separated out
+	and moved to the least significant bit. Also invert the alpha
+	channel so that the images can be inspected visually. The goal of
+	this is to have as few bits change from pixel to pixel as possible."""
+	mask = qmap < 0
+	res  = qmap.view(np.uint32).copy()
+	res[mask] = (-qmap[mask]).view(np.uint32)
+	res <<= 1
+	res |= mask
+	res ^= 0xff000000;
+	return res
+
+def unpack_bits_lowsign(qmap):
+	res  = qmap.copy()
+	res ^= 0xff000000;
+	sign = res & 1
+	res >>= 1
+	res  = res.view(np.int32)
+	res[sign!=0] *= -1
+	return res
+
+def pack_bits_plain(qmap): return qmap.view(np.uint32)
+def unpack_bits_plain(qmap): return qmap.view(np.int32)
+
+def encode_quantization(qmap, q):
+	"""Encode the quantization level q as a floating point number in the most significant bit. This
+	means that we effectively sacrifice one of the 32 bits, leaving us with 31 bits, or 30 bits
+	if one excludes the sign bit, giving a dynamic range of 1 billion. That should be plenty"""
+	qmap  = qmap.copy()
+	bits  = np.array([q]).astype(np.float32).view(np.uint32)[0]
+	qflat = qmap.reshape(-1)
+	for i in range(32):
+		qflat[i] = (qflat[i] & 0x7fffffff)^((bits&1)<<31)
+		bits >>= 1
+	return qmap
+
+def decode_quantization(qmap):
+	"""Decode the quantization level from qmap, returning it as a float
+	as well as a version of the qmap that no longer is contaminated by the
+	quantization metadata"""
+	qmap = qmap.copy()
+	bits = 0
+	qflat= qmap.reshape(-1)
+	for i in range(31,-1,-1):
+		bits <<= 1
+		bits |= (qflat[i] >> 31)
+		qflat[i] |= 0x80000000
+	q = np.array([bits]).astype(np.uint32).view(np.float32)[0]
+	return q, qmap
+
+def get_num_digits(n): return int(np.log10(n))+1
+
+comm   = mpi.COMM_WORLD
+ifiles = sum([sorted(glob.glob(ifile)) for ifile in args.ifiles],[])
+
+for ind in range(comm.rank, len(ifiles), comm.size):
+	ifile = ifiles[ind]
+	imap  = enmap.read_map(ifile)
+
+	N       = imap.shape[:-2]
+	ndigits = [get_num_digits(n) for n in N]
+	for i, map in enumerate(imap.preflat):
+		I = np.unravel_index(i, N) if len(N) > 0 else []
+		comp = "_"+"_".join(["%0*d" % (ndig,ind) for ndig,ind in zip(ndigits,I)]) if len(N) > 0 else ""
+		ofile = ifile[:-5]+args.suffix+comp+args.ext
+
+		# Quantize it
+		qmap = np.round(map/args.quantum).astype(np.int32)
+		omap = pack_bits_lowsign(qmap)
+		omap = encode_quantization(omap, args.quantum)
+		img  = Image.fromarray(omap, mode="RGBA")
+		img.save(ofile)

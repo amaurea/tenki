@@ -2,65 +2,125 @@
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("ifiles", nargs="+")
+parser.add_argument("-b", "--nbyte",   type=int,   default=4)
 parser.add_argument("-q", "--quantum", type=float, default=1, help="The quantization to use in the fixed-point representation of the image data. Higher values reduce image size by discarding more noise and allows higher extremes in the map, but reduces the fidelity of the map. 1 uK, the current default, effectively increases the noise by 0.5% in the very deepest parts of our maps, and by less in shallower regions. Compared to a more conservative 0.1 it results in 25% smaller images. The quantization level is stored in the high bit of the first 32 pixels of the image.")
 parser.add_argument(      "--suffix",  type=str,   default="")
 parser.add_argument(      "--ext",     type=str,   default=".png")
+parser.add_argument("-v", "--verbose", action="count", default=0)
+parser.add_argument("-m", "--mask",    type=float, default=0, help="Treat values exactly equal to this floating point value as masked")
 args = parser.parse_args()
 import numpy as np, glob
 from pixell import enmap, utils, mpi
 from PIL import Image
 
-def pack_bits_lowsign(qmap):
-	"""Given a np.int32 map (two's complement), return an
-	np.uint32 map where the sign bit has been separated out
-	and moved to the least significant bit. Also invert the alpha
-	channel so that the images can be inspected visually. The goal of
-	this is to have as few bits change from pixel to pixel as possible."""
-	mask = qmap < 0
-	res  = qmap.view(np.uint32).copy()
-	res[mask] = (-qmap[mask]).view(np.uint32)
-	res <<= 1
-	res |= mask
-	res ^= 0xff000000;
-	return res
+def pack(imap, mask, nbyte=4, quantum=1.0):
+	# Flip y to match PIL pixel origin in top left corner
+	imap = imap[...,::-1,:]
+	mask = mask[::-1]
+	# Quantize
+	qmap = np.round(imap/quantum).astype(np.int64)
+	# Switch from twos complement to lest significant sign and mag
+	neg  = qmap < 0
+	qmap[neg] = -qmap[neg]
+	qmap = qmap.view(np.uint64)
+	qmap <<= 1
+	qmap |= neg
+	# Mark masked values as all ff
+	qmap[mask] = 0xffffffffffffffff
+	# Express as bytes and truncate to requested number of bytes
+	qmap = qmap.view(np.uint8).reshape(imap.shape+(8,))[...,:nbyte]
+	# Reformat as byte planes
+	qmap = np.moveaxis(qmap, -1, -3)
+	# Stack planes in the y direction
+	qmap = qmap.reshape(qmap.shape[:-3]+(-1,qmap.shape[-1]))
+	# Add metadata row
+	meta = np.concatenate([
+		np.array([nbyte],np.uint8),
+		np.array([quantum],np.float64).view(np.uint8),
+	])
+	omap = np.zeros(qmap.shape[:-2]+(qmap.shape[-2]+1,qmap.shape[-1]), np.uint8)
+	omap[...,1:,:] = qmap
+	omap[...,0,:len(meta)] = meta
+	return omap
 
-def unpack_bits_lowsign(qmap):
-	res  = qmap.copy()
-	res ^= 0xff000000;
-	sign = res & 1
-	res >>= 1
-	res  = res.view(np.int32)
-	res[sign!=0] *= -1
-	return res
+def unpack(imap):
+	# Read the metadata row
+	meta, qmap = imap[0], imap[1:]
+	nbyte   = meta[0]
+	quantum = meta[1:5].view(np.float32)[0]
+	# Undo plane stacking
+	qmap = qmap.reshape(nbyte,-1,qmap.shape[1])
+	qmap = qmap.moveaxis(0,-1)
+	mask = np.all(qmap==0xff,-1)
+	wmap = np.zeros(qmap.shape[:2],8)
+	wmap[:,:,:nbyte] = qmap
+	wmap = wmap.view(np.uint64)
+	# Back to twos complement
+	neg  = (wmap & 1) == 1
+	wmap >>= 1
+	wmap = wmap.view(np.int64)
+	wmap[neg] = -wmap[neg]
+	# And to real units
+	omap = wmap*quantum
+	omap[mask] = 0
+	omap, mask = omap[::-1], mask[::-1]
+	return omap, mask
 
-def pack_bits_plain(qmap): return qmap.view(np.uint32)
-def unpack_bits_plain(qmap): return qmap.view(np.int32)
-
-def encode_quantization(qmap, q):
-	"""Encode the quantization level q as a floating point number in the most significant bit. This
-	means that we effectively sacrifice one of the 32 bits, leaving us with 31 bits, or 30 bits
-	if one excludes the sign bit, giving a dynamic range of 1 billion. That should be plenty"""
-	qmap  = qmap.copy()
-	bits  = np.array([q]).astype(np.float32).view(np.uint32)[0]
-	qflat = qmap.reshape(-1)
-	for i in range(32):
-		qflat[i] = (qflat[i] & 0x7fffffff)^((bits&1)<<31)
-		bits >>= 1
-	return qmap
-
-def decode_quantization(qmap):
-	"""Decode the quantization level from qmap, returning it as a float
-	as well as a version of the qmap that no longer is contaminated by the
-	quantization metadata"""
-	qmap = qmap.copy()
-	bits = 0
-	qflat= qmap.reshape(-1)
-	for i in range(31,-1,-1):
-		bits <<= 1
-		bits |= (qflat[i] >> 31)
-		qflat[i] |= 0x80000000
-	q = np.array([bits]).astype(np.uint32).view(np.float32)[0]
-	return q, qmap
+#def pack_bits_lowsign(qmap, masked):
+#	"""Given a np.int32 map (two's complement), return an
+#	np.uint32 map where the sign bit has been separated out
+#	and moved to the least significant bit. Also invert the alpha
+#	channel so that the images can be inspected visually. The goal of
+#	this is to have as few bits change from pixel to pixel as possible."""
+#	neg  = qmap < 0
+#	res  = qmap.view(np.uint32).copy()
+#	res[neg] = (-qmap[neg]).view(np.uint32)
+#	res <<= 1
+#	res |= neg
+#	# mark masked values with 31 set bits
+#	res[masked] |= 0x7effffff;
+#	res ^= 0xff000000;
+#	return res
+#
+#def unpack_bits_lowsign(qmap):
+#	res  = qmap.copy()
+#	res ^= 0xff000000;
+#	masked = res&0x7fffffff == 0x7effffff
+#	sign = res & 1
+#	res >>= 1
+#	res  = res.view(np.int32)
+#	res[sign!=0] *= -1
+#	res[masked] = 0
+#	return res, masked
+#
+#def pack_bits_plain(qmap): return qmap.view(np.uint32)
+#def unpack_bits_plain(qmap): return qmap.view(np.int32)
+#
+#def encode_quantization(qmap, q):
+#	"""Encode the quantization level q as a floating point number in the most significant bit. This
+#	means that we effectively sacrifice one of the 32 bits, leaving us with 31 bits, or 30 bits
+#	if one excludes the sign bit, giving a dynamic range of 1 billion. That should be plenty"""
+#	qmap  = qmap.copy()
+#	bits  = np.array([q]).astype(np.float32).view(np.uint32)[0]
+#	qflat = qmap.reshape(-1)
+#	for i in range(32):
+#		qflat[i] = (qflat[i] & 0x7fffffff)|((bits&1)<<31)
+#		bits >>= 1
+#	return qmap
+#
+#def decode_quantization(qmap):
+#	"""Decode the quantization level from qmap, returning it as a float
+#	as well as a version of the qmap that no longer is contaminated by the
+#	quantization metadata"""
+#	qmap = qmap.copy()
+#	bits = 0
+#	qflat= qmap.reshape(-1)
+#	for i in range(31,-1,-1):
+#		bits <<= 1
+#		bits |= (qflat[i] >> 31)
+#		qflat[i] |= 0x80000000
+#	q = np.array([bits]).astype(np.uint32).view(np.float32)[0]
+#	return q, qmap
 
 def get_num_digits(n): return int(np.log10(n))+1
 
@@ -69,6 +129,7 @@ ifiles = sum([sorted(glob.glob(ifile)) for ifile in args.ifiles],[])
 
 for ind in range(comm.rank, len(ifiles), comm.size):
 	ifile = ifiles[ind]
+	if args.verbose > 0: print(ifile)
 	imap  = enmap.read_map(ifile)
 
 	N       = imap.shape[:-2]
@@ -79,8 +140,20 @@ for ind in range(comm.rank, len(ifiles), comm.size):
 		ofile = ifile[:-5]+args.suffix+comp+args.ext
 
 		# Quantize it
-		qmap = np.round(map/args.quantum).astype(np.int32)
-		omap = pack_bits_lowsign(qmap)
-		omap = encode_quantization(omap, args.quantum)
-		img  = Image.fromarray(omap, mode="RGBA")
+		mask = map == args.mask
+		qmap = pack(map, mask, nbyte=args.nbyte, quantum=args.quantum)
+		img  = Image.fromarray(qmap, mode="L")
 		img.save(ofile)
+
+		#qmap = np.round(map/args.quantum).astype(np.int32)
+		#qmap, masked = qmap[::-1], masked[::-1] # y flip to match pil y ordering
+		#omap = pack_bits_lowsign(qmap, masked)
+		#print("A %08x %08x %08x %08x"% tuple(omap[:2,19:21].reshape(-1)))
+		#omap = encode_quantization(omap, args.quantum)
+		#print("B %08x %08x %08x %08x"% tuple(omap[:2,19:21].reshape(-1)))
+		#img  = Image.fromarray(omap, mode="RGBA")
+		#img.save(ofile)
+		#im2 = Image.open(ofile)
+		#bleh = np.array(im2).view(np.uint32).reshape(omap.shape)
+		#print(bleh.shape, bleh.dtype)
+		#print("C %08x %08x %08x %08x"% tuple(bleh[:2,19:21].reshape(-1)))

@@ -3,7 +3,6 @@ from enlib import enmap, utils, pmat, fft, config, array_ops, mapmaking, nmat, e
 from enlib import log, bench, dmap, coordinates, scan as enscan, rangelist, scanutils
 from enlib import pointsrcs, bunch
 from enlib.cg import CG
-from enlib.source_model import SourceModel
 from enact import actscan, nmat_measure, filedb, todinfo
 
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")

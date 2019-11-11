@@ -5,7 +5,6 @@ from enlib import enmap, pmat, fft, config, array_ops, mapmaking, nmat, errors, 
 from enlib import log, bench, dmap, coordinates, scan as enscan, scanutils
 from enlib import pointsrcs, bunch, planet9, ephemeris, parallax
 from enlib.cg import CG
-from enlib.source_model import SourceModel
 from enact import actscan, nmat_measure, filedb, todinfo
 from enact import actdata
 

@@ -15,6 +15,7 @@ parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-W", "--wiener",  action="store_true")
 parser.add_argument("-m", "--mask",   type=str,   default=None)
 parser.add_argument("--filter-mode",  type=str,   default="weight")
+parser.add_argument("--cg-tol",       type=float, default=1e-4)
 args = parser.parse_args()
 
 config  = jointmap.read_config(args.config)
@@ -78,7 +79,7 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 	if dump_dir:
 		enmap.write_map(dump_dir + "/rhs.fits", rhs)
 		enmap.write_map(dump_dir + "/ps_rhs.fits", np.abs(enmap.fft(rhs.preflat[0]))**2)
-	map     = coadder.calc_map(rhs, dump_dir=dump_dir, verbose=verbose)#, maxiter=1)
+	map     = coadder.calc_map(rhs, dump_dir=dump_dir, verbose=verbose, cg_tol=args.cg_tol)#, maxiter=1)
 	if dump_dir:
 		enmap.write_map(dump_dir + "/ps_map.fits", np.abs(enmap.fft(mapdiag(map)))**2)
 	div     = coadder.tot_div

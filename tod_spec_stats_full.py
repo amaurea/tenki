@@ -41,6 +41,7 @@ parser.add_argument("-B", "--nbin-det",   type=int,   default=100)
 parser.add_argument("-Z", "--nbin-zoom",  type=int,   default=100)
 parser.add_argument("-F", "--fmax-zoom",  type=float, default=10)
 parser.add_argument("-C", "--chunk-size", type=int,   default=250)
+parser.add_argument("--tconst",     action="store_true")
 parser.add_argument("--no-autocut", action="store_true")
 args = parser.parse_args()
 
@@ -84,6 +85,7 @@ for chunk in range(nchunk):
 	dspecs = np.zeros([nctod,ndet,args.nbin_det], dtype=dtype)
 	dzooms = np.zeros([nctod,ndet,args.nbin_zoom],dtype=dtype)
 	tspecs = np.zeros([5,nctod,args.nbin],dtype=dtype)
+	nhits  = np.zeros([nctod,args.nbin],dtype=int)
 	tcorrs = np.zeros([nctod,args.nbin],dtype=dtype)
 	srates = np.zeros([nctod],dtype=dtype)
 	mce_fsamps = np.zeros([nctod],dtype=dtype)
@@ -95,8 +97,10 @@ for chunk in range(nchunk):
 		try:
 			# Do not apply time constants. We want raw spectra so that we can
 			# use them to estimate time constants ourselves.
-			d     = actdata.read(entry, fields=["array_info", "tags", "site", "mce_filter", "gain","cut","tod","boresight"])
-			d     = actdata.calibrate(d, exclude=["tod_fourier"]+(["autocut"] if not args.no_autocut else []))
+			fields= ["array_info", "tags", "site", "mce_filter", "gain","cut","tod","boresight"]
+			if args.tconst: fields.append("tconst")
+			d     = actdata.read(entry, fields=fields)
+			d     = actdata.calibrate(d, exclude=(["autocut"] if not args.no_autocut else []))
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
 		except (IOError, errors.DataMissing) as e:
 			print "Skipped (%s)" % (e.message)
@@ -116,10 +120,12 @@ for chunk in range(nchunk):
 		ps    = np.abs(ft)**2
 		# Det specs
 		zoom = int(round(ifmax/args.fmax_zoom))
-		dspecs[i,d.dets] = bin(ps, args.nbin_det)
-		dzooms[i,d.dets] = bin(ps, args.nbin_zoom, zoom=zoom)
+		dets = actdata.split_detname(d.dets)[1]
+		dspecs[i,dets] = bin(ps, args.nbin_det)
+		dzooms[i,dets] = bin(ps, args.nbin_zoom, zoom=zoom)
 		# Aggregate specs. First bin in small bins
 		dhigh, binds = bin(ps, args.nbin, return_inds=True)
+		nhits[i] = np.bincount(binds, minlength=args.nbin)
 		# Then compute quantiles
 		tspecs[0,i] = np.median(dhigh,0)
 		tspecs[1,i] = np.percentile(dhigh,15.86553,0)
@@ -141,6 +147,7 @@ for chunk in range(nchunk):
 		tspecs = utils.allreduce(tspecs, comm)
 		tcorrs = utils.allreduce(tcorrs, comm)
 		srates = utils.allreduce(srates, comm)
+		nhits  = utils.allreduce(nhits,  comm)
 		mce_fsamps = utils.allreduce(mce_fsamps, comm)
 		mce_params = utils.allreduce(mce_params, comm)
 	ofile  = prefix + "specs%03d.hdf" % chunk
@@ -154,6 +161,7 @@ for chunk in range(nchunk):
 		dzooms = dzooms[good]
 		tspecs = tspecs[:,good]
 		tcorrs = tcorrs[good]
+		nhits  = nhits[good]
 		chunk_ids = ids[good+ind1]
 		print "Writing %s" % ofile
 		with h5py.File(ofile, "w") as hfile:
@@ -161,6 +169,7 @@ for chunk in range(nchunk):
 			hfile["dzooms"] = dzooms
 			hfile["tspecs"] = tspecs
 			hfile["tcorrs"] = tcorrs
+			hfile["nhits"]  = nhits
 			hfile["ids"]    = chunk_ids
 			hfile["srates"] = srates
 			hfile["mce_fsamps"] = mce_fsamps

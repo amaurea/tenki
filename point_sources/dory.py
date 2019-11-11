@@ -105,7 +105,11 @@ if args.mode == "find":
 			if args.mask:
 				mshape, mwcs = enmap.read_map_geometry(args.mask)
 				mbox  = enmap.pixbox_of(mwcs, imap.shape, imap.wcs)
-				idiv *= (1-enmap.read_map(args.mask, pixbox=mbox).preflat[0])
+				mask  = enmap.read_map(args.mask, pixbox=mbox).preflat[0] > 0
+				idiv *= 1-mask
+				# Inpaint masked area, in case it contains fourier-unfriendly values
+				imap = enmap.inpaint(imap, mask)
+				del mask
 			if "debug" in args.output: dump_prefix = args.odir + "/region_%02d_" % ri
 			else:                      dump_prefix = None
 			nsigma = args.nsigma if args.nsigma is not None else 3.5
@@ -174,7 +178,11 @@ elif args.mode == "fit":
 			if args.mask:
 				mshape, mwcs = enmap.read_map_geometry(args.mask)
 				mbox  = enmap.pixbox_of(mwcs, imap.shape, imap.wcs)
-				idiv *= (1-enmap.read_map(args.mask, pixbox=mbox).preflat[0])
+				mask  = enmap.read_map(args.mask, pixbox=mbox).preflat[0] > 0
+				idiv *= 1-mask
+				# Inpaint masked area, in case it contains fourier-unfriendly values
+				imap = enmap.inpaint(imap, mask)
+				del mask
 			if "debug" in args.output: dump_prefix = args.odir + "/region_%02d_" % ri
 			else:                      dump_prefix = None
 			imap[~np.isfinite(imap)] = 0

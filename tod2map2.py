@@ -1,3 +1,4 @@
+from __future__ import division, print_function
 import numpy as np, time, copy, argparse, os, sys, pipes, shutil, re
 from enlib import utils
 with utils.nowarn(): import h5py
@@ -84,7 +85,7 @@ parser.add_argument("--define-planets", type=str, default=None)
 args = parser.parse_args()
 
 if args.dump_config:
-	print config.to_str()
+	print(config.to_str())
 	sys.exit(0)
 
 dtype = np.float32 if config.get("map_bits") == 32 else np.float64
@@ -128,7 +129,7 @@ if comm.rank == 0:
 	with open(root + "args.txt","w") as f:
 		argstring = " ".join([pipes.quote(a) for a in sys.argv[1:]])
 		f.write(argstring + "\n")
-		print argstring
+		print(argstring)
 	with open(root + "env.txt","w") as f:
 		for k,v in os.environ.items():
 			f.write("%s: %s\n" %(k,v))
@@ -474,7 +475,7 @@ for out_ind in range(nouter):
 			patterns, mypids = scanutils.classify_scanning_patterns(active_scans, comm=comm, tol=tol)
 			L.info("Found %d scanning patterns" % len(patterns))
 			if comm.rank == 0:
-				print patterns/utils.degree
+				print(patterns/utils.degree)
 			# Define our phase maps
 			nrow, ncol = active_scans[0].dgrid
 			array_dets = np.arange(nrow*ncol)
@@ -594,15 +595,15 @@ for out_ind in range(nouter):
 			boxes = np.concatenate([phasemap.patterns, boxes], 0)
 			labels= utils.label_unique(boxes, axes=(1,2), atol=tol)
 			if comm.rank == 0:
-				print "labels"
+				print("labels")
 				for b,l in zip(boxes, labels):
-					print "%8.3f %8.3f %8.3f %5d" % (b[0,0]/utils.degree,b[0,1]/utils.degree,b[1,1]/utils.degree,l)
+					print("%8.3f %8.3f %8.3f %5d" % (b[0,0]/utils.degree,b[0,1]/utils.degree,b[1,1]/utils.degree,l))
 			pids  = utils.find(labels[:npat], labels[npat:], default=-1)
 			mypids= pids[rank==comm.rank]
 			if np.any(mypids < 0):
 				bad = np.where(mypids<0)[0]
 				for bi in bad:
-					print "Warning: No matching scanning pattern found for %s. Using pattern 0" % (myscans[bi].id)
+					print("Warning: No matching scanning pattern found for %s. Using pattern 0" % (myscans[bi].id))
 					mypids[bi] = 0
 			if param["name"] == "addphase":
 				filter = mapmaking.FilterAddPhase(myscans, phasemap, mypids, mmul=mul, tmul=tmul)
@@ -666,7 +667,7 @@ for out_ind in range(nouter):
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 		# Add to normal filters of post-noise-model filters based on parameters
 		if "postnoise" in param and int(param["postnoise"]) > 0:
-			print "postnosie", param["name"]
+			print("postnosie", param["name"])
 			filters2.append(filter)
 		else:
 			filters.append(filter)
@@ -697,7 +698,7 @@ for out_ind in range(nouter):
 			cap   = float(param["cap"])
 			filter= mapmaking.MapfilterGauss(scale, cap=cap)
 			for sparam, signal in matching_signals(param, signal_params, signals):
-				print "adding gauss filter to " + signal.name
+				print("adding gauss filter to " + signal.name)
 				signal.filters.append(filter)
 
 	# Initialize weights. Done in a hacky manner for now. This and the above needs
@@ -743,7 +744,7 @@ for out_ind in range(nouter):
 		# Null-preconditioner common for all types
 		if "prec" in param and param["prec"] == "null":
 			signal.precon = mapmaking.PreconNull()
-			print "Warning: map and cut precon must have compatible units"
+			print("Warning: map and cut precon must have compatible units")
 			continue
 		if param["type"] in ["cut","srcsamp"]:
 			signal.precon = mapmaking.PreconCut(signal, myscans)
@@ -754,7 +755,7 @@ for out_ind in range(nouter):
 			elif param["prec"] == "jacobi":
 				signal.precon = mapmaking.PreconMapBinned(prec_signal, myscans, weights, noise=False)
 			elif param["prec"] == "hit":
-				print "Warning: map and cut precon must have compatible units"
+				print("Warning: map and cut precon must have compatible units")
 				signal.precon = mapmaking.PreconMapHitcount(prec_signal, myscans)
 			elif param["prec"] == "tod":
 				signal.precon = mapmaking.PreconMapTod(prec_signal, myscans, weights)
@@ -818,7 +819,7 @@ for out_ind in range(nouter):
 				pos[:,0] += pos[:,1] * yskew * 1.0 / step[0]
 			# Go from grid indices to pixels
 			pos       = (pos*step % shape[-2:]).astype(int)
-			print pos.shape, pos.dtype
+			print(pos.shape, pos.dtype)
 			icov = mapmaking.calc_icov_map(signal, myscans, pos, weights)
 			signal.write(root, "icov", icov)
 			if comm.rank == 0:

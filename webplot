@@ -144,16 +144,3 @@ for ind in range(comm.rank, len(ifiles), comm.size):
 		qmap = pack(map, mask, nbyte=args.nbyte, quantum=args.quantum)
 		img  = Image.fromarray(qmap, mode="L")
 		img.save(ofile)
-
-		#qmap = np.round(map/args.quantum).astype(np.int32)
-		#qmap, masked = qmap[::-1], masked[::-1] # y flip to match pil y ordering
-		#omap = pack_bits_lowsign(qmap, masked)
-		#print("A %08x %08x %08x %08x"% tuple(omap[:2,19:21].reshape(-1)))
-		#omap = encode_quantization(omap, args.quantum)
-		#print("B %08x %08x %08x %08x"% tuple(omap[:2,19:21].reshape(-1)))
-		#img  = Image.fromarray(omap, mode="RGBA")
-		#img.save(ofile)
-		#im2 = Image.open(ofile)
-		#bleh = np.array(im2).view(np.uint32).reshape(omap.shape)
-		#print(bleh.shape, bleh.dtype)
-		#print("C %08x %08x %08x %08x"% tuple(bleh[:2,19:21].reshape(-1)))

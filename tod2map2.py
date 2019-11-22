@@ -384,6 +384,10 @@ def setup_extra_transforms(param):
 		extra.append(trf)
 	return extra
 
+def get_map_path(path):
+	if path.endswith(".fits"): return path
+	else: return filedb.get_patch_path(path)
+
 # UGLY HACK: Handle individual output file mode
 nouter = 1
 if args.individual:
@@ -434,23 +438,23 @@ for out_ind in range(nouter):
 			signal = mapmaking.SignalCut(active_scans, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 			signal_cut = signal
 		elif param["type"] == "map":
-			area = enmap.read_map(param["value"])
+			area = enmap.read_map(get_map_path(param["value"]))
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "fmap":
-			area = enmap.read_map(param["value"])
+			area = enmap.read_map(get_map_path(param["value"]))
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 			signal = mapmaking.SignalMapFast(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "dmap":
-			area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
+			area = dmap.read_map(get_map_path(param["value"]), bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
 			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "fdmap":
-			area = dmap.read_map(param["value"], bbox=mybbox, tshape=tshape, comm=comm)
+			area = dmap.read_map(get_map_path(param["value"]), bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
 			signal = mapmaking.SignalDmapFast(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "bmap":
-			area = enmap.read_map(param["value"])
+			area = enmap.read_map(get_map_path(param["value"]))
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
 			signal = mapmaking.SignalMapBuddies(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "scan":
@@ -469,7 +473,7 @@ for out_ind in range(nouter):
 			areas      = mapmaking.PhaseMap.zeros(patterns, array_dets, res=res, det_unit=det_unit, dtype=dtype)
 			signal     = mapmaking.SignalPhase(active_scans, areas, mypids, comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 		elif param["type"] == "noiserect":
-			ashape, awcs = enmap.read_map_geometry(param["value"])
+			ashape, awcs = enmap.read_map_geometry(get_map_path(param["value"]))
 			leftright = int(param["leftright"]) > 0
 			# Drift is in degrees per hour, but we want it per second
 			drift = float(param["drift"])/3600

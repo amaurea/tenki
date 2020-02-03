@@ -115,7 +115,7 @@ if args.mode == "find":
 			if args.prune:
 				result = dory.prune_artifacts(result)
 		except Exception as e:
-			print "Exception for task %d region %d: %s" % (comm.rank, ri, e.message)
+			print "Exception for task %d region %d: %s" % (comm.rank, ri, e.args[0])
 			raise
 		# Write region output
 		if "reg" in args.output:
@@ -153,7 +153,7 @@ if args.mode == "find":
 elif args.mode == "fit":
 	icat      = dory.read_catalog(args.icat)
 	if args.nsigma is not None:
-		icat  = icat[icat.flux[:,0] >= icat.dflux[:,0]*args.nsigma]
+		icat  = np.abs(icat[icat.flux[:,0]) >= icat.dflux[:,0]*args.nsigma]
 	if args.split:
 		npre  = len(icat)
 		icat  = dory.split_sources(icat, nimage=args.split_nimage, dist=args.split_dist*utils.arcmin, minflux=args.split_minflux/1e3)
@@ -215,7 +215,7 @@ elif args.mode == "fit":
 			if "full" in args.output:
 				reg_cats.append(reg_cat)
 		except Exception as e:
-			print "Exception for task %d region %d: %s" % (comm.rank, ri, e.message)
+			print "Exception for task %d region %d: %s" % (comm.rank, ri, e.args[0])
 			raise
 	if "full" in args.output:
 		if len(reg_cats) > 0: my_cat = np.concatenate(reg_cats)

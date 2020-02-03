@@ -30,8 +30,8 @@ for si in range(comm.rank, len(ids), comm.size):
 	try:
 		d     = data.read(entry)
 		d     = data.calibrate(d, nofft=True)
-	except (IOError, errors.DataMissing) as e:
-		print "skipping (%s)" % e.message
+	except (IOError, OSError, errors.DataMissing) as e:
+		print "skipping (%s)" % e.args[0]
 		continue
 	n     = d.tod.shape[1]
 	ft    = fft.rfft(d.tod)

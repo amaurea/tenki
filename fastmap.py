@@ -677,7 +677,7 @@ if command == "classify":
 			if d.nsamp < min_samps:
 				raise errors.DataMissing("Tod is too short")
 		except errors.DataMissing as e:
-			L.debug("Skipped %s (%s)" % (id, e.message))
+			L.debug("Skipped %s (%s)" % (id, e.args[0]))
 			continue
 		L.debug(id)
 
@@ -737,7 +737,7 @@ elif command == "build":
 		try:
 			wgeo = build_workspace_geometry(wid, d.boresight, d.point_offset, global_wcs=gwcs, site=d.site, ncomp=ncomp, dtype=dtype)
 		except WorkspaceError as e:
-			L.debug("Skipped pattern %s (%s)" % (wid, e.message))
+			L.debug("Skipped pattern %s (%s)" % (wid, e.args[0]))
 			continue
 		print "%-18s %5d %5d" % ((wid,) + tuple(wgeo.shape[-2:]))
 		tot_work = Workspace(wgeo)
@@ -754,7 +754,7 @@ elif command == "build":
 				d = d[:,::downsample]
 				d = d[:,:]
 			except errors.DataMissing as e:
-				L.debug("Skipped %s (%s)" % (id, e.message))
+				L.debug("Skipped %s (%s)" % (id, e.args[0]))
 				continue
 			L.debug("Processing %s" % id)
 			# Get the actual tod

@@ -41,7 +41,7 @@ for ind in myinds:
 		if scan.ndet == 0 or scan.nsamp == 0:
 			raise errors.DataMissing("Tod contains no valid data")
 	except errors.DataMissing as e:
-		L.debug("Skipped %s (%s)" % (str(id), e.message))
+		L.debug("Skipped %s (%s)" % (str(id), e.args[0]))
 		continue
 	scan = scan[:,::config.get("downsample")]
 	L.debug("Processing %s" % str(id))

@@ -134,7 +134,7 @@ def coadd_maps(imaps, ihits, omap, ohit, cont=False, ncomp=-1):
 		if args.verbose: print"Reading %s" % mif
 		try:
 			mi = read_map(mif, m.shape, m.wcs, ncomp=ncomp)
-		except IOError:
+		except (IOError, OSError):
 			if args.allow_missing:
 				print "Can't read %s. Skipping" % mif
 				continue

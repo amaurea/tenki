@@ -98,8 +98,8 @@ for chunk in range(nchunk):
 			d     = actdata.read(entry, fields=["array_info", "tags", "site", "mce_filter", "gain","cut","tod","boresight"])
 			d     = actdata.calibrate(d, exclude=["tod_fourier"]+(["autocut"] if not args.no_autocut else []))
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
-		except (IOError, errors.DataMissing) as e:
-			print "Skipped (%s)" % (e.message)
+		except (IOError, OSError, errors.DataMissing) as e:
+			print "Skipped (%s)" % (e.args[0])
 			continue
 		print "Processing %s" % id
 		srates[i] = d.srate

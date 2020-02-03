@@ -87,8 +87,8 @@ for si in range(comm.rank, len(ids)/comm.size*comm.size, comm.size):
 	try:
 		d = data.read(entry, fields=["gain","polangle","tconst","boresight","cut","tod"], absdets=absdets)
 		d = data.calibrate(d)
-	except (IOError,errors.DataMissing) as e:
-		print "Skipping [%s]" % e.message
+	except (IOError, OSError,errors.DataMissing) as e:
+		print "Skipping [%s]" % e.args[0]
 		output_cum(si)
 		continue
 	print "Computing pol tod"

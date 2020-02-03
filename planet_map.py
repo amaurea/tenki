@@ -96,7 +96,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			good = np.all((off > dbox[0])&(off < dbox[1]),-1)
 			d    = d.restrict(dets=d.dets[good])
 	except errors.DataMissing as e:
-		print "Skipping %s (%s)" % (id, e.message)
+		print "Skipping %s (%s)" % (id, e.args[0])
 		continue
 	print "Processing %s" % id, d.ndet, d.nsamp
 	#broaden_beam_hor(d.tod, d, 1.35*utils.arcmin*utils.fwhm, 1.57*utils.arcmin*utils.fwhm)

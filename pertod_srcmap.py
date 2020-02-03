@@ -64,7 +64,7 @@ for ti in range(comm.rank, len(tasks), comm.size):
 		scans  = [actscan.ACTScan(entry)]
 		if scans[0].nsamp == 0 or scans[0].ndet == 0: raise errors.DataMissing("no data in scan")
 	except errors.DataMissing as e:
-		print "Skipping %s: %s" % (id, e.message)
+		print "Skipping %s: %s" % (id, e.args[0])
 		continue
 	# Signals
 	signal_cut = mapmaking.SignalCut(scans, dtype=dtype, comm=tcomm)

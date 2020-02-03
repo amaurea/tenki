@@ -91,7 +91,7 @@ for chunk in range(nchunk):
 			d     = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight","apex"])
 			d     = actdata.calibrate(d, exclude=["autocut"])
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
-		except (IOError, errors.DataMissing) as e:
+		except (IOError, OSError, errors.DataMissing) as e:
 			print("Skipped (%s)" % (e))
 			continue
 		# Compute the power spectrum

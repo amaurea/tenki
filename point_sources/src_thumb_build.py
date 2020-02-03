@@ -136,7 +136,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			d = actdata.calibrate(d, exclude=["autocut"])
 		if d.ndet < 2 or d.nsamp < 1: raise errors.DataMissing("no data in tod")
 	except errors.DataMissing as e:
-		print "%s skipped: %s" % (id, e.message)
+		print "%s skipped: %s" % (id, e.args[0])
 		continue
 	tod = d.tod.astype(dtype)
 	del d.tod

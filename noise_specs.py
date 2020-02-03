@@ -48,7 +48,7 @@ for si in range(comm.rank, len(ids), comm.size):
 		d     = actdata.read(entry)
 		d     = actdata.calibrate(d)
 	except (IOError, errors.DataMissing) as e:
-		print "skipping (%s)" % e.message
+		print "skipping (%s)" % e.args[0]
 		continue
 	if args.apply_nmat:
 		d.tod = d.noise.apply(d.tod)

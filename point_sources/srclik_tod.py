@@ -55,7 +55,7 @@ try:
 	# and val has a max value of 1
 	b = np.loadtxt(args.beam)
 	beam = bunch.Bunch(profile=b[:,1], rmax=b[1,0]*len(b)*utils.degree)
-except IOError:
+except (IOError, OSError):
 	# Assume beam is gaussian
 	b = float(args.beam)*utils.arcmin*utils.fwhm
 	r    = np.linspace(0,10,1000)*b
@@ -470,7 +470,7 @@ for ind in range(comm.rank, len(filelist), comm.size):
 	try:
 		d, hit_srcs = validate_srcscan(d, srcs)
 	except errors.DataError as e:
-		L.debug("%s in %s, skipping" % (e.message, id))
+		L.debug("%s in %s, skipping" % (e.args[0], id))
 		continue
 	my_srcs = srcs[hit_srcs]
 	nsrc = len(my_srcs)

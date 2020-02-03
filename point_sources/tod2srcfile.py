@@ -50,7 +50,7 @@ if myid == 0:
 			f.write("%s\n" % id)
 	shutil.copyfile(filedb.cjoin(["root","dataset","filedb"]),  args.odir + "/filedb.txt")
 	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), args.odir + "/todinfo.txt")
-	except IOError: pass
+	except (IOError, OSError): pass
 # Set up logging
 utils.mkdir(args.odir + "/log")
 logfile   = args.odir + "/log/log%03d.txt" % myid
@@ -96,18 +96,18 @@ for ind in myinds:
 	L.info("Processing %s" % filelist[ind])
 	try:
 		d = scan.read_scan(filelist[ind])
-	except IOError:
+	except (IOError, OSError):
 		try:
 			d = actscan.ACTScan(db[filelist[ind]])
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("all samples cut")
 		except errors.DataMissing as e:
-			L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
+			L.debug("Skipped %s (%s)" % (filelist[ind], e.args[0]))
 			continue
 	try:
 		L.debug("Reading samples")
 		tod   = d.get_samples().astype(dtype)
 	except errors.DataMissing as e:
-		L.debug("Skipped %s (%s)" % (filelist[ind], e.message))
+		L.debug("Skipped %s (%s)" % (filelist[ind], e.args[0]))
 		continue
 
 	# Measure noise

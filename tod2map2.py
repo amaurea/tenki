@@ -138,7 +138,7 @@ if comm.rank == 0:
 			f.write("%s\n" % str(id))
 	shutil.copyfile(filedb.cjoin(["root","dataset","filedb"]),  root + "filedb.txt")
 	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), root + "todinfo.hdf")
-	except IOError: pass
+	except (IOError, OSError): pass
 # Set up logging
 utils.mkdir(root + "log")
 logfile   = root + "log/log%03d.txt" % comm.rank

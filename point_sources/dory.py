@@ -2,7 +2,7 @@
 # constant-covariance noise model which should make it fast but
 # suboptimal. I wrote this because I was having too much trouble
 # with nemo. The aim is to be fast and simple to implement.
-
+from __future__ import division, print_function
 import argparse, sys
 help_general = """Usage:
   dory find     imap idiv odir
@@ -96,7 +96,7 @@ if args.mode == "find":
 	for ri in range(comm.rank, len(regions), comm.size):
 		reg_fid = regions[ri]
 		reg_pad = dory.pad_region(reg_fid, args.pad)
-		print "%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1])
+		print("%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1]))
 		try:
 			# We only use T to find sources in find mode for now. P usually has much lower S/N and
 			# doesn't help much. Should add it later, though.
@@ -119,7 +119,7 @@ if args.mode == "find":
 			if args.prune:
 				result = dory.prune_artifacts(result)
 		except Exception as e:
-			print "Exception for task %d region %d: %s" % (comm.rank, ri, e.message)
+			print("Exception for task %d region %d: %s" % (comm.rank, ri, e.args[0]))
 			raise
 		# Write region output
 		if "reg" in args.output:
@@ -142,13 +142,13 @@ if args.mode == "find":
 		# FIXME: duplicate merging radius depends on beam size
 		tot_cat  = dory.merge_duplicates(tot_cat, rlim=args.rlim*utils.arcmin)
 		if comm.rank == 0:
-			print "Writing catalogue"
+			print("Writing catalogue")
 			dory.write_catalog_fits(args.odir + "/cat.fits", tot_cat)
 			dory.write_catalog_txt(args.odir + "/cat.txt", tot_cat)
 		# Then build the full maps
 		if "maps" in args.output:
 			for name in map_keys:
-				if comm.rank == 0: print "Writing %s" % name
+				if comm.rank == 0: print("Writing %s" % name)
 				merged = dory.merge_maps_onto([result[name] for result in results], shape, wcs, comm,
 						root=0, crop=args.apod+args.apod_margin)
 				if comm.rank == 0: enmap.write_map(args.odir + "/%s.fits" % name, merged)
@@ -161,7 +161,7 @@ elif args.mode == "fit":
 	if args.split:
 		npre  = len(icat)
 		icat  = dory.split_sources(icat, nimage=args.split_nimage, dist=args.split_dist*utils.arcmin, minflux=args.split_minflux/1e3)
-		print "Added %d extra images around %d sources > %f mJy" % (len(icat)-npre, (len(icat)-npre)/args.split_nimage, args.split_minflux)
+		print("Added %d extra images around %d sources > %f mJy" % (len(icat)-npre, (len(icat)-npre)//args.split_nimage, args.split_minflux))
 	beam_prof = dory.get_beam_profile(beam)
 	barea     = dory.calc_beam_profile_area(beam_prof)
 	reg_cats  = []
@@ -170,7 +170,7 @@ elif args.mode == "fit":
 	for ri in range(comm.rank, len(regions), comm.size):
 		reg_fid = regions[ri]
 		reg_pad = dory.pad_region(reg_fid, args.pad, fft=True)
-		print "%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1])
+		print("%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1]))
 		try:
 			# We support polarization here, but treat each component independently
 			imap   = enmap.read_map(args.imap, pixbox=reg_pad).preflat[:args.ncomp]
@@ -223,7 +223,7 @@ elif args.mode == "fit":
 			if "full" in args.output:
 				reg_cats.append(reg_cat)
 		except Exception as e:
-			print "Exception for task %d region %d: %s" % (comm.rank, ri, e.message)
+			print("Exception for task %d region %d: %s" % (comm.rank, ri, e.args[0]))
 			raise
 	if "full" in args.output:
 		if len(reg_cats) > 0: my_cat = np.concatenate(reg_cats)
@@ -235,7 +235,7 @@ elif args.mode == "fit":
 		# Sort by S/N catalog order
 		tot_cat = tot_cat[np.argsort(tot_cat.amp[:,0]/tot_cat.damp[:,0])[::-1]]
 		if comm.rank == 0:
-			print "Writing catalogue"
+			print("Writing catalogue")
 			dory.write_catalog_fits(args.odir + "/cat.fits", tot_cat)
 			dory.write_catalog_txt (args.odir + "/cat.txt",  tot_cat)
 elif args.mode == "subtract":
@@ -255,7 +255,7 @@ elif args.mode == "subtract":
 	for ri in range(comm.rank, len(regions), comm.size):
 		reg_fid = regions[ri]
 		reg_pad = dory.pad_region(reg_fid, args.pad)
-		print "%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1])
+		print("%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1]))
 		map    = enmap.read_map(args.imap, pixbox=reg_pad)
 		map    = work_around_stupid_mpi4py_bug(map)
 		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True,verbose=args.verbose)
@@ -263,16 +263,16 @@ elif args.mode == "subtract":
 		omaps.append(map-model)
 		if args.omodel: models.append(model)
 		del model, map
-	if comm.rank == 0: print "Merging map"
+	if comm.rank == 0: print("Merging map")
 	omap  = dory.merge_maps_onto(omaps, shape, wcs, comm, root=0, crop=args.pad, dtype=dtype)
 	del omaps
-	if comm.rank == 0: print "Writing map"
+	if comm.rank == 0: print("Writing map")
 	if comm.rank == 0: enmap.write_map(args.omap, omap)
 	del omap
 	if args.omodel:
-		if comm.rank == 0: print "Merging model"
+		if comm.rank == 0: print("Merging model")
 		model = dory.merge_maps_onto(models, shape, wcs, comm, root=0, crop=args.pad, dtype=dtype)
 		del models
-		if comm.rank == 0: print "Writing model"
+		if comm.rank == 0: print("Writing model")
 		if comm.rank == 0: enmap.write_map(args.omodel, model)
 		del model

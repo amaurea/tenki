@@ -662,7 +662,7 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 	try:
 		sdata = read_sdata(ifile)
 	except Exception as e:
-		sys.stderr.write("Exception for %s: %s\n" % (ifile, e.message))
+		sys.stderr.write("Exception for %s: %s\n" % (ifile, e.args[0]))
 		continue
 
 	# Eliminate invalid data
@@ -775,7 +775,7 @@ for ind in range(comm.rank, len(args.ifiles), comm.size):
 				print "Unknown fit method '%s'. Aborting." % (args.method)
 				sys.exit(1)
 		except Exception as e:
-			print "exception", ifile, e.message
+			print "exception", ifile, e.args[0]
 			continue
 
 		# Output summary

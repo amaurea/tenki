@@ -152,5 +152,5 @@ for ind in range(comm.rank, nfile, comm.size):
 			with printer.time("write %s" % omapfile, 1):
 				enmap.write_map(omapfile, omap)
 	except (IOError, TypeError) as e:
-		print "Error projecting %s on %s to %s : %s. Skipping" % (imapfile, templatefile, omapfile, e.message)
+		print "Error projecting %s on %s to %s : %s. Skipping" % (imapfile, templatefile, omapfile, e.args[0])
 		continue

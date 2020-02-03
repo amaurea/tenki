@@ -202,7 +202,7 @@ if bounds is None:
 			output_tile(prefix, [y,x], info)
 		#except (np.linalg.LinAlgError, MemoryError) as e:
 		except Exception as e:
-			print "%3d error while processing %3d %3d: '%s'. Skipping" % (comm.rank, y, x, e.message)
+			print "%3d error while processing %3d %3d: '%s'. Skipping" % (comm.rank, y, x, e.args[0])
 			continue
 		t2   = time.time()
 		if verbosity >= 1:

@@ -48,7 +48,7 @@ for ind in range(comm.rank, nlabel, comm.size):
 		d = actdata.read(entries)
 		d = actdata.calibrate(d, exclude=["autocut"])
 	except errors.DataMissing as e:
-		print "Skipping %s: %s" % (id,e.message)
+		print "Skipping %s: %s" % (id,e.args[0])
 		continue
 	tod = d.tod.astype(dtype)
 	del d.tod

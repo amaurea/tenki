@@ -44,8 +44,8 @@ for si in range(comm.rank, ntod, comm.size):
 			d     = actdata.read(entry, fields=["gain","tconst","cut","tod","boresight","hwp"])
 			d     = actdata.calibrate(d, exclude=["tod_fourier","autocut"])
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
-		except (IOError, errors.DataMissing) as e:
-			print "Skipped (%s)" % (e.message)
+		except (IOError, OSError, errors.DataMissing) as e:
+			print "Skipped (%s)" % (e.args[0])
 			continue
 		print "Read %s" % id
 		# Filter the HWP signal
@@ -85,7 +85,7 @@ for si in range(comm.rank, ntod, comm.size):
 		med_sens = np.median(sens, 0)
 		cuts[si,d.dets] = ((ratio>rate[0])&(ratio<rate[1])&(np.all(sens<med_sens[None,:]*args.max_sens,1)))+1
 	except Exception as e:
-		print "Unexpected error " + id + " " + e.message + " skipping"
+		print "Unexpected error " + id + " " + e.args[0] + " skipping"
 
 print "Reducing"
 # Reduce everything

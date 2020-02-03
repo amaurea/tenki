@@ -36,7 +36,7 @@ def read_maps(fmt, n, ntot=4):
 		if maps.ndim == ntot-1: maps = en.enmap([maps]*n,maps.wcs)
 		if maps.ndim != ntot: raise ValueError("Map %s must have %d dimensions" % (fmt,ntot))
 		return maps
-	except IOError:
+	except (IOError, OSError):
 		maps = [en.read_map(fmt % i) for i in range(n)]
 		maps = en.ndmap(maps, maps[0].wcs)
 		if maps.ndim != ntot: maps = maps.reshape(maps.shape[:-2]+(1,)*(maps.ndim-ntot)+maps.shape[-2:])
@@ -384,7 +384,7 @@ for i in range(myid, len(groups), nproc):
 			lens = [len(np.loadtxt(args.odir + "/samps%03d.txt" % j)) for j in group]
 			if np.min(lens) >= args.nsamp:
 				continue
-		except IOError: pass
+		except (IOError, OSError): pass
 	print "%5d/%d %3d:" % (i+1, len(groups), myid),
 	print (" %3d"*len(group)) % tuple(group)
 	pos0  = np.array([poss[j] for j in group])

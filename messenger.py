@@ -92,7 +92,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			scan.pmap.backward(tod, cg_rhs)
 			cg_rjunk.append(tmp)
 	except errors.DataMissing as e:
-		print "Skipping %s (%s)" % (id, e.message)
+		print "Skipping %s (%s)" % (id, e.args[0])
 		continue
 	print "Read %s" % id
 	scans.append(scan)

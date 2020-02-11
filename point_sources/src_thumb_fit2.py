@@ -323,7 +323,7 @@ for ind in range(comm.rank, len(ifiles), comm.size):
 		thumb_data = read_thumb_data(ifile)
 		lik = Likelihood(thumb_data, beam, dr, prior=args.prior, verbose=verbosity>0)
 	except Exception as e:
-		sys.stderr.write("Exception for %s: %s\n" % (ifile, e.args[0]))
+		sys.stderr.write("Exception for %s: %s\n" % (ifile, str(e)))
 		continue
 
 	print "Processing %s" % thumb_data.id

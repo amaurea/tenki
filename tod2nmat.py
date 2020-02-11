@@ -94,7 +94,7 @@ for i in myinds:
 		t = np.array(t)
 		dt= t[1:]-t[:-1]
 	except (errors.DataMissing, ValueError, errors.ModelError, AssertionError, np.linalg.LinAlgError) as e:
-		print "%3d/%d %25s skip (%s)" % (i+1,n,id, e.args[0])
+		print "%3d/%d %25s skip (%s)" % (i+1,n,id, str(e))
 		#print entry
 		#raise
 		continue

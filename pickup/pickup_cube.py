@@ -69,7 +69,7 @@ for ind in range(comm_world.rank, len(ids), comm_world.size):
 		d = actdata.calibrate(d, exclude=["autocut"])
 		if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("no data")
 	except errors.DataMissing as e:
-		L.debug("Skipped %s (%s)" % (ids[ind], e.args[0]))
+		L.debug("Skipped %s (%s)" % (ids[ind], str(e)))
 		continue
 	# Reorder from az,el to el,az
 	boxes[ind] = [np.min(d.boresight[2:0:-1],1),np.max(d.boresight[2:0:-1],1)]
@@ -124,7 +124,7 @@ for pid, gind, group in tasks[comm_group.rank::comm_group.size]:
 			scan = scan[:,::config.get("downsample")]
 			scans.append(scan)
 		except errors.DataMissing as e:
-			L.debug("Skipped %s (%s)" % (id, e.args[0]))
+			L.debug("Skipped %s (%s)" % (id, str(e)))
 			continue
 	# Count how many scans we actually managed to read
 	nscan = comm_world.allreduce(len(scans))

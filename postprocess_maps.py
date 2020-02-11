@@ -1,3 +1,4 @@
+from __future__ import print_function, division
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("idir")
@@ -21,7 +22,7 @@ for fname in glob.glob(args.idir + "/*map????.fits"):
 	fname = os.path.basename(fname)
 	m = re.search(r"^(.*)_(\d+)way_(\d+)_sky_map(\d\d\d\d).fits", fname)
 	if not m:
-		if comm.rank == 0: print "Skipping unrecognized map name: " + fname
+		if comm.rank == 0: print("Skipping unrecognized map name: " + fname)
 		continue
 	prefix = m.group(1)
 	nway   = int(m.group(2))
@@ -55,10 +56,10 @@ for key in sorted(datasets.keys()):
 	# Do we have any zeros at this point? If so, warn and skip the dataset
 	nzero = sum([sub.it == 0 for sub in d])
 	if nzero > 0:
-		if comm.rank == 0: print "%-*s only has %d/%d splits. Skipping" % (nchar, key, len(d)-nzero, len(d))
+		if comm.rank == 0: print("%-*s only has %d/%d splits. Skipping" % (nchar, key, len(d)-nzero, len(d)))
 		del datasets[key]
 	if comm.rank == 0:
-		print "%-*s using" % (nchar, key) + " %4d"*len(d) % tuple([sub.it for sub in d])
+		print("%-*s using" % (nchar, key) + " %4d"*len(d) % tuple([sub.it for sub in d]))
 
 # Check if we follow the standard format
 onames = {}
@@ -66,7 +67,7 @@ for key in datasets.keys():
 	m = re.match(r"s\d\d_\w+_pa\d_f\d\d\d_(no)?hwp_(day|night|daynight)\b.*", key)
 	if not m:
 		if comm.rank == 0:
-			print "%s does not follow the standard name format" % key
+			print("%s does not follow the standard name format" % key)
 		if args.allow_nonstandard: onames[key] = key
 		else: del datasets[key]
 	else:
@@ -84,7 +85,7 @@ def read_map(ifile, slice=None):
 
 def copy_mono(ifile, ofile, slice=None):
 	if args.cont and os.path.exists(ofile): return
-	if verbose: print "%3d copy_mono %s" % (comm.rank, ofile)
+	if verbose: print("%3d copy_mono %s" % (comm.rank, ofile))
 	if args.dry: return
 	tfile = ofile + ".tmp"
 	map   = read_map(ifile, slice=slice)
@@ -93,7 +94,7 @@ def copy_mono(ifile, ofile, slice=None):
 
 def add_mono(ifiles, ofile, slice=None, factors=None):
 	if args.cont and os.path.exists(ofile): return
-	if verbose: print "%3d add_mono %s" % (comm.rank, ofile)
+	if verbose: print("%3d add_mono %s" % (comm.rank, ofile))
 	if args.dry: return
 	tfile = ofile + ".tmp"
 	if factors is None:
@@ -109,7 +110,7 @@ def add_mono(ifiles, ofile, slice=None, factors=None):
 
 def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
 	if args.cont and os.path.exists(omapfile) and (odivfile is None or os.path.exists(odivfile)): return
-	if verbose: print "%3d coadd_mono %s" % (comm.rank, omapfile)
+	if verbose: print("%3d coadd_mono %s" % (comm.rank, omapfile))
 	if args.dry: return
 	omap, odiv = None, None
 	tmapfile = omapfile + ".tmp"
@@ -129,7 +130,7 @@ def coadd_mono(imapfiles, idivfiles, omapfile, odivfile=None):
 
 def combine_srcmaps(imapfiles, isrcmapfiles, idivfiles, isrcdivfiles, omapfile, odivfile=None, isrcfiles=None):
 	if args.cont and os.path.exists(omapfile) and (odivfile is None or os.path.exists(odivfile)): return
-	if verbose: print "%3d combine_srcmaps %s" % (comm.rank, omapfile)
+	if verbose: print("%3d combine_srcmaps %s" % (comm.rank, omapfile))
 	if args.dry: return
 	omap, odiv = None, None
 	tmapfile = omapfile + ".tmp"
@@ -161,7 +162,7 @@ def combine_srcmaps(imapfiles, isrcmapfiles, idivfiles, isrcdivfiles, omapfile, 
 
 def copy_plain(ifile, ofile):
 	if args.cont and os.path.exists(ofile): return
-	if verbose: print "%3d copy_plain %s" % (comm.rank, ofile)
+	if verbose: print("%3d copy_plain %s" % (comm.rank, ofile))
 	if args.dry: return
 	tfile = ofile + ".tmp"
 	shutil.copyfile(ifile, tfile)
@@ -169,7 +170,7 @@ def copy_plain(ifile, ofile):
 
 def cat_files(ifiles, ofile):
 	if args.cont and os.path.exists(ofile): return
-	if verbose: print "%3d cat %s" % (comm.rank, ofile)
+	if verbose: print("%3d cat %s" % (comm.rank, ofile))
 	if args.dry: return
 	with open(ofile, "w") as ofh:
 		for ifile in ifiles:
@@ -178,7 +179,7 @@ def cat_files(ifiles, ofile):
 
 def link(ifile, ofile):
 	if args.cont and os.path.exists(ofile): return
-	if verbose: print "%d link %s" % (comm.rank, ofile)
+	if verbose: print("%d link %s" % (comm.rank, ofile))
 	os.symlink(ifile, ofile)
 
 queue = []

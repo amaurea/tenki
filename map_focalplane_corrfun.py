@@ -74,7 +74,7 @@ for ind in range(comm.rank, len(groups), comm.size):
 			d = to_pairdiff(d, pairs)
 		if d.ndet < 2 or d.nsamp < 2: raise errors.DataMissing("No data in tod")
 	except (errors.DataMissing, AssertionError, IndexError) as e:
-		print "Skipping %s (%s)" % (str(ids), e.args[0])
+		print "Skipping %s (%s)" % (str(ids), str(e))
 		continue
 	print "Processing %s: %4d %6d" % (str(ids), d.ndet, d.nsamp)
 	tod  = d.tod

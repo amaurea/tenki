@@ -103,7 +103,7 @@ for chunk in range(nchunk):
 			d     = actdata.calibrate(d, exclude=(["autocut"] if not args.no_autocut else []))
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
 		except (IOError, OSError, errors.DataMissing) as e:
-			print "Skipped (%s)" % (e.args[0])
+			print "Skipped (%s)" % (str(e))
 			continue
 		print "Processing %s" % id
 		srates[i] = d.srate

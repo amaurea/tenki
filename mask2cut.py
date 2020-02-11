@@ -34,7 +34,7 @@ for ind in myinds:
 		d = actdata.read(entry, ["point_offsets","boresight","site","array_info"])
 		d = actdata.calibrate(d, exclude=["autocut"])
 	except (errors.DataMissing, AttributeError) as e:
-		print "Skipping %s (%s)" % (id, e.args[0])
+		print "Skipping %s (%s)" % (id, str(e))
 		continue
 	# Build a projector between samples and mask. This
 	# requires us to massage d into scan form. It's getting

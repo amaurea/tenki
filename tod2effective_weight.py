@@ -45,7 +45,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		if d.ndet == 0 or d.nsamp == 0:
 			raise errors.DataMissing("Tod contains no valid data")
 	except errors.DataMissing as e:
-		L.debug("Skipped %s (%s)" % (str(id), e.args[0]))
+		L.debug("Skipped %s (%s)" % (str(id), str(e)))
 		continue
 	L.debug("Read %s" % id)
 	d = d[:,::config.get("downsample")]

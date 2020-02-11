@@ -470,7 +470,7 @@ for ind in range(comm.rank, len(filelist), comm.size):
 	try:
 		d, hit_srcs = validate_srcscan(d, srcs)
 	except errors.DataError as e:
-		L.debug("%s in %s, skipping" % (e.args[0], id))
+		L.debug("%s in %s, skipping" % (str(e), id))
 		continue
 	my_srcs = srcs[hit_srcs]
 	nsrc = len(my_srcs)

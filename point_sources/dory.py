@@ -119,7 +119,7 @@ if args.mode == "find":
 			if args.prune:
 				result = dory.prune_artifacts(result)
 		except Exception as e:
-			print "Exception for task %d region %d: %s" % (comm.rank, ri, e.args[0])
+			print "Exception for task %d region %d: %s" % (comm.rank, ri, str(e))
 			raise
 		# Write region output
 		if "reg" in args.output:
@@ -223,7 +223,7 @@ elif args.mode == "fit":
 			if "full" in args.output:
 				reg_cats.append(reg_cat)
 		except Exception as e:
-			print("Exception for task %d region %d: %s" % (comm.rank, ri, e.args[0]))
+			print("Exception for task %d region %d: %s" % (comm.rank, ri, str(e)))
 			raise
 	if "full" in args.output:
 		if len(reg_cats) > 0: my_cat = np.concatenate(reg_cats)

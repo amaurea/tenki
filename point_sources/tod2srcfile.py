@@ -101,13 +101,13 @@ for ind in myinds:
 			d = actscan.ACTScan(db[filelist[ind]])
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("all samples cut")
 		except errors.DataMissing as e:
-			L.debug("Skipped %s (%s)" % (filelist[ind], e.args[0]))
+			L.debug("Skipped %s (%s)" % (filelist[ind], str(e)))
 			continue
 	try:
 		L.debug("Reading samples")
 		tod   = d.get_samples().astype(dtype)
 	except errors.DataMissing as e:
-		L.debug("Skipped %s (%s)" % (filelist[ind], e.args[0]))
+		L.debug("Skipped %s (%s)" % (filelist[ind], str(e)))
 		continue
 
 	# Measure noise

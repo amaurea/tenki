@@ -27,7 +27,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		d = data.read(entry, fields=["gain","cut","point_offsets","boresight","site"])
 		d = data.calibrate(d)
 	except (zipfile.BadZipfile, errors.DataMissing) as e:
-		print "#%s error: %s" % (id,e.args[0])
+		print "#%s error: %s" % (id,str(e))
 		#print "%s %8.3f %7.3f %8.3f %7.3f %s" % (id, np.nan, np.nan, np.nan, np.nan, "nodata")
 		continue
 

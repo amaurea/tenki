@@ -1,3 +1,4 @@
+from __future__ import division, print_function
 import numpy as np, argparse, os
 from enlib import enmap, utils, powspec, jointmap, bunch, mpi
 from scipy import interpolate
@@ -112,9 +113,9 @@ if bounds is None:
 		utils.mkdir(os.path.dirname(ofile_map))
 		utils.mkdir(os.path.dirname(ofile_div))
 		if args.cont and os.path.isfile(ofile_map):
-			print "%3d skipping %3d %3d (already done)" % (comm.rank, y, x)
+			print("%3d skipping %3d %3d (already done)" % (comm.rank, y, x))
 			continue
-		print "%3d processing %3d %3d" % (comm.rank, y, x)
+		print("%3d processing %3d %3d" % (comm.rank, y, x))
 		tpos = np.array(tyx[i])
 		pbox = np.array([tpos*tshape,np.minimum((tpos+1)*tshape,shape[-2:])])
 		box  = enmap.pix2sky(shape, wcs, pbox.T).T
@@ -125,7 +126,7 @@ if bounds is None:
 else:
 	# Single arbitrary tile
 	if not overlaps_any(bounds, boxes):
-		print "No data in selected region"
+		print("No data in selected region")
 	else:
 		res = get_coadded_tile(mapinfo, bounds, obeam=obeam, ncomp=args.ncomp, dump_dir=args.odir, verbose=args.verbose)
 		enmap.write_map(args.odir + "/map.fits", res.map)

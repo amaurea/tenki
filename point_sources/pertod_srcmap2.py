@@ -186,7 +186,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		d.beam = beam
 		if d.ndet < 2 or d.nsamp < 2: raise errors.DataMissing("no data in tod")
 	except errors.DataMissing as e:
-		print "Skipping %s (%s)" % (id, comm.rank, e.args[0])
+		print "Skipping %s (%s)" % (id, comm.rank, str(e))
 		# Make a dummy output file so we can skip this tod in the future
 		with open("%s%s_empty.txt" % (prefix, bid),"w"): pass
 		continue
@@ -253,7 +253,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			elif args.model == "constrained":
 				model = calc_model_constrained(tod, src_cut, d.srate, verbose=True)
 	except np.linalg.LinAlgError as e:
-		print "%3d %s Error building noide model: %s" % (comm.rank, id, e.args[0])
+		print "%3d %s Error building noide model: %s" % (comm.rank, id, str(e))
 		continue
 	with bench.mark("atm subtract"):
 		tod -= model

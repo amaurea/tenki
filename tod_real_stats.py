@@ -62,7 +62,7 @@ for chunk in range(nchunk):
 			d = actdata.read(entry, fields=["tod"])
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
 		except (IOError, OSError, errors.DataMissing) as e:
-			print "Skipped %s [%3d/%d] (%s)" % (id, i+1, ind2-ind1, e.args[0])
+			print "Skipped %s [%3d/%d] (%s)" % (id, i+1, ind2-ind1, str(e))
 			continue
 		print "Processing %s [%3d/%d]" % (id, i+1, ind2-ind1)
 		# Get rid of non-data bits

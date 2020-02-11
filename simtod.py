@@ -40,7 +40,7 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 			try:
 				real_scans.append(actscan.ACTScan(db[id]))
 			except errors.DataMissing as e:
-				L.debug("Skipped %s (%s)" % (id, e.args[0]))
+				L.debug("Skipped %s (%s)" % (id, str(e)))
 	# Dets
 	L.debug("dets")
 	sim_dets = []

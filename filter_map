@@ -1,4 +1,5 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python
+from __future__ import division, print_function
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("imap")
@@ -43,7 +44,7 @@ w = (1/(1+w0/w)).astype(m.dtype)
 wm = m*w
 del samps
 
-print np.std(m), np.std(w), np.std(wm)
+print(np.std(m), np.std(w), np.std(wm))
 
 # Pad to fft-friendly size
 def filter_gauss(l, lsigma):

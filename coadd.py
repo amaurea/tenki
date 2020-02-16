@@ -1,3 +1,4 @@
+from __future__ import division, print_function
 import numpy as np, argparse, os
 from enlib import enmap, array_ops, utils, mpi
 from scipy import ndimage
@@ -13,12 +14,13 @@ parser.add_argument("--fslice",        type=str, default="")
 parser.add_argument("-c", "--cont",          action="store_true")
 parser.add_argument("-M", "--allow-missing", action="store_true")
 parser.add_argument("-T", "--transpose",     action="store_true")
+parser.add_argument("-W", "--warn",          action="store_true")
 parser.add_argument("-N", "--ncomp",   type=int, default=-1)
 args = parser.parse_args()
 
 comm = mpi.COMM_WORLD
 
-n = len(args.imaps_and_hits)/2
+n = len(args.imaps_and_hits)//2
 if not args.transpose:
 	imaps = args.imaps_and_hits[:n]
 	ihits = args.imaps_and_hits[n:]
@@ -121,27 +123,31 @@ def coadd_maps(imaps, ihits, omap, ohit, cont=False, ncomp=-1):
 	# The first map will be used as a reference. All subsequent maps
 	# must fit in its boundaries.
 	if cont and os.path.exists(omap): return
-	if args.verbose: print "Reading %s" % imaps[0]
+	if args.verbose: print("Reading %s" % imaps[0])
 	if ncomp < 0:
 		shape, wcs = enmap.read_map_geometry(imaps[0])
 		ncomp = 0 if len(shape) == 2 else shape[0]
 	m = read_map(imaps[0], ncomp=ncomp)
-	if args.verbose: print"Reading %s" % ihits[0]
+	if args.verbose: print("Reading %s" % ihits[0])
 	w = apply_edge(apply_apod(apply_trim(read_div(ihits[0], ncomp=ncomp))))
+	if args.warn and np.any(w.preflat[0]<0):
+		print("Negative weight in %s" % ihits[0])
 	wm = mul(w,m)
 
-	for mif,wif in zip(imaps[1:],ihits[1:]):
-		if args.verbose: print"Reading %s" % mif
+	for i, (mif,wif) in enumerate(zip(imaps[1:],ihits[1:])):
+		if args.verbose: print("Reading %s" % mif)
 		try:
 			mi = read_map(mif, m.shape, m.wcs, ncomp=ncomp)
 		except (IOError, OSError):
 			if args.allow_missing:
-				print "Can't read %s. Skipping" % mif
+				print("Can't read %s. Skipping" % mif)
 				continue
 			else: raise
-		if args.verbose: print"Reading %s" % wif
+		if args.verbose: print("Reading %s" % wif)
 
 		wi = apply_edge(apply_apod(apply_trim(read_div(wif, m.shape, m.wcs, ncomp=ncomp))))
+		if args.warn and np.any(wi.preflat[0]<0):
+			print("Negative weight in %s" % ihits[i+1])
 		## We may need to reproject maps
 		#if mi.shape != m.shape or str(mi.wcs.to_header()) != str(m.wcs.to_header()):
 		#	mi = enmap.extract(mi, m.shape, m.wcs)
@@ -149,11 +155,11 @@ def coadd_maps(imaps, ihits, omap, ohit, cont=False, ncomp=-1):
 		w  = add(w,wi)
 		wm = add(wm,mul(wi,mi))
 
-	if args.verbose: print"Solving"
+	if args.verbose: print("Solving")
 	m = solve(w,wm)
-	if args.verbose: print"Writing %s" % omap
+	if args.verbose: print("Writing %s" % omap)
 	enmap.write_map(omap, m)
-	if args.verbose: print"Writing %s" % ohit
+	if args.verbose: print("Writing %s" % ohit)
 	enmap.write_map(ohit, w)
 
 # Two cases: Normal enmaps or dmaps
@@ -169,6 +175,6 @@ else:
 	for tilename in tilenames[comm.rank::comm.size]:
 		timaps = ["%s/%s" % (imap,tilename) for imap in imaps]
 		tihits = ["%s/%s" % (ihit,tilename) for ihit in ihits]
-		print "%3d %s" % (comm.rank, tilename)
+		print("%3d %s" % (comm.rank, tilename))
 		coadd_maps(timaps, tihits, args.omap + "/" + tilename, args.ohit + "/" + tilename, cont=args.cont, ncomp=args.ncomp)
-	if args.verbose: print "Done"
+	if args.verbose: print("Done")

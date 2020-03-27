@@ -41,6 +41,7 @@ parser.add_argument("-m", "--mask",    type=str,   default=None, help="The mask 
 parser.add_argument("-b", "--beam",    type=str,   default="1.4",help="The beam of the map. Should be a 1d harmonic transfer function.")
 parser.add_argument("-f", "--freq",    type=float, default=150,  help="The observing frequency in GHz. Only matters for flux calculations.")
 parser.add_argument("-R", "--regions", type=str,   default=None, help="Which regions to consider to have comogeneous noise correlations. 'full': Use whole map, 'tile:npix': split map into npix*npix sized tiles. Or specify the file name to a ds9 region file containing boxes.")
+parser.add_argument(      "--rsplit",  type=int,   default=0,  help="Split regions into sub-regions of this size")
 parser.add_argument("-a", "--apod",    type=int,   default=30, help="The width of the apodization region, in pixels.")
 parser.add_argument("--apod-margin",   type=int,   default=10, help="How far away from the apod region a source should be to be valid.")
 parser.add_argument("-s", "--nsigma",  type=float, default=None, help="The number a sigma a source must be to be included. Defaults to 3.5 when finding sources and None when fitting and subtracting")
@@ -66,6 +67,8 @@ comm       = mpi.COMM_WORLD
 shape, wcs = enmap.read_map_geometry(args.imap)
 beam       = dory.get_beam(args.beam)
 regions    = dory.get_regions(args.regions, shape, wcs)
+if args.rsplit:
+	regions = dory.split_regions(regions, args.rsplit)
 
 def divdiag(div):
 	if   div.ndim == 2: return div.preflat

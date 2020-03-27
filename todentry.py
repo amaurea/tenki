@@ -1,3 +1,4 @@
+from __future__ import division, print_function
 import os
 from enact import filedb
 from enlib import config
@@ -7,7 +8,7 @@ args = parser.parse_args()
 filedb.init()
 ids = filedb.scans[args.query]
 if len(ids) == 0:
-	print "No matching tods!"
+	print("No matching tods!")
 else:
 	entry = filedb.data[ids[0]]
 	names = sorted(entry.keys())
@@ -15,9 +16,8 @@ else:
 		vals = entry[name]
 		if not isinstance(vals, list): vals = [vals]
 		if len(vals) > 1:
-			print name
+			print(name)
 			for val in vals:
-				print "  " + val
+				print("  " + val)
 		else:
-			print name + "  " + str(vals[0])
-	#print filedb.data.query(ids[0], multi=True)
+			print(name + "  " + str(vals[0]))

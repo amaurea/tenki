@@ -9,9 +9,9 @@ parser.add_argument("-m", "--mode",  type=str,   default="constant")
 parser.add_argument("-M", "--mem",   type=float, default=1e8)
 args = parser.parse_args()
 
-imap  = enmap.read_map(args.imap)
 shape, wcs = enmap.read_map_geometry(args.template)
-omap  = enmap.zeros(shape, wcs, imap.dtype)
+imap       = enmap.read_map(args.imap, geometry=(shape, wcs))
+omap       = enmap.zeros(shape, wcs, imap.dtype)
 
 blockpix = np.product(shape[:-2])*shape[-1]
 bsize = max(1,utils.nint(args.mem/(blockpix*imap.dtype.itemsize)))

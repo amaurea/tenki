@@ -1,3 +1,4 @@
+from __future__ import division, print_function
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("imaps", nargs="+")
@@ -20,10 +21,10 @@ def nonan(a):
 	res[np.isnan(res)] = 0
 	return res
 def add_maps(imaps, omap):
-	if args.verbose: print "Reading %s" % imaps[0]
+	if args.verbose: print("Reading %s" % imaps[0])
 	m = nonan(enmap.read_map(imaps[0]))*scales[0]
 	for scale, mif in zip(scales[1:],imaps[1:]):
-		if args.verbose: print "Reading %s" % mif
+		if args.verbose: print("Reading %s" % mif)
 		m2 = nonan(enmap.read_map(mif, geometry=(m.shape,m.wcs)))*scale
 		n  = min(len(m.preflat),len(m2.preflat))
 		m.preflat[:n] += m2.preflat[:n]
@@ -45,6 +46,6 @@ else:
 	utils.mkdir(args.omap)
 	for tilename in tilenames[comm.rank::comm.size]:
 		timaps = ["%s/%s" % (imap,tilename) for imap in args.imaps]
-		print "%3d %s" % (comm.rank, tilename)
+		print("%3d %s" % (comm.rank, tilename))
 		add_maps(timaps, args.omap + "/" + tilename)
-	if args.verbose: print"Done"
+	if args.verbose: print("Done")

@@ -3,7 +3,6 @@ from enlib import retile, mpi
 parser = argparse.ArgumentParser()
 parser.add_argument("idir")
 parser.add_argument("odir")
-parser.add_argument("-m", "--monolithic", action="store_true")
 parser.add_argument("--slice", type=str, default=None)
 parser.add_argument("--nompi", action="store_true")
 args = parser.parse_args()

@@ -6,6 +6,8 @@ parser.add_argument("-b", "--beam", type=str,   default="1.4")
 parser.add_argument(      "--lknee",type=float, default=3000)
 parser.add_argument(      "--alpha",type=float, default=-3)
 parser.add_argument("-v", "--verbose", action="store_true")
+parser.add_argument("-a", "--apodize", type=int, default=0)
+parser.add_argument("-m", "--mask", type=float, default=None)
 args = parser.parse_args()
 import numpy as np, os, glob
 from pixell import enmap, utils, mpi
@@ -48,6 +50,9 @@ for ind in range(comm.rank, len(ifiles), comm.size):
 	if args.verbose: print(ifile)
 	ofile = args.odir + "/" + ifile
 	imap  = enmap.read_map(ifile)
+	if args.mask is not None: mask = imap == args.mask
+	if args.apodize:
+		imap = imap.apod(args.apodize)
 	# We will apply a semi-matched-filter to T
 	l     = np.maximum(1,imap.modlmap())
 	beam2d= enmap.samewcs(np.interp(l, np.arange(len(beam1d)), beam1d), imap)
@@ -55,5 +60,9 @@ for ind in range(comm.rank, len(ifiles), comm.size):
 	fmap  = enmap.map2harm(imap, iau=True)
 	fmap[0] *= matched_filter
 	omap  = enmap.ifft(fmap).real
+	if args.mask is not None:
+		omap[mask] = 0
+		del mask
 	utils.mkdir(os.path.dirname(ofile))
 	enmap.write_map(ofile, omap)
+	del omap

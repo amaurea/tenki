@@ -1,6 +1,8 @@
+from __future__ import division, print_function
 import numpy as np, os, h5py
 from enlib import enmap, pmat, utils, scan, cg, bench, nmat, config, mpi, errors, array_ops
 from enact import actdata, filedb, actscan
+from pixell import fft
 parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
 parser.add_argument("area")
 parser.add_argument("sel")
@@ -11,6 +13,10 @@ parser.add_argument(      "--ndet",  type=int, default=None)
 parser.add_argument("-p", "--precompute", action="store_true")
 parser.add_argument("-o", "--ostep", type=int, default=10)
 args = parser.parse_args()
+
+print("Setting fft engine to numpy for now, until I can fix my installation")
+fft.engine = "numpy"
+print(fft.engine)
 
 utils.mkdir(args.odir)
 comm   = mpi.COMM_WORLD
@@ -92,9 +98,9 @@ for ind in range(comm.rank, len(ids), comm.size):
 			scan.pmap.backward(tod, cg_rhs)
 			cg_rjunk.append(tmp)
 	except errors.DataMissing as e:
-		print "Skipping %s (%s)" % (id, str(e))
+		print("Skipping %s (%s)" % (id, str(e)))
 		continue
-	print "Read %s" % id
+	print("Read %s" % id)
 	scans.append(scan)
 
 if args.precompute:
@@ -146,7 +152,7 @@ if args.method == "cg":
 		hfile["data"] = jdiv
 
 if args.method == "messenger":
-	print cooldown
+	print(cooldown)
 	#cooldown = [1e8]*1 + [1e6]*2 + [1e5]*5 + [1e4]*7 + [1e3]*7 + [1e2]*10 + [1e1] * 10
 
 	map  = area*0
@@ -184,7 +190,7 @@ if args.method == "messenger":
 		junk  /= jdiv
 		map[:] = enmap.map_mul(idiv, rhs)
 		if comm.rank == 0:
-			print "%4d %15.7e %8.1f" % (i+1, np.std(map), lam)
+			print("%4d %15.7e %8.1f" % (i+1, np.std(map), lam))
 			if (i+1) % args.ostep == 0:
 				enmap.write_map(args.odir + "/map%04d.fits" % (i+1), map)
 
@@ -224,7 +230,7 @@ elif args.method == "cg":
 	for i in range(nstep):
 		solver.step()
 		if comm.rank == 0:
-			print "%5d %15.7e" % (solver.i, solver.err)
+			print("%5d %15.7e" % (solver.i, solver.err))
 			if solver.i % args.ostep == 0:
 				map = enmap.samewcs(solver.x[:area.size].reshape(area.shape),area)
 				enmap.write_map(args.odir + "/map%04d.fits" % solver.i, map)

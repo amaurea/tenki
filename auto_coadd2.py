@@ -80,6 +80,15 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 	if dump_dir:
 		enmap.write_map(dump_dir + "/rhs.fits", rhs)
 		enmap.write_map(dump_dir + "/ps_rhs.fits", np.abs(enmap.fft(rhs.preflat[0]))**2)
+		with open(dump_dir + "/names.txt", "w") as nfile:
+			for name in coadder.names:
+				nfile.write(name + "\n")
+		ls, weights = coadder.calc_debug_weights()
+		np.savetxt(dump_dir + "/weights_1d.txt", np.concatenate([
+			ls[None], weights.reshape(-1, weights.shape[-1])],0).T, fmt="%15.7e")
+		ls, noisespecs = coadder.calc_debug_noise()
+		np.savetxt(dump_dir + "/noisespecs_1d.txt", np.concatenate([
+			ls[None], noisespecs.reshape(-1, noisespecs.shape[-1])],0).T, fmt="%15.7e")
 	map     = coadder.calc_map(rhs, dump_dir=dump_dir, verbose=verbose, cg_tol=args.cg_tol)#, maxiter=1)
 	if dump_dir:
 		enmap.write_map(dump_dir + "/ps_map.fits", np.abs(enmap.fft(mapdiag(map)))**2)

@@ -58,6 +58,11 @@ def read_div(fname, shape=None, wcs=None, ncomp=3):
 		for i in range(ncomp):
 			res[i,i] = m
 		return res
+	elif m.ndim == 3:
+		res = enmap.zeros((ncomp,ncomp)+m.shape[-2:], m.wcs, m.dtype)
+		for i in range(ncomp):
+			res[i,i] = m[i]
+		return res
 	elif m.ndim == 4: return m
 	else: raise ValueError("Wrong number of dimensions in div %s" % fname)
 def get_tilenames(dir):

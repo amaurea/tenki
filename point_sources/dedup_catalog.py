@@ -5,6 +5,7 @@ parser.add_argument("ocat")
 parser.add_argument("-b", "--beam",    type=str,   default="1.4", help="Beam in arcmin or beam(l)")
 parser.add_argument("-s", "--snmin",   type=float, default=5)
 parser.add_argument("-v", "--verbose", action="store_true")
+parser.add_argument("-S", "--sort",    action="store_true")
 parser.add_argument(      "--bscale",  type=float, default=1)
 parser.add_argument(      "--artrad",  type=float, default=20)
 parser.add_argument(      "--artnum",  type=float, default=7)
@@ -44,7 +45,7 @@ cat.status[flux<0] = 2
 cat.status[(flux>0)&(cat.flux[:,0]>flux*0.5)] = 1
 # Reject anything weaker than snmin
 cat.status[np.abs(cat.flux[:,0]/cat.dflux[:,0])<snmin] = 0
-nbad, nsrc, nsz = np.bincount(cat.status)[:3]
+nbad, nsrc, nsz = np.bincount(cat.status, minlength=3)[:3]
 
 #cat_dummy.flux[:,0] = cat.status > 0
 #nnear2 = dory.eval_flux_at_srcs(cat_dummy, np.array([r_dummy,b_dummy]), verbose=args.verbose)
@@ -54,6 +55,9 @@ nbad, nsrc, nsz = np.bincount(cat.status)[:3]
 #	print("%5d %5d %5.0f  %8.3f %8.3f %8.3f" % (i, ind, nnear2[ind], cat_dummy.ra[ind]/utils.degree, cat_dummy.dec[ind]/utils.degree, cat.amp[ind,0]/cat.damp[ind,0]))
 
 cat = cat[cat.status>0]
+if args.sort:
+	sn = cat.flux[:,0]/cat.dflux[:,0]
+	cat = cat[np.argsort(sn)[::-1]]
 
 print("%d read, %d art, %d cut, %d src, %d sz" % (nread, nart, nbad, nsrc, nsz))
 dory.write_catalog(args.ocat, cat)

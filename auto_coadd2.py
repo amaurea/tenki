@@ -17,6 +17,7 @@ parser.add_argument("-W", "--wiener",  action="store_true")
 parser.add_argument("-m", "--mask",   type=str,   default=None)
 parser.add_argument("--filter-mode",  type=str,   default="weight")
 parser.add_argument("--cg-tol",       type=float, default=1e-4)
+parser.add_argument(      "--detrend",type=int,   default=1)
 args = parser.parse_args()
 
 config  = jointmap.read_config(args.config)
@@ -65,7 +66,7 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 	mapset = mapinfo.read(box, pad=pad, dtype=dtype, verbose=verbose, ncomp=ncomp)
 	if mapset is None: return None
 	if all([d.insufficient for d in mapset.datasets]): return None
-	jointmap.sanitize_maps(mapset)
+	jointmap.sanitize_maps(mapset, detrend=args.detrend)
 	jointmap.build_noise_model(mapset)
 	if len(mapset.datasets) == 0: return None
 	if all([d.insufficient for d in mapset.datasets]): return None

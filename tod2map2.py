@@ -9,10 +9,6 @@ from enlib.cg import CG
 from enact import actscan, nmat_measure, filedb, todinfo
 from enact import actdata
 
-from enlib import colors
-print(colors.red + "OVERRIDING FFT TO BE NUMPY -- SOMETHING IS WRONG WITH PYFFTW PLANNING TIME" + colors.reset)
-fft.set_engine("numpy")
-
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("hwp_resample", False, "Whether to resample the TOD to make the HWP equispaced")

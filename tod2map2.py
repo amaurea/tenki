@@ -492,8 +492,10 @@ for out_ind in range(nouter):
 			if param["srcs"] == "none": srcs = None
 			else: srcs = pointsrcs.read(param["srcs"])
 			minamp = float(param["minamp"])
+			if "mask" in param: m = enmap.read_map(param["mask"]).astype(dtype)
+			else: m = None
 			signal = mapmaking.SignalSrcSamp(active_scans, dtype=dtype, comm=comm,
-					srcs=srcs, amplim=minamp)
+					srcs=srcs, amplim=minamp, mask=m)
 			signal_srcsamp = signal
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])

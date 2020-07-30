@@ -4,6 +4,7 @@ these, estimates the white noise level in the maps and the conversion
 factor between hitcounts and noise (e.g. the sensitivity). Uses this
 to output calibrated hitcount maps in the unit inverse variance per
 pixel."""
+from __future__ import division, print_function
 import numpy as np, argparse, sys
 from enlib import enmap, utils
 parser = argparse.ArgumentParser()
@@ -18,7 +19,7 @@ args = parser.parse_args()
 hitlim = 0.05
 bs = args.blocksize
 
-nmap = len(args.files)/3
+nmap = len(args.files)//3
 if args.transpose:
 	mapfiles = args.files[nmap*0:nmap*1]
 	hitfiles = args.files[nmap*1:nmap*2]
@@ -29,8 +30,8 @@ else:
 	divfiles = args.files[2::3]
 
 def map_to_blocks(map, n):
-	m = map[...,:map.shape[-2]/n*n,:map.shape[-1]/n*n]
-	m = m.reshape(m.shape[:-2]+(m.shape[-2]/n,n,m.shape[-1]/n,n))
+	m = map[...,:map.shape[-2]//n*n,:map.shape[-1]//n*n]
+	m = m.reshape(m.shape[:-2]+(m.shape[-2]//n,n,m.shape[-1]//n,n))
 	return m
 
 def calc_map_block_ivar(map, n):
@@ -42,9 +43,9 @@ def calc_map_block_mean(map, n):
 	m = map_to_blocks(map, n)
 	return enmap.samewcs(np.mean(m, axis=(-3,-1)), map[...,::n,::n])
 
-print "Reading map %s" % (mapfiles[0])
+print("Reading map %s" % (mapfiles[0]))
 map = enmap.read_map(mapfiles[0]).preflat[args.component]
-print "Reading hit %s" % (hitfiles[0])
+print("Reading hit %s" % (hitfiles[0]))
 hit = enmap.read_map(hitfiles[0])
 # We assume that the hitcount maps are 2d
 def get_bias(bs):
@@ -58,12 +59,12 @@ def get_bias(bs):
 def quant(a, q): return np.percentile(a, q*100)
 qlim = 0.95
 
-print "Measuring sensitivities"
+print("Measuring sensitivities")
 ratios = []
 for i, (mapfile, hitfile) in enumerate(zip(mapfiles[1:], hitfiles[1:])):
-	print "Reading map %s" % mapfile
+	print("Reading map %s" % mapfile)
 	map2 = enmap.read_map(mapfile).preflat[args.component]
-	print "Reading hit %s" % hitfile
+	print("Reading hit %s" % hitfile)
 	hit2 = enmap.read_map(hitfile)
 	# Compute variances for the current map minus the previous map
 	dmap = (map2-map)/2
@@ -79,14 +80,14 @@ for i, (mapfile, hitfile) in enumerate(zip(mapfiles[1:], hitfiles[1:])):
 	ratio *= get_bias(bs)**2
 	ratios.append(ratio)
 	sens = (ratio*args.srate)**-0.5
-	print "%d-%d  %7.2f" % (i+1,i, sens)
+	print("%d-%d  %7.2f" % (i+1,i, sens))
 	map, hit = map2, hit2
 
 # Ratio has units 1/(uK^2*sample), and gives us the conversion
 # factor between hitmaps and inverse variance maps, which we call
 # div maps by convention from tenki.
 ratio = np.mean(ratios)
-print "mean %7.2f" % (ratio*args.srate)**-0.5
+print("mean %7.2f" % (ratio*args.srate)**-0.5)
 
 if args.dry_run: sys.exit()
 
@@ -95,5 +96,5 @@ if args.dry_run: sys.exit()
 for i, (hitfile, divfile) in enumerate(zip(hitfiles, divfiles)):
 	hit = enmap.read_map(hitfile)
 	div = hit*ratio
-	print "Writing %s" % divfile
+	print("Writing %s" % divfile)
 	enmap.write_map(divfile, div)

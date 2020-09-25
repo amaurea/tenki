@@ -1,3 +1,4 @@
+from __future__ import division, print_function
 import numpy as np, sys, os, ephem
 from enlib import utils
 with utils.nowarn(): import h5py
@@ -44,7 +45,7 @@ if args.tag:  prefix += args.tag + "_"
 # go linearly from 1 to 0 at 2R, letting us use 0.5 as the 1R cutoff.
 beam = np.array([[0,1],[2*R,0]]).T
 
-src_dtype = [("ra","f"),("dec","f"),("type","S20"),("name","S20")]
+src_dtype = [("ra","f"),("dec","f"),("type","U20"),("name","U20")]
 def load_srcs(desc):
 	# Reads in the set of sources to map, returning
 	# [nsrc,{ra,dec,type,name}]. type will be "fixed"
@@ -72,6 +73,8 @@ def load_srcs(desc):
 		return res
 
 srcs = load_srcs(args.srcs)
+if comm.rank == 0:
+	print("Loaded %d srcs of type %s" % (len(srcs), srcs.type[0]))
 
 # Find out which sources are hit by each tod
 db = filedb.scans.select(filedb.scans[args.sel])
@@ -93,6 +96,7 @@ for sid, src in enumerate(srcs):
 	dists    = utils.poly_edge_dist(points.T, polys.T)
 	dists    = np.where(inside, 0, dists)
 	hit      = np.where(dists < args.hit_tol*utils.degree)[0]
+	print("Found %5d tods for src %5d/%d" % (len(hit), sid+1, len(srcs)))
 	for id in db.ids[hit]:
 		if not id in tod_srcs: tod_srcs[id] = []
 		tod_srcs[id].append(sid)
@@ -140,7 +144,7 @@ def calc_model_constrained(tod, cut, srate=400, mask_scale=0.3, lim=3e-4, maxite
 	while solver.i < maxiter and solver.err > lim:
 		solver.step()
 		if verbose:
-			print "%5d %15.7e" % (solver.i, solver.err)
+			print("%5d %15.7e" % (solver.i, solver.err))
 	return solver.x.reshape(tod.shape)
 
 def map_to_header(map):
@@ -173,7 +177,7 @@ def write_package(fname, maps, divs, src_ids, d):
 
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
-	print "A", id, comm.rank
+	print("A", id, comm.rank)
 	bid   = id.replace(":","_")
 	entry = filedb.data[id]
 	# Read the tod as usual
@@ -186,30 +190,30 @@ for ind in range(comm.rank, len(ids), comm.size):
 		d.beam = beam
 		if d.ndet < 2 or d.nsamp < 2: raise errors.DataMissing("no data in tod")
 	except errors.DataMissing as e:
-		print "Skipping %s (%s)" % (id, comm.rank, str(e))
+		print("Skipping %s (%s)" % (id, comm.rank, str(e)))
 		# Make a dummy output file so we can skip this tod in the future
 		with open("%s%s_empty.txt" % (prefix, bid),"w"): pass
 		continue
-	print "%3d Processing %s [ndet:%d, nsamp:%d, nsrc:%d]" % (comm.rank, id, d.ndet, d.nsamp, len(tod_srcs[id]))
-	print "B", id, comm.rank
+	print("%3d Processing %s [ndet:%d, nsamp:%d, nsrc:%d]" % (comm.rank, id, d.ndet, d.nsamp, len(tod_srcs[id])))
+	print("B", id, comm.rank)
 	# Fill in representative ra, dec for planets for this tod
 	for sid in np.where(srcs.type == "planet")[0]:
 		srcs.ra[sid], srcs.dec[sid] = ephemeris.ephem_pos(srcs.name[sid], utils.ctime2mjd(d.boresight[0,d.nsamp//2]), dt=0)[:2]
 	# Very simple white noise model. This breaks if the beam has been tod-smoothed by this point.
-	print "C", id, comm.rank
+	print("C", id, comm.rank)
 	with bench.mark("ivar"):
 		tod  = d.tod
 		del d.tod
 		tod -= np.mean(tod,1)[:,None]
 		tod  = tod.astype(dtype)
 		diff = tod[:,2:]-tod[:,:-2]
-		diff = diff[:,:diff.shape[-1]/csize*csize].reshape(d.ndet,-1,csize)
+		diff = diff[:,:diff.shape[-1]//csize*csize].reshape(d.ndet,-1,csize)
 		ivar = 1/(np.median(np.mean(diff**2,-1),-1)/2**0.5)
 		del diff
-	print "D", id, comm.rank
+	print("D", id, comm.rank)
 	with bench.mark("actscan"):
 		scan = actscan.ACTScan(entry, d=d)
-	print "E", id, comm.rank
+	print("E", id, comm.rank)
 	with bench.mark("pmat1"):
 		# Build effective source parameters for this TOD. This will ignore planet motion,
 		# but this should only be a problem for very near objects like the moon or ISS
@@ -220,7 +224,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		src_param[:,5:7] = 1
 		# And use it to build our source model projector. This is only used for the cuts
 		psrc = pmat.PmatPtsrc(scan, src_param)
-	print "F", id, comm.rank
+	print("F", id, comm.rank)
 	with bench.mark("source mask"):
 		# Find the samples where the sources live
 		src_mask = np.zeros(tod.shape, np.bool)
@@ -245,7 +249,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		src_cut  = sampcut.from_mask(src_mask)
 		src_cut *= scan.cut
 		del src_mask
-	print "G", id, comm.rank
+	print("G", id, comm.rank)
 	try:
 		with bench.mark("atm model"):
 			if   args.model == "joneig":
@@ -253,7 +257,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 			elif args.model == "constrained":
 				model = calc_model_constrained(tod, src_cut, d.srate, verbose=True)
 	except np.linalg.LinAlgError as e:
-		print "%3d %s Error building noide model: %s" % (comm.rank, id, str(e))
+		print("%3d %s Error building noide model: %s" % (comm.rank, id, str(e)))
 		continue
 	with bench.mark("atm subtract"):
 		tod -= model
@@ -262,13 +266,13 @@ for ind in range(comm.rank, len(ids), comm.size):
 	# Should now be reasonably clean of correlated noise.
 	# Proceed to make simple binned map for each point source. We need a separate
 	# pointing matrix for each because each has its own local coordinate system.
-	print "H", id, comm.rank
+	print("H", id, comm.rank)
 	tod *= ivar[:,None]
 	sampcut.gapfill_const(scan.cut, tod, inplace=True)
 	nsrc  = len(tod_srcs[id])
 	omaps = enmap.zeros((nsrc,ncomp)+shape, area.wcs, dtype)
 	odivs = enmap.zeros((nsrc,ncomp,ncomp)+shape, area.wcs, dtype)
-	print "I", id, comm.rank
+	print("I", id, comm.rank)
 	for si, sid in enumerate(tod_srcs[id]):
 		src  = srcs[sid]
 		if   src.type == "fixed":  sys = "%s:%.6f_%.6f:cel/0_0:%s" % (osys, src.ra/utils.degree, src.dec/utils.degree, osys)
@@ -294,12 +298,12 @@ for ind in range(comm.rank, len(ids), comm.size):
 		omaps[si] = map
 		odivs[si] = div
 		del rhs, div, idiv, map
-	print "J", id, comm.rank
+	print("J", id, comm.rank)
 	# Write out the resulting maps
 	if args.output == "individual":
 		with bench.mark("write"):
 			for si, sid in enumerate(tod_srcs[id]):
-				print "K", id, comm.rank, sid
+				print("K", id, comm.rank, sid)
 				enmap.write_map("%s%s_src%03d_map.fits" % (prefix, bid, sid), omaps[si])
 				enmap.write_map("%s%s_src%03d_div.fits" % (prefix, bid, sid), odivs[si])
 				#enmap.write_map("%s%s_src%03d_rhs.fits" % (prefix, bid, sid), rhs)

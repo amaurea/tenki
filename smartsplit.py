@@ -45,6 +45,8 @@ elif args.mode == "scanpat":
 		anames[pids==pid] = np.char.add(anames[pids==pid], "p%d" % pid)
 
 def ids2ctimes(ids): return np.char.partition(ids,".").T[0].astype(int)
+def fix_aname(aname): return aname.replace("ar","pa").replace(":","_")
+anames = np.array([fix_aname(aname) for aname in anames])
 arrays, ais, nper = np.unique(anames, return_counts=True, return_inverse=True)
 narray = len(arrays)
 ctime  = ids2ctimes(pre)
@@ -348,7 +350,6 @@ with open(args.odir + "/overlap.txt", "w") as f:
 # Get the ids that go into each split
 for i in range(nsplit):
 	for ai, aname in enumerate(arrays):
-		aname = aname.replace("ar","pa").replace(":","_")
 		with open(args.odir + "/ids_%s_set%d.txt" % (aname,i), "w") as f:
 			for id in sorted(split_ids[i][ai]):
 				f.write(id + "\n")

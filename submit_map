@@ -26,7 +26,8 @@ utils.mkdir(rundir)
 array_freqs = {"pa1":["f150"], "pa2":["f150"], "pa3":["f090","f150"],
 	"pa4":["f150","f220"], "pa5":["f090","f150"], "pa6":["f090","f150"]}
 season_arrays = {"s13":["pa1"], "s14":["pa1","pa2"], "s15":["pa1","pa2","pa3"],
-		"s16":["pa2","pa3","pa4"], "s17":["pa4","pa5","pa6"], "s18":["pa4","pa5","pa6"]}
+		"s16":["pa2","pa3","pa4"], "s17":["pa4","pa5","pa6"], "s18":["pa4","pa5","pa6"],
+		"s19":["pa4","pa5","pa6"]}
 
 tag_map = {"+":"", "~":"no", ">":"_gt_", "<":"_lt_"}
 def remap(toks, tag_map):
@@ -94,7 +95,7 @@ for toks in utils.list_combination_iter(alts):
 #SBATCH --nodes %(nnode)d --ntasks-per-node=10 --cpus-per-task=8 --time=24:00:00
 #SBATCH --job-name %(name)s
 cd "%(cdir)s"
-OMP_NUM_THREADS=8 mpirun -bind-to none -ppn 10 python ~/local/tenki/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s""" % {
+OMP_NUM_THREADS=4 mpirun -bind-to none -ppn 10 python ~/local/tenki/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s""" % {
 		"nnode": args.nnode, "name": otag, "cdir": os.getcwd(),
 		"patch": patch_file, "map_type": map_type, "osel": osel,
 		"sky": args.sky,

@@ -415,7 +415,7 @@ elif args.group:
 for out_ind in range(nouter):
 	if args.individual:
 		myscans = myscans_tot[out_ind:out_ind+1]
-		root = root_tot + myscans[0].entry.id + "_"
+		root = root_tot + myscans[0].id.replace(":","_") + "_"
 	elif args.group:
 		raw_inds = np.arange(out_ind*args.group, min((out_ind+1)*args.group,ntod))
 		row, col = raw_inds%comm.size, raw_inds//comm.size

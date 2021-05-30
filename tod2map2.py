@@ -439,8 +439,17 @@ for out_ind in range(nouter):
 			signal_cut = signal
 		elif param["type"] == "map":
 			area = enmap.read_map(get_map_path(param["value"]))
-			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
+			if "split" in param:
+				split = True
+				if param["split"] == "leftright":
+					for scan in active_scans:
+						scan.split = np.concatenate([[0],scan.boresight[1:,1]<=scan.boresight[:-1,1]])
+						area = enmap.zeros((2,args.ncomp)+area.shape[-2:], area.wcs, dtype)
+				else: raise ValueError("Split type %s not recognized" % param["split"])
+			else:
+				split = False
+				area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param), split=split)
 		elif param["type"] == "fmap":
 			area = enmap.read_map(get_map_path(param["value"]))
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)

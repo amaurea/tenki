@@ -21,7 +21,7 @@ if len(sys.argv) < 2:
 mode = sys.argv[1]
 
 parser = argparse.ArgumentParser(description=help_general)
-parser.add_argument("mode", choices=["find","fit","subtract","dedup"])
+parser.add_argument("mode", choices=["find","fit","subtract"])
 if mode == "find":
 	parser.add_argument("imap", help="The map to find sources in. Should be enmap-compatible.")
 	parser.add_argument("idiv", help="The inverse variance per pixel of imap.")

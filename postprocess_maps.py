@@ -56,9 +56,11 @@ for key in sorted(datasets.keys()):
 	# Do we have any zeros at this point? If so, warn and skip the dataset
 	nzero = sum([sub.it == 0 for sub in d])
 	if nzero > 0:
-		if comm.rank == 0: print("%-*s only has %d/%d splits. Skipping" % (nchar, key, len(d)-nzero, len(d)))
+		if comm.rank == 0:
+			desc = " %4d"*len(d) % tuple([sub.it for sub in d])
+			print("%-*s with %s has only %d/%d splits. Skipping" % (nchar, key, desc, len(d)-nzero, len(d)))
 		del datasets[key]
-	if comm.rank == 0:
+	elif comm.rank == 0:
 		print("%-*s using" % (nchar, key) + " %4d"*len(d) % tuple([sub.it for sub in d]))
 
 # Check if we follow the standard format

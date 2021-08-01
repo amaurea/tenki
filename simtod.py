@@ -1,3 +1,4 @@
+from __future__ import division, print_function
 import numpy as np, argparse, enlib.scan, os
 from enlib import enmap, utils, config, scansim, log, powspec, fft, bunch
 from enact import actscan, filedb, nmat_measure
@@ -41,7 +42,7 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 				real_scans.append(actscan.ACTScan(db[id]))
 			except errors.DataMissing as e:
 				L.debug("Skipped %s (%s)" % (id, str(e)))
-	# Dets
+	##### Dets #####
 	L.debug("dets")
 	sim_dets = []
 	toks = dets.split(":")
@@ -49,13 +50,18 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 		ngroup, nper, rad = int(toks[1]), int(toks[2]), float(toks[3])
 		sim_dets = [scansim.dets_scattered(ngroup, nper,rad=rad*np.pi/180/60)]
 		margin   = rad*np.pi/180/60
+	elif toks[0] == "row":
+		ngroup, nper, rad = int(toks[1]), int(toks[2]), float(toks[3])
+		sim_dets = [scansim.dets_row(ngroup, nper, rad=rad*np.pi/180/60)]
+		margin   = rad*np.pi/180/60
 	elif toks[0] == "real":
 		ndet = int(toks[1])
+		nper = 1 # FIXME
 		dslice = slice(0,ndet) if ndet > 0 else slice(None)
 		sim_dets = [bunch.Bunch(comps=s.comps[dslice], offsets=s.offsets[dslice]) for s in real_scans]
 		margin = np.max([np.sum(s.offsets**2,1)**0.5 for s in sim_dets])
 	else: raise ValueError
-	# Boresight. Determines our number of scans
+	#### Boresight. Determines our number of scans ####
 	L.debug("bore")
 	sim_bore = []
 	toks = bore.split(":")
@@ -85,8 +91,8 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 	else: raise ValueError
 	nsim = len(sim_bore)
 	# Make one det info per scan
-	sim_dets = sim_dets*(nsim/len(sim_dets))+sim_dets[:nsim%len(sim_dets)]
-	# Noise
+	sim_dets = sim_dets*(nsim//len(sim_dets))+sim_dets[:nsim%len(sim_dets)]
+	#### Noise ####
 	L.debug("noise")
 	sim_nmat = []
 	toks = noise.split(":")
@@ -98,9 +104,10 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 			sim_nmat.append(scansim.oneoverf_noise(sim_dets[i].comps.shape[0], sim_bore[i].boresight.shape[0], sigma=np.abs(sigma), alpha=alpha, fknee=fknee))
 	elif toks[0] == "detcorr":
 		sigma, alpha, fknee = [float(v) for v in toks[1:4]]
+		nmode = int(toks[4])
 		nonoise = sigma < 0
 		for i in range(nsim):
-			sim_nmat.append(scansim.oneoverf_detcorr_noise(sim_dets[i].comps.shape[0], sim_bore[i].boresight.shape[0], sigma=np.abs(sigma), alpha=alpha, fknee=fknee))
+			sim_nmat.append(scansim.oneoverf_detcorr_noise(ndet=sim_dets[i].comps.shape[0], nper=nper, nsamp=sim_bore[i].boresight.shape[0], sigma=np.abs(sigma), alpha=alpha, fknee=fknee, nmode=nmode))
 	elif toks[0] == "real":
 		scale = 1.0 if len(toks) < 2 else float(toks[1])
 		for i,s in enumerate(real_scans):
@@ -109,8 +116,8 @@ def get_scans(area, signal, bore, dets, noise, seed=0, real=None, noise_override
 			sim_nmat.append(nmat)
 	else: raise ValueError
 	noise_scale = not nonoise if noise_override is None else noise_override
-	sim_nmat = sim_nmat*(nsim/len(sim_nmat))+sim_nmat[:nsim%len(sim_nmat)]
-	# Signal
+	sim_nmat = sim_nmat*(nsim//len(sim_nmat))+sim_nmat[:nsim%len(sim_nmat)]
+	### Signal ####
 	L.debug("signal")
 	toks = signal.split(":")
 	if toks[0] == "none":

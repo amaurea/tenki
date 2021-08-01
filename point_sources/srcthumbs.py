@@ -1443,10 +1443,12 @@ elif mode == "calfile":
 		if t <= ts[0]:
 			point = np.array(segment.points[0]) # {y,x},{val,dval}
 			dur_extrap = ts[0]-t
+			slope = None
 		# Or after the end?
 		elif t >= ts[-1]:
 			point = np.array(segment.points[-1])
 			dur_extrap = t-ts[-1]
+			slope = None
 		# Or inside?
 		else:
 			# Find which points we're between
@@ -1458,8 +1460,8 @@ elif mode == "calfile":
 			dval  = ((segment.points[i1,:,1]*(1-x))**2 + (segment.points[i2,:,1]*x)**2)**0.5
 			point = np.concatenate([val[:,None],dval[:,None]],-1)
 			dur_extrap = 0
+			slope = segment.slope
 		# Fill in slope
-		slope = segment.slope
 		if slope is None:
 			slope = np.zeros((2,2))
 		# Increase uncertainty based on extrapolation

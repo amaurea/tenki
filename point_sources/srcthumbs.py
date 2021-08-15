@@ -606,13 +606,10 @@ elif mode == "analyse":
 		return odata
 
 	def calibrate_data(data):
-		"""Transform from uK to mJy/sr and get ps2d to proper physical units"""
-		# Noise to physical
-		pixsize    = np.mean(np.product(data.table["pixshape"],1))
-		odata      = data.copy()
-		odata.ps2d = data.ps2d * pixsize
+		"""Transform from uK to mJy/sr"""
 		# uK to mJy/sr
-		unit = utils.dplanck(data.freq*1e9, utils.T_cmb) / 1e3
+		odata       = data.copy()
+		unit        = utils.dplanck(data.freq*1e9, utils.T_cmb) / 1e3
 		odata.maps  = data.maps  * unit
 		odata.ivars = data.ivars * unit**-2
 		return odata
@@ -658,6 +655,12 @@ elif mode == "analyse":
 				# when interpolating, making us downweight areas that have contributions from low-hit
 				# pixels. This removes a lot of stripiness and bad pixels in the result.
 				odata.ivars[sind] = nonan(1/utils.interpol(1/ivar, ipix, order=1, mode="wrap"))
+			# ivars is in units of white noise per original pixel. Transform that to the equivalent
+			# white noise per new pixel
+			old_pixsize = np.product(data.table["pixshape"][sind])
+			new_pixsize = odata.ivars[sind].pixsize()
+			odata.ivars[sind] *= new_pixsize/old_pixsize
+
 		# Handle the power spectrum too
 		mean_wcs = wcsutils.WCS(naxis=2)
 		mean_wcs.wcs.ctype = ["RA---CAR", "DEC--CAR"]
@@ -692,13 +695,6 @@ elif mode == "analyse":
 		data = expand_table(data)
 		#data = mask_data(data)
 
-		#enmap.write_map("test_map.fits", data.maps)
-		##enmap.write_map("test_snr.fits", data.snr_map)
-		#enmap.write_map("test_ivar.fits", data.ivars)
-		#enmap.write_map("test_mapivar.fits", data.maps[:,0]*data.ivars)
-		#print(data.table["sid"])
-		#1/0
-
 		data = reproject_data(data, oshape, owcs)
 		data.lbeam = get_lbeam_flat(data.beam[0], data.beam[1],    oshape, owcs)
 		data.lbeam2= get_lbeam_flat(data.beam[0], data.beam[1]**2, oshape, owcs)
@@ -717,59 +713,6 @@ elif mode == "analyse":
 			for a in [flux, dflux, snr]:
 				a[mask] = 0
 		return flux, dflux, snr
-
-	#def build_time_groups(gdata, maxspeed=4*utils.arcmin/utils.hour):
-	#	"""Split the sources in gdata into groups that don't last too long but
-	#	have high ehough S/N for a good position measurement. We can expect a
-	#	position error of about 1'/snr. On the other hand, the pointing can change by
-	#	4'/hour, so integrating over a whole our is dangerous. Starting from the
-	#	beginning, we have noise_err = 1/cumsum(1/snr**2)**0.5 while time_err = 4*cumsum(durs).
-	#	We want to split when this reaches its first minimum."""
-	#	# First get a list of all our sources across the datasets, along with their
-	#	# snr forecasts and times
-	#	mapping, times, snrs, bareas = [], [], [], []
-	#	for i, data in enumerate(gdata):
-	#		for j, (snr, time) in enumerate(zip(data.snr_fcast, data.table["ctime"])):
-	#			mapping.append([i,j])
-	#			times.append(time)
-	#			snrs.append(snr)
-	#			bareas.append(data.barea)
-	#	# Sort them by time
-	#	order = np.argsort(times)
-	#	mapping, times, snrs, bareas = [np.array(a)[order] for a in [mapping, times, snrs, bareas]]
-	#	# Get our typical fwhm, which we need for the error estimates.
-	#	ref_fwhm = (np.sum(bareas*snrs**2)/np.sum(snrs**2)/(2*np.pi))**0.5/utils.fwhm
-	#	# And split into groups
-	#	n = len(times)
-	#	tgroups = []
-	#	i1 = 0
-	#	while i1 < n:
-	#		i2    = i1
-	#		chisq = 0
-	#		besterr = np.inf
-	#		while i2 < n:
-	#			dur    = times[i1]-times[i2]
-	#			chisq += snrs[i2]**2
-	#			sntot  = chisq**0.5
-	#			# What error would we get if we added this point to our group?
-	#			err_add = (ref_fwhm**2/chisq + 2*np.log(2)/3 * (maxspeed*dur)**2)**0.5
-	#			# What error would be get if we let this point stand alone?
-	#			err_stop= ref_fwhm/snrs[i2]
-	#			# Add point only if it improves on what we have and doesn't waste the current point
-	#			if err_add > besterr or (i2 > i1 and err_add >= err_stop):
-	#				break
-	#			i2 += 1
-	#		tgroups.append([i1,i2])
-	#		i1 = i2
-	#	# Get the total duration and snr of each group
-	#	res = [
-	#			bunch.Bunch(
-	#				inds = mapping[i1:i2],
-	#				snr  = np.sum(snrs[i1:i2]**2)**0.5,
-	#				dur  = times[i2-1]-times[i1]
-	#			) for i1,i2 in tgroups
-	#		]
-	#	return res
 
 	def group_srcs_snmin(gdata, inds, snmin=5):
 		"""Given a set of inds [(gind,sind),...] into gdata, split these into sub-groups
@@ -893,53 +836,6 @@ elif mode == "analyse":
 		for name in ["baz", "waz", "bel"]:
 			fit[name] = gdata[0][name]
 		return fit
-
-	#def fit_group_dynamic(gdata, inds, bounds=None):
-	#	"""Fit the source offset (the negative of the pointing offset) and the
-	#	source flux for each source in the time-group given by tgroups. Returns
-	#	a bunch with members pos, dpos, snr, ctime, fluxes[nsrc,TQU], dfluxes[nsrc,TQU]"""
-	#	# First flatten rho, kappa and table for convenience. Should consider a better data
-	#	# structure that doesn't need this unrolling. Maybe enlib.DataSet?
-	#	rho      = enmap.enmap([gdata[gi].rho  [subi] for gi, subi in inds])
-	#	kappa    = enmap.enmap([gdata[gi].kappa[subi] for gi, subi in inds])
-	#	table    = np.concatenate([gdata[gi].table[subi:subi+1] for gi, subi in inds]).view(np.recarray)
-	#	src_snr  = np.array([gdata[gi].src_snr [subi] for gi, subi in inds])
-	#	src_ivar = np.array([gdata[gi].src_ivar[subi] for gi, subi in inds])
-	#	src_flux = src_snr * src_ivar**-0.5
-	#	poss     = np.zeros([len(rho),2])
-	#	for i, (gi, subi) in enumerate(inds):
-	#		fit = gdata[gi].fit[subi]
-	#		if fit: poss[i] = fit.pos
-
-	#	# Prepare for our fit. We will fit the position offset as a function of time
-	#	# and azimuth. We need reference and scale values for the latter and a starting
-	#	# point and scale for the former
-	#	t0, az0, el = [np.mean(utils.minmax(table[name])) for name in ["ctime", "az", "el"]]
-	#	dt  = table["ctime"] - t0
-	#	daz = table["az"] - az0
-	#	t_scale  = 60
-	#	az_scale = 50*utils.degree
-	#	pos_scale= 1*utils.arcmin
-	#	pos00    = np.sum(poss*src_snr[:,None]**2,0)/np.sum(src_snr**2)
-
-	#	def zip(pos0, dpos_az, dpos_t, dpos_tt): return np.concatenate([
-	#		pos0/pos_scale, dpos_az/pos_scale*az_scale, dpos_t/pos_scale*t_scale, dpos_tt/pos_scale*t_scale**2])
-	#	def unzip(x):
-	#		return x[0:2]*pos_scale, x[2:4]*pos_scale/az_scale, x[4:6]*pos_scale/t_scale, x[6:8]*pos_scale/t_scale**2
-	#	def calc_chisq(x):
-	#		pos0, dpos_az, dpos_t, dpos_tt = unzip(x)
-	#		pos = pos0[:,None] + dpos_az[:,None]*daz + dpos_t[:,None]*dt + dpos_tt[:,None]*dt**2
-	#		model = displace_thumbs(model0, pos)
-	#		# Hmmm.. This will actually be pretty heavy. I need
-	#		# (map-model)N"(map-model)
-	#		# map N" map = sum(rho**2/kappa)
-	#		# map N" model = sum(rho*model)
-	#		# model N" model = ... This one requires doing a matched filter on the model
-	#		# I thought I could precompute N" model and shift it around, but N" depends on the
-	#		# position in a complicated way. In MF_smoothivar ivar factorizes out in kappa, so
-	#		# there it would be easy. But even there displacing the model relative to the data
-	#		# would require recomputing rho. But I guess there's no choice.
-	#	# FIXME finish implementing
 
 	def merge_files(ifiles, ofile):
 		lines = []
@@ -1322,14 +1218,6 @@ elif mode == "model":
 
 	# Split into groups with edges where ctime, baz, waz or bel change too much
 	groups = build_groups(data[[0,7,8,9]], [maxgap,1,1,1])
-	# But avoid too long groups, since we don't have an adaptive number of degrees of freedom
-	#groups = split_long_groups(groups, data[0], maxdur)
-
-	#for i, g in enumerate(groups):
-	#	if data[0,g[1]] < 1541517696-50000: continue
-	#	print("group %5d" % i)
-	#	for j, d in enumerate(data[:,g[0]:g[1]].T):
-	#		print("%4d %.0f %8.3f %8.3f %8.3f" % (j, d[0], d[7], d[8], d[9]))
 
 	# Add a minimum error value to each point to avoid having individual points
 	# completely dominating. This represents the sort of model error we expect.

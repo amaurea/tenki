@@ -1,6 +1,6 @@
 from __future__ import division, print_function
 import numpy as np, argparse, os
-from enlib import enmap, array_ops, utils, mpi
+from pixell import enmap, array_ops, utils, mpi
 from scipy import ndimage
 parser = argparse.ArgumentParser()
 parser.add_argument("imaps_and_hits", nargs="+", help="map map map ... hits hits hits ... unless --transpose, in which case it's map hits map hits map hits ...")

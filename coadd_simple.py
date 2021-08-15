@@ -26,7 +26,7 @@ for imapfile, ihitfile in zip(imaps,ihits):
 		omap = imap*0
 		ohit = ihit*0
 	omap += imap*ihit
-	ohit += ohit
+	ohit += ihit
 
 print("Solving")
 with utils.nowarn():

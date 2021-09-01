@@ -57,6 +57,7 @@ parser.add_argument(      "--split",   action="store_true")
 parser.add_argument(      "--split-nimage", type=int,   default=16)
 parser.add_argument(      "--split-dist",   type=float, default=1)
 parser.add_argument(      "--split-minflux",type=float, default=300)
+parser.add_argument("-c", "--cont",    action="store_true")
 
 args = parser.parse_args()
 import numpy as np, os
@@ -171,6 +172,10 @@ elif args.mode == "fit":
 	utils.mkdir(args.odir)
 	write_args(args.odir + "/args.txt")
 	for ri in range(comm.rank, len(regions), comm.size):
+		prefix = args.odir + "/region_%02d_" % ri
+		if args.cont and os.path.isfile(prefix + "cat.fits"):
+			reg_cats.append(dory.read_catalog(prefix + "cat.fits"))
+			continue
 		reg_fid = regions[ri]
 		reg_pad = dory.pad_region(reg_fid, args.pad, fft=True)
 		print("%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1]))
@@ -200,9 +205,12 @@ elif args.mode == "fit":
 				# Build an amplitude prior from our input catalog fluxes
 				prior    = dory.build_prior(icat.flux[:,ci]/fluxconv, icat.dflux[:,ci]/fluxconv, 1/args.prior)
 				src_pos  = np.array([icat.dec,icat.ra]).T
-				fit_inds, amp, icov, lamps = dory.fit_src_amps(imap[ci], get_div(idiv,ci), src_pos, beam, prior=prior,
-						apod=args.apod, apod_margin=args.apod_margin, verbose=args.verbose, dump=dump_prefix, hack=args.hack,
-						region=ri)
+				try:
+					fit_inds, amp, icov, lamps = dory.fit_src_amps(imap[ci], get_div(idiv,ci), src_pos, beam, prior=prior,
+							apod=args.apod, apod_margin=args.apod_margin, verbose=args.verbose, dump=dump_prefix, hack=args.hack,
+							region=ri)
+				except dory.FitError as e:
+					fit_inds, amp, icov, lamps = np.zeros([0],int), np.zeros([0]), np.zeros([0,0]), np.zeros([0])
 				if reg_cat is None:
 					reg_cat = icat[fit_inds].copy()
 					reg_cat.amp = reg_cat.damp = reg_cat.flux = reg_cat.dflux = 0
@@ -220,7 +228,6 @@ elif args.mode == "fit":
 			reg_cat = reg_cat[np.argsort(reg_cat.amp[:,0]/reg_cat.damp[:,0])[::-1]]
 			# Write region output
 			if "reg" in args.output:
-				prefix = args.odir + "/region_%02d_" % ri
 				dory.write_catalog_fits(prefix + "cat.fits", reg_cat)
 				dory.write_catalog_txt (prefix + "cat.txt",  reg_cat)
 			if "full" in args.output:

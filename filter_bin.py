@@ -3,6 +3,7 @@ import numpy as np, warnings, time, copy, argparse, os, sys, pipes, shutil, re
 from enlib  import config, coordinates, mapmaking, bench, scanutils, log, sampcut, dmap
 from pixell import utils, enmap, pointsrcs, bunch, mpi, fft
 from enact  import filedb, actdata, actscan, files, todinfo
+from scipy  import ndimage
 
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
@@ -38,7 +39,7 @@ shape = (ncomp,)+shape[-2:]
 msys = config.get("map_sys")
 dist = config.get("map_dist")
 # Filter parameters
-filter_fknee = 0.1
+filter_fknee = 0.2
 filter_alpha = -3
 
 # Get our tod list
@@ -111,17 +112,43 @@ hit_work = signal.prepare(hit)
 # Input for div calculation
 div_tmp = signal.work()
 
+def filter_common_mean  (scan, tod): tod -= np.mean  (tod,0)
+def filter_common_median(scan, tod): tod -= np.median(tod,0)
+class filter_butter:
+	def __init__(self, fknee=1, alpha=-3, tol=1e-6):
+		self.fknee, self.alpha, self.tol = fknee, alpha, tol
+	def __call__(self, scan, tod):
+		ft   = fft.rfft(tod)
+		freq = fft.rfftfreq(scan.nsamp, 1/scan.srate)
+		ft  *= (1+np.maximum(freq/self.fknee,self.tol)**self.alpha)**-1
+		fft.irfft(ft, tod, normalize=True)
+class filter_poly_sweep:
+	def __init__(self, dt=2): self.dt = dt
+	def __call__(self, scan, tod):
+		sweeps = utils.find_sweeps(scan.boresight[:,1])
+		for si, (i1, i2) in enumerate(sweeps):
+			sub = tod[:,i1:i2]
+			dur = (i2-i1)/scan.srate
+			ndof= utils.ceil(dur/self.dt)
+			x   = np.linspace(-1,1,i2-i1)
+			B   = np.array([x**i for i in range(ndof)])
+			amp = sub.dot(B.T).dot(np.linalg.inv(B.dot(B.T)))
+			sub-= amp.dot(B)
+
+# Set up our filters
+filters = [
+	filter_common_median,
+	#filter_butter(filter_fknee, filter_alpha),
+	filter_poly_sweep(dt=0.5),
+]
+
 # Process all our tods
 L.info("Processing %d tods" % data.n)
 for fi, scan in enumerate(data.scans):
 	L.debug("Processing %4d/%d %s" % (data.rinds[fi]+1, data.n, ids[data.inds[fi]]))
 	tod = scan.get_samples().astype(dtype)
-	# Apply our filter. Just a simple one for now.
-	tod -= np.mean(tod,0)
-	ft   = fft.rfft(tod)
-	freq = fft.rfftfreq(scan.nsamp, 1/scan.srate)
-	ft  *= (1+np.maximum(freq/filter_fknee,1e-6)**filter_alpha)**-1
-	fft.irfft(ft, tod, normalize=True)
+	# Apply our filters
+	for f in filters: f(scan, tod)
 	# Measure our noise properties and apply inverse variance weight
 	ivar = 1/np.var(tod, 1)
 	tod *= ivar[:,None]

@@ -40,10 +40,11 @@ config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{ra
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1.0,tol=0.5", "Default parameters for scan/pickup signal")
 config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
 config.default("signal_srcsamp_default",  "use=no,type=srcsamp,name=srcsamp,srcs=none,minamp=10000,ofmt={name}_{rank:03},output=no,sys=cel", "Default parameters for source model error handling signal")
+config.default("signal_template_default",  "use=no,type=template,name=template,ofmt={name}_{rank:03},output=yes,sys=cel,order=0,pmul=1", "Default parameters for per-tod template amplitude fit")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
-config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
+config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012,jitter=0,gainerr=0,deterr=0", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012,jitter=0,gainerr=0,deterr=0", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
@@ -514,6 +515,11 @@ for out_ind in range(nouter):
 			signal = mapmaking.SignalSrcSamp(active_scans, dtype=dtype, comm=comm,
 					srcs=srcs, amplim=minamp, mask=m, sys=param["sys"])
 			signal_srcsamp = signal
+		elif param["type"] == "template":
+			template = enmap.read_map(param["map"]).astype(dtype)
+			pmul     = float(param["pmul"])
+			template[1:] *= pmul
+			signal   = mapmaking.SignalTemplate(active_scans, template, comm=comm, name=effname, ofmt=param["ofmt"], sys=param["sys"], pmat_order=param["order"])
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 		# Hack. Special source handling for some signals
@@ -564,6 +570,17 @@ for out_ind in range(nouter):
 			comps = set([int(c) for c in param["comps"]])
 			tmul = float(param["tmul"])
 			order = int(param["order"]) if "order" in param else None
+			# Set up optional pointing jitter and random gain errors
+			jitter  = float(param["jitter"])*utils.arcmin
+			gainerr = float(param["gainerr"])
+			deterr  = float(param["deterr"])
+			ptoff = jitter*np.random.standard_normal([len(myscans),2]) if jitter > 0 else [0,0]
+			if gainerr:
+				mul = mul * (1+gainerr*np.random.standard_normal(len(myscans)))
+			if deterr:
+				det_muls = [1+deterr*np.random.standard_normal(scan.ndet) for scan in myscans]
+			else: det_muls = None
+
 			if mode == 0: continue
 			if param["type"] == "auto":
 				param["type"] = ("dmap" if os.path.isdir(fname) else "map")
@@ -580,7 +597,7 @@ for out_ind in range(nouter):
 				m = enmap.read_map(fname).astype(dtype)
 				for i in range(len(m)):
 					if i not in comps: m[i] = 0
-				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order)
+				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order, ptoff=ptoff, det_muls=det_muls)
 			map_add_filters.append(filter)
 			if mode >= 2:
 				# In post mode we subtract the map that was added before each output. That's
@@ -763,7 +780,7 @@ for out_ind in range(nouter):
 			signal.precon = mapmaking.PreconNull()
 			print("Warning: map and cut precon must have compatible units")
 			continue
-		if param["type"] in ["cut","srcsamp"]:
+		if param["type"] in ["cut","srcsamp","template"]:
 			signal.precon = mapmaking.PreconCut(signal, myscans)
 		elif param["type"] in ["map","bmap","fmap","noiserect"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
@@ -850,7 +867,7 @@ for out_ind in range(nouter):
 	if map_add_filters:
 		L.info("Writing added/subtracted template map")
 		for fi, filter in enumerate(map_add_filters):
-			map   = filter.map * filter.mul
+			map   = filter.map * np.mean(filter.mul)
 			# It would be nice to only write the total added map, but they may be a mix
 			# of dmaps and enmap, or even have different coordinate systems, so this is safer.
 			# Anyway, in almost all the cases only a single map will be added

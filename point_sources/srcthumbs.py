@@ -66,7 +66,7 @@ if mode == "build":
 	tsize = int(np.ceil(2*args.rad/args.res))
 	root  = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
 	down  = config.get("downsample")
-	tag2freq = {"f090": 98, "f150": 150, "f220": 225}
+	tag2freq = {"f030": 27, "f040": 39, "f090": 98, "f150": 150, "f220": 225}
 	# Set up logging
 	utils.mkdir(root + ".log")
 	logfile   = root + ".log/log%03d.txt" % comm_world.rank
@@ -118,6 +118,7 @@ if mode == "build":
 		# direction is the same as in horizontal coordinates at time t0.
 		ra_up, dec_up = coordinates.transform("tele", "cel", [0, np.pi/2], time=utils.ctime2mjd(t0), site=site)
 		sys = ["cel", [[ra0, dec0, 0, 0, ra_up, dec_up], 0]]
+		sysinfo = np.array([[ra0,dec0],[ra_up,dec_up]]) # more storage-friendly representation of sys
 		# We need the bounding box for our map in these coordinates. We will get that by translating
 		# (azmin,azmid,azmax)*(elmin,elmax)*(tmin,tmax) for each tod.
 		ipoints = np.array(np.meshgrid(
@@ -133,7 +134,7 @@ if mode == "build":
 		# Use this to build our geometry
 		shape, wcs = enmap.geometry(box[:,::-1], res=res, proj="car", ref=(0,0))
 		return bunch.Bunch(sys=sys, shape=shape, wcs=wcs, site=site, trange=[t1,t2], t0=t0, acenter=acenter, arad=arad,
-				baz=baz, bel=bel, waz=waz, wel=wel)
+				baz=baz, bel=bel, waz=waz, wel=wel, sysinfo=sysinfo)
 
 	def find_obs_times(radecs, targ_el, t0, site, step=1, tol=1e-4, maxiter=100):
 		"""Find the unix time when each object with celestial coordinates radecs[{ra,dec},...]
@@ -469,6 +470,7 @@ if mode == "build":
 			freq  = freq,
 			beam  = scans[0].beam,
 			barea = barea,
+			sysinfo = info.sysinfo,
 			input_pointoff = input_pointoff,
 			ids   = np.char.encode(db.ids[inds]),
 			baz = baz, waz = waz, bel = bel,
@@ -647,7 +649,7 @@ elif mode == "analyse":
 			# Ideally we would transform QU to tan too, then measure, and finally transform back
 			# all the way to cel when interpreting the result. In practice curvature across the
 			# thumbnail is tiny, so it's enough to transform QU from the mapping system to cel here.
-			# TODO: Do that.
+			map  = enmap.rotate_pol(map, -data.table["polrot"][sind])
 			ivar = enmap.enmap(data.ivars[sind], data.wcss[sind])
 			odata.maps [sind] = utils.interpol(map,  ipix, order=3, mode="wrap")
 			with utils.nowarn():

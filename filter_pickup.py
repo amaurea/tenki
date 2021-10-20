@@ -44,7 +44,7 @@ if args.mask:
 
 filter = build_filter(imap.shape, imap.wcs, lbounds)
 #enmap.write_map("filter.fits", filter)
-bad    = filter_map_simple(imap, ivar, 1-filter); del filter, ivar
+bad    = filter_map(imap, ivar, 1-filter); del filter, ivar
 #enmap.write_map("bad.fits", bad)
 omap   = (imap-bad)*(imap!=0); del bad
 enmap.write_map(args.omap, omap)

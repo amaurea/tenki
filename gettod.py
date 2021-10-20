@@ -2,7 +2,7 @@ import numpy as np, os, h5py
 from enlib import config, resample, utils, gapfill
 from enact import actdata, filedb
 
-parser = config.ArgumentParser(os.environ["HOME"]+"/.enkirc")
+parser = config.ArgumentParser()
 parser.add_argument("query")
 parser.add_argument("ofile")
 parser.add_argument("-d", "--dets", type=str, default=None)

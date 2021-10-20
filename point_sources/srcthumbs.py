@@ -11,7 +11,7 @@ help_general = """Usage:
     recorded, along with its fiducial pixel coordinates in its thumbnail, and
     the beam.
 
-  srcthumbs fit   ifiles odir
+  srcthumbs analyse ifiles odir
     Reads in the files produced by srcthumbs build and fits the flux and
     position offset for each point source. Different freqs of the same array
     can be analysed jointly. An observing period can also be split into sub-periods
@@ -23,6 +23,323 @@ if len(sys.argv) < 2:
 	sys.stderr.write(help_general + "\n")
 	sys.exit(1)
 mode = sys.argv[1]
+
+def build_groups(vals, tols):
+	"""Split into groups with edges vals[n,m] change by more than tols[n]"""
+	vals, tols = np.asarray(vals).T, np.asarray(tols)
+	diffs = vals[1:]-vals[:-1]
+	jumps = np.where(np.any(np.abs(diffs)>tols,1))[0]
+	edges = np.concatenate([[0],jumps+1,[len(data)]])
+	groups= np.array([edges[:-1],edges[1:]]).T
+	return groups
+
+def stepfuns(vals, inds, n):
+	vals  = np.asarray(vals)
+	dvals = vals[1:]-vals[:-1]
+	work  = np.zeros(n, vals.dtype)
+	work[inds[0]]  = vals[0]
+	work[inds[1:]] = dvals
+	return np.cumsum(work)
+
+def split_long_groups(groups, t, maxdur=5000):
+	"""Split long groups so that no groups are longer than maxdur.
+	The implementation may look weird, but it avoids looping in python."""
+	edges = groups[:,0]
+	# Make time count from beginning
+	t     = t-t[0]
+	# Figure out how many pieces to split each group into
+	durs  = np.maximum(1,np.concatenate([t[edges[1:]]-t[edges[:-1]-1], [t[-1]-t[edges[-1]]]]))
+	nsplit= np.maximum(1,np.ceil(durs/maxdur).astype(int))
+	# Make the times relative to each segment
+	trel  = t-stepfuns(t[edges], edges, t.size)
+	# Scale each into split units
+	srel  = trel * stepfuns(nsplit/durs, edges, t.size)
+	# Make counts relative to each sub-split. The new edges are where
+	# the resulting function falls.
+	srel %= 1
+	mask  = np.concatenate([[True],srel[1:]-srel[:-1]<0])
+	# The prodcedure above loses len-1 groups. Handle by forcing an edge at orig edge pos
+	mask[edges] = True
+	oedges  = np.concatenate([np.where(mask)[0],[t.size]])
+	ogroups = np.array([oedges[:-1],oedges[1:]]).T
+	return ogroups
+
+def classify_outliers(offs, doffs, nsigma=10, nmedian=5):
+	offs = np.array(offs)
+	doffs= np.array(doffs)
+	# Median filter each offs
+	for i, off in enumerate(offs):
+		offs[i] -= ndimage.median_filter(off, nmedian, mode="reflect")
+		# Estimate uncertainty of median-subtracted quantity
+		dref = ndimage.median_filter(doffs[i], nmedian, mode="reflect")
+		dmed = dref * (np.pi*(2*nmedian+1)/(4*nmedian**2))**0.5
+		doffs[i] = (doffs[i]**2 + dmed**2)**0.5
+	bad = np.any(np.abs(offs) > nsigma*doffs,0)
+	# If everything is bad, then make the best with what we have
+	if np.all(bad): bad[:] = False
+	return bad
+
+def fit_model_poly(pos, dpos, t, az):
+	# Make time and az easier to work with
+	az  = utils.unwind(az, 360)
+	t0  = np.mean(utils.minmax(t))
+	az0 = np.mean(utils.minmax(az))
+	dt  = t-t0
+	daz = az-az0
+	# Build the basis
+	B_full = np.array([daz*0+1, daz, dt, dt**2, dt**3]) # [na,:]
+	n_full = len(B_full)
+	# Decide how many degrees of freedom we can use in the fit
+	dur    = t[-1]-t[0]
+	npoint = len(t)
+	ndof   = min(npoint, 2+(dur>500)+(dur>3000)+(dur>7000))
+	B      = B_full[:ndof]
+	rhs = np.einsum("ai,yi->ya", B, pos/dpos**2) # [{y,x},na]
+	iA  = np.einsum("ai,yi,bi->yab", B, 1/dpos**2, B) # [{y,x},na,na]
+	a   = np.linalg.solve(iA, rhs) # [{y,x},na]
+	da  = np.einsum("yaa->ya",np.linalg.inv(iA))**0.5
+	# Pad back to the full shape
+	def expand(v, n):
+		res = np.zeros((v.shape[0],)+(n,)*(v.ndim-1),v.dtype)
+		res[(slice(None),)+tuple([slice(0,m) for m in v.shape[1:]])] = v
+		return res
+	a_full  = expand( a, n_full)
+	da_full = expand(da, n_full)
+	iA_full = expand(iA, n_full)
+	# Get the model, residual and chisq
+	model = np.einsum("ai,ya->yi", B, a)
+	resid = pos - model
+	chisq = np.sum((model-resid)**2)
+	return bunch.Bunch(pos=pos, dpos=dpos, t0=t0, az0=az0, dt=dt, daz=daz, ndof=ndof,
+			B=B_full, a=a_full, da=da_full, iA=iA_full, model=model, resid=resid, chisq=chisq, neff=len(t)-ndof)
+
+def fit_model_piecewise(pos, dpos, t, az, az0=None, ndof="auto", dof_penalty=500, azslope=True):
+	# Fit a series of linear segments that share the same az gradient.
+	nsamp    = len(t)
+	nt       = len(np.unique(t))
+	if ndof == "auto":
+		if nt == 1:
+			return fit_model_piecewise(pos, dpos, t, az, ndof=1, azslope=False)
+		else:
+			dur  = max(t[-1]-t[0],300)
+			nmax = min(nt-1, 2+min(utils.nint(dur/800), nt//4))
+			fits = [fit_model_piecewise(pos, dpos, t, az, az0=az0, ndof=i, azslope=azslope) for i in range(1, nmax+1) for azslope in [False,True]]
+			#if t[0] > 1555412544.0:
+			#	print([fit.chisq/fit.neff for fit in fits])
+			# TODO: finish ndof penalty
+			best = np.argmin([fit.chisq/fit.neff+(i/dur)*dof_penalty for i, fit in enumerate(fits)])
+			return fits[best]
+	ndof     = min(ndof, nt)
+	t_range  = utils.minmax(t);  t0  = np.min(t_range);  dt  = t-t0
+	if az0 is None: az0 = np.mean(utils.minmax(az))
+	# Disable az slope if we only have a single degree of freedom, since we need that for the mean level
+	if ndof == 1: azslope = False
+	daz = az- az0
+	# Build our basis
+	B      = np.zeros([ndof,nsamp])
+	npoint = ndof-azslope
+	if npoint == 1:
+		B[0]   = t*0+1
+		tedges = t[0:1]
+	else:
+		## equi-spaced by samples
+		#tedges = t[np.arange(nsamp-1)//(ndof-1)]
+		# equi-spaced in time
+		tedges  = np.linspace(t[0], t[-1], npoint)
+		# Make sure there's at least one point between each point
+		tinds   = np.searchsorted(t, tedges)
+		_, good = np.unique(tinds, return_index=True)
+		tedges  = tedges[good]
+		ndof    = len(tedges)+azslope
+		B       = B[:ndof]
+		# And fill
+		tranges = np.array([tedges[:-1],tedges[1:]])
+		durs    = np.concatenate([tranges[1]-tranges[0]])
+		# Falling parts
+		B[0:ndof-1-azslope]  = (1-(t-tranges[0,:,None])/durs[:,None]) * ((t >= tranges[0,:,None])&(t <= tranges[1,:,None]))
+		# Rising parts
+		B[1:ndof-0-azslope] += (0+(t-tranges[0,:,None])/durs[:,None]) * ((t >= tranges[0,:,None])&(t <= tranges[1,:,None]))
+	if azslope:
+		B[-1] = daz
+	#print(B)
+	# And fit
+	rhs = np.einsum("ai,yi->ya", B, pos/dpos**2) # [{y,x},na]
+	iA  = np.einsum("ai,yi,bi->yab", B, 1/dpos**2, B) # [{y,x},na,na]
+	a   = np.linalg.solve(iA, rhs) # [{y,x},na]
+	da  = np.einsum("yaa->ya",np.linalg.inv(iA))**0.5
+	# Get the model, residual and chisq
+	model = np.einsum("ai,ya->yi", B, a)
+	resid = pos - model
+	chisq = np.sum((resid/dpos)**2)
+	return bunch.Bunch(pos=pos, dpos=dpos, t0=t0, az0=az0, dt=dt, daz=daz, ndof=ndof,
+			B=B, a=a, da=da, iA=iA, model=model, resid=resid, chisq=chisq, neff=nt-ndof, ts=tedges,
+			dur=t[-1]-t[0], azslope=azslope)
+
+def normalize_piecewise_model(model):
+	# Reformat the model so that it always has at least two points and an az slope.
+	# This makes it easier to work with later.
+	res    = model.copy()
+	del res.B, res.iA
+	npoint = res.ndof-res.azslope
+	if npoint == 1:
+		res.a, res.da = [np.concatenate([x[:,:1],x],1) for x in [res.a, res.da]]
+		res.ts = np.concatenate([res.ts,[res.t0+res.dur]])
+	if not res.azslope:
+		res.a, res.da = [np.concatenate([x, np.zeros([2,1])],1) for x in [res.a, res.da]]
+	return res
+
+def read_model(fname):
+	model = bunch.Bunch(segments=[])
+	with open(fname, "r") as ifile:
+		for line in ifile:
+			# Line has format gind, ctime0, dur, ngood, nbad, baz, waz, bel, params..
+			toks = line.split()
+			t0, dur, baz, waz, bel = [float(toks[i]) for i in [1,2,5,6,7]]
+			data         = np.array([float(w) for w in toks[9:]])
+			npoint       = (len(data)-4)//5 if len(data) > 5 else 1
+			pdata        = data[0:5*npoint].reshape(npoint,5)
+			ts           = pdata[:,0]
+			points       = pdata[:,1:].reshape(-1,2,2)
+			slope        = data[5*npoint:].reshape(2,2) if npoint > 1 else None
+			model.segments.append(bunch.Bunch(t0=t0, dur=dur, baz=baz, waz=waz, bel=bel, npoint=npoint, ts=ts, points=points, slope=slope))
+	model.t0s = np.array([segment.t0+ts[0] for segment in model.segments])
+	model.durs= np.array([segment.dur      for segment in model.segments])
+	return model
+
+def find_segment(model, t):
+	i     = np.searchsorted(model.t0s, t)
+	# Are we at one of the ends?
+	if   i  == 0: return i 
+	elif i  == len(model.t0s): return i-1
+	# Otherwise we either belong to segment i-1...
+	elif t >= model.t0s[i-1] and t <= model.t0s[i-1]+model.segments[i-1].dur:
+		return i-1
+	# ... or we're between segments, in which case we choose the nearest
+	elif abs(model.t0s[i]-t) > abs(model.t0s[i-1]+model.segments[i-1].dur-t):
+		return i-1
+	else:
+		return i
+
+def evaluate_model(segment, t, maxslope=1/3600):
+	# Are we earlier than the start?
+	ts = segment.ts + segment.t0
+	if t <= ts[0]:
+		point = np.array(segment.points[0]) # {y,x},{val,dval}
+		dur_extrap = ts[0]-t
+		slope = None
+	# Or after the end?
+	elif t >= ts[-1]:
+		point = np.array(segment.points[-1])
+		dur_extrap = t-ts[-1]
+		slope = None
+	# Or inside?
+	else:
+		# Find which points we're between
+		i2 = np.searchsorted(ts, t)
+		i1 = i2-1
+		# Linear interpolation
+		x     = (t-ts[i1])/(ts[i2]-ts[i1])
+		val   = segment.points[i1,:,0]*(1-x) + segment.points[i2,:,0]*x
+		dval  = ((segment.points[i1,:,1]*(1-x))**2 + (segment.points[i2,:,1]*x)**2)**0.5
+		point = np.concatenate([val[:,None],dval[:,None]],-1)
+		dur_extrap = 0
+		slope = segment.slope
+	# Fill in slope
+	if slope is None:
+		slope = np.zeros((2,2))
+	# Increase uncertainty based on extrapolation
+	point[:,1] = (point[:,1]**2 + (maxslope*dur_extrap)**2)**0.5
+	return bunch.Bunch(point=point, slope=slope, baz=segment.baz, extrap=dur_extrap)
+
+class OffsetCache:
+	def __init__(self, db):
+		self.db    = db
+		self.cache = {}
+	def get(self, id):
+		entry = self.db[id]
+		fname = entry.point_offsets
+		if fname not in self.cache:
+			self.cache[fname] = files.read_point_offsets(fname)
+		return self.cache[fname][entry.id]
+
+def get_prediction(model, t):
+	i     = find_segment(model, t)
+	vals  = evaluate_model(model.segments[i], t)
+	return vals
+
+def bin_models(models, bsize=3600):
+	# Bin models in time, with a bin size of bsize in seconds
+	data = []
+	for model in models:
+		t      = np.concatenate([seg.ts+seg.t0 for seg in model.segments])
+		points = np.concatenate([seg.points    for seg in model.segments],0)
+		tmin, tmax = utils.minmax(t)
+		data.append(bunch.Bunch(t=t, vals=points[:,:,0], ivars=points[:,:,1]**-2, tmin=tmin, tmax=tmax))
+	tmin = np.min([d.tmin for d in data])
+	tmax = np.max([d.tmax for d in data])
+	npix = int(np.ceil((tmax-tmin)/bsize))
+	ncomp= data[0].vals.shape[1]
+	vals, ivars = np.zeros([2,len(models),ncomp,npix])
+	for di, d in enumerate(data):
+		pix = utils.nint((d.t-tmin)/bsize)
+		for j in range(ncomp):
+			vals [di,j] = np.bincount(pix, d.vals[:,j]*d.ivars[:,j], minlength=npix)[:npix]
+			ivars[di,j] = np.bincount(pix, d.ivars[:,j],             minlength=npix)[:npix]
+	vals[ivars>0] /= ivars[ivars>0]
+	t = tmin+(np.arange(npix)+0.5)*bsize
+	# vals: [arr,{y,x},nt]
+	return bunch.Bunch(vals=vals, ivars=ivars, t=t, tmin=tmin, bsize=bsize)
+
+def build_typical_array_offsets(models, bsize=3600, bouter=24):
+	arrs = sorted(list(models.keys()))
+	data = bin_models([models[key] for key in models], bsize=bsize)
+	# Split our binned data into bigger bins, with bouter points each
+	narr, ncomp, nt = data.vals.shape
+	bvals = data.vals [:,:,:nt//bouter*bouter].reshape(narr,ncomp,nt//bouter,bouter)
+	bivars= data.ivars[:,:,:nt//bouter*bouter].reshape(narr,ncomp,nt//bouter,bouter)
+	# For each group, find the one with the largest total ivar, and make
+	# it the reference
+	best  = np.argmax(np.sum(bivars,(1,3)),0)
+	ref   = np.moveaxis(bvals [(best, slice(None), np.arange(len(best)), slice(None))], 0,1)
+	rivar = np.moveaxis(bivars[(best, slice(None), np.arange(len(best)), slice(None))], 0,1)
+	mask  = rivar > 0
+	# Our model is
+	# d = p + a + n => a = np.sum((d-p)*N")/np.sum(N")
+	offs  = np.sum(bivars*mask*(bvals-ref), -1)
+	oivar = np.sum(bivars*mask,             -1)
+	offs[oivar>0] /= oivar[oivar>0]
+	# Return the information we need to get the array offsets at some random time
+	return bunch.Bunch(arrs=arrs, offs=offs, oivar=oivar, tmin=data.tmin, bsize=bsize*bouter)
+
+def get_array_offsets(array_offsets, t):
+	pix = (t-array_offsets.tmin)/array_offsets.bsize
+	offs= utils.interpol(array_offsets.offs, [pix])
+	return {arr:offs[i] for i, arr in enumerate(array_offsets.arrs)}
+
+def find_segments(t0s, durs, ts):
+	"""Given a set of segments defined by starting points t0s and durations durs,
+	return the index of the segment each time in t belongs to, or -1 if it's not
+	in any"""
+	inds = np.searchsorted(t0s, ts)
+	good = (inds>0)&(ts-t0s[inds-1]<=durs[inds-1])
+	inds[~good] = 0
+	return inds-1
+
+def group_cumulative(vals, target=15):
+	# I can't see how to do this without looping. np.cumsum//target would lead to
+	# the fractional overshoot of one group counting for the next, which doesn't
+	# make sense.
+	edges = [0]
+	s     = 0
+	for i,v in enumerate(vals):
+		s += v
+		if s >= target:
+			edges.append(i+1)
+			s = 0
+	# extend the last group to the end of the array, to avoid too low sum there
+	if len(edges) < 2: edges.append(len(vals))
+	else: edges[-1] = len(vals)
+	return edges
 
 if mode == "build":
 	import numpy as np, warnings, time, h5py, os, sys
@@ -532,11 +849,6 @@ elif mode == "analyse":
 		try: return np.loadtxt(bdesc, usecols=(0,), ndmin=2)[:,0].astype(int)
 		except OSError: return np.array([int(w) for w in bdesc.split(",")])
 
-	def estimate_snr(fluxes, ivars, ps2d):
-		"""Estimate the signal to noise ratio we will observe for sources with
-		fluxes when observed with noise model ivars**0.5 * ps2d**-1 * ivars**0.5,
-		where ivars. Fluxes should be in mJy while ivars is in 1/uK²."""
-
 	def add_geometry(data):
 		"""The data structure we read in doesn't contain any wcs information, so
 		set that up here, along the r and l in each pixel for convenience"""
@@ -638,6 +950,12 @@ elif mode == "analyse":
 		odata= data.copy()
 		opos = enmap.posmap(oshape, owcs)
 		nsrc = len(data.table)
+		# Estimate how much apod we can afford. We want to leave an unapodized area
+		# at least 4 arcmin + 2 bsigma on each edge
+		res    = np.mean(np.product(data.table["pixshape"],1))**0.5
+		bsigma = (data.barea/(2*np.pi))**0.5
+		apod   = min(apod, utils.ceil(min(data.maps.shape[-2:])/2 - (4*utils.arcmin+2*bsigma)/res))
+		print(apod)
 		odata.maps = enmap.zeros(data.maps. shape[:-2]+oshape[-2:], owcs, data.maps. dtype)
 		odata.ivars= enmap.zeros(data.ivars.shape[:-2]+oshape[-2:], owcs, data.ivars.dtype)
 		for sind in range(nsrc):
@@ -691,6 +1009,7 @@ elif mode == "analyse":
 		if blacklist is not None:
 			data = select_srcs(data, ~utils.contains(data.table["sid"], blacklist))
 		if data.maps.size == 0: raise DataError("No sources left")
+		data.ftag = data.ftag.decode()
 		data = add_geometry(data)
 		data = gapfill_data(data)
 		data = calibrate_data(data)
@@ -1032,175 +1351,11 @@ elif mode == "model":
 	parser.add_argument("mode", help="model")
 	parser.add_argument("gfit_pos")
 	parser.add_argument("odir")
-	parser.add_argument("-e", "--minerr", type=float, default=0.01)
+	parser.add_argument("-e", "--minerr",    type=float, default=0.01)
 	args = parser.parse_args()
 	import numpy as np
 	from pixell import enmap, utils, mpi, bunch
 	from scipy import ndimage
-
-	def build_groups(vals, tols):
-		"""Split into groups with edges vals[n,m] change by more than tols[n]"""
-		vals, tols = np.asarray(vals).T, np.asarray(tols)
-		diffs = vals[1:]-vals[:-1]
-		jumps = np.where(np.any(np.abs(diffs)>tols,1))[0]
-		edges = np.concatenate([[0],jumps+1,[len(data)]])
-		groups= np.array([edges[:-1],edges[1:]]).T
-		return groups
-
-	def stepfuns(vals, inds, n):
-		vals  = np.asarray(vals)
-		dvals = vals[1:]-vals[:-1]
-		work  = np.zeros(n, vals.dtype)
-		work[inds[0]]  = vals[0]
-		work[inds[1:]] = dvals
-		return np.cumsum(work)
-
-	def split_long_groups(groups, t, maxdur=5000):
-		"""Split long groups so that no groups are longer than maxdur.
-		The implementation may look weird, but it avoids looping in python."""
-		edges = groups[:,0]
-		# Make time count from beginning
-		t     = t-t[0]
-		# Figure out how many pieces to split each group into
-		durs  = np.maximum(1,np.concatenate([t[edges[1:]]-t[edges[:-1]-1], [t[-1]-t[edges[-1]]]]))
-		nsplit= np.maximum(1,np.ceil(durs/maxdur).astype(int))
-		# Make the times relative to each segment
-		trel  = t-stepfuns(t[edges], edges, t.size)
-		# Scale each into split units
-		srel  = trel * stepfuns(nsplit/durs, edges, t.size)
-		# Make counts relative to each sub-split. The new edges are where
-		# the resulting function falls.
-		srel %= 1
-		mask  = np.concatenate([[True],srel[1:]-srel[:-1]<0])
-		# The prodcedure above loses len-1 groups. Handle by forcing an edge at orig edge pos
-		mask[edges] = True
-		oedges  = np.concatenate([np.where(mask)[0],[t.size]])
-		ogroups = np.array([oedges[:-1],oedges[1:]]).T
-		return ogroups
-
-	def classify_outliers(offs, doffs, nsigma=10, nmedian=5):
-		offs = np.array(offs)
-		doffs= np.array(doffs)
-		# Median filter each offs
-		for i, off in enumerate(offs):
-			offs[i] -= ndimage.median_filter(off, nmedian, mode="reflect")
-			# Estimate uncertainty of median-subtracted quantity
-			dref = ndimage.median_filter(doffs[i], nmedian, mode="reflect")
-			dmed = dref * (np.pi*(2*nmedian+1)/(4*nmedian**2))**0.5
-			doffs[i] = (doffs[i]**2 + dmed**2)**0.5
-		bad = np.any(np.abs(offs) > nsigma*doffs,0)
-		# If everything is bad, then make the best with what we have
-		if np.all(bad): bad[:] = False
-		return bad
-
-	def fit_model_poly(pos, dpos, t, az):
-		# Make time and az easier to work with
-		az  = utils.unwind(az, 360)
-		t0  = np.mean(utils.minmax(t))
-		az0 = np.mean(utils.minmax(az))
-		dt  = t-t0
-		daz = az-az0
-		# Build the basis
-		B_full = np.array([daz*0+1, daz, dt, dt**2, dt**3]) # [na,:]
-		n_full = len(B_full)
-		# Decide how many degrees of freedom we can use in the fit
-		dur    = t[-1]-t[0]
-		npoint = len(t)
-		ndof   = min(npoint, 2+(dur>500)+(dur>3000)+(dur>7000))
-		B      = B_full[:ndof]
-		rhs = np.einsum("ai,yi->ya", B, pos/dpos**2) # [{y,x},na]
-		iA  = np.einsum("ai,yi,bi->yab", B, 1/dpos**2, B) # [{y,x},na,na]
-		a   = np.linalg.solve(iA, rhs) # [{y,x},na]
-		da  = np.einsum("yaa->ya",np.linalg.inv(iA))**0.5
-		# Pad back to the full shape
-		def expand(v, n):
-			res = np.zeros((v.shape[0],)+(n,)*(v.ndim-1),v.dtype)
-			res[(slice(None),)+tuple([slice(0,m) for m in v.shape[1:]])] = v
-			return res
-		a_full  = expand( a, n_full)
-		da_full = expand(da, n_full)
-		iA_full = expand(iA, n_full)
-		# Get the model, residual and chisq
-		model = np.einsum("ai,ya->yi", B, a)
-		resid = pos - model
-		chisq = np.sum((model-resid)**2)
-		return bunch.Bunch(pos=pos, dpos=dpos, t0=t0, az0=az0, dt=dt, daz=daz, ndof=ndof,
-				B=B_full, a=a_full, da=da_full, iA=iA_full, model=model, resid=resid, chisq=chisq, neff=len(t)-ndof)
-
-	def fit_model_piecewise(pos, dpos, t, az, az0=None, ndof="auto", dof_penalty=500, azslope=True):
-		# Fit a series of linear segments that share the same az gradient.
-		nsamp    = len(t)
-		nt       = len(np.unique(t))
-		if ndof == "auto":
-			if nt == 1:
-				return fit_model_piecewise(pos, dpos, t, az, ndof=1, azslope=False)
-			else:
-				dur  = max(t[-1]-t[0],300)
-				nmax = min(nt-1, 2+min(utils.nint(dur/800), nt//4))
-				fits = [fit_model_piecewise(pos, dpos, t, az, az0=az0, ndof=i, azslope=azslope) for i in range(1, nmax+1) for azslope in [False,True]]
-				#if t[0] > 1555412544.0:
-				#	print([fit.chisq/fit.neff for fit in fits])
-				# TODO: finish ndof penalty
-				best = np.argmin([fit.chisq/fit.neff+(i/dur)*dof_penalty for i, fit in enumerate(fits)])
-				return fits[best]
-		ndof     = min(ndof, nt)
-		t_range  = utils.minmax(t);  t0  = np.min(t_range);  dt  = t-t0
-		if az0 is None: az0 = np.mean(utils.minmax(az))
-		# Disable az slope if we only have a single degree of freedom, since we need that for the mean level
-		if ndof == 1: azslope = False
-		daz = az- az0
-		# Build our basis
-		B      = np.zeros([ndof,nsamp])
-		npoint = ndof-azslope
-		if npoint == 1:
-			B[0]   = t*0+1
-			tedges = t[0:1]
-		else:
-			## equi-spaced by samples
-			#tedges = t[np.arange(nsamp-1)//(ndof-1)]
-			# equi-spaced in time
-			tedges  = np.linspace(t[0], t[-1], npoint)
-			# Make sure there's at least one point between each point
-			tinds   = np.searchsorted(t, tedges)
-			_, good = np.unique(tinds, return_index=True)
-			tedges  = tedges[good]
-			ndof    = len(tedges)+azslope
-			B       = B[:ndof]
-			# And fill
-			tranges = np.array([tedges[:-1],tedges[1:]])
-			durs    = np.concatenate([tranges[1]-tranges[0]])
-			# Falling parts
-			B[0:ndof-1-azslope]  = (1-(t-tranges[0,:,None])/durs[:,None]) * ((t >= tranges[0,:,None])&(t <= tranges[1,:,None]))
-			# Rising parts
-			B[1:ndof-0-azslope] += (0+(t-tranges[0,:,None])/durs[:,None]) * ((t >= tranges[0,:,None])&(t <= tranges[1,:,None]))
-		if azslope:
-			B[-1] = daz
-		#print(B)
-		# And fit
-		rhs = np.einsum("ai,yi->ya", B, pos/dpos**2) # [{y,x},na]
-		iA  = np.einsum("ai,yi,bi->yab", B, 1/dpos**2, B) # [{y,x},na,na]
-		a   = np.linalg.solve(iA, rhs) # [{y,x},na]
-		da  = np.einsum("yaa->ya",np.linalg.inv(iA))**0.5
-		# Get the model, residual and chisq
-		model = np.einsum("ai,ya->yi", B, a)
-		resid = pos - model
-		chisq = np.sum((resid/dpos)**2)
-		return bunch.Bunch(pos=pos, dpos=dpos, t0=t0, az0=az0, dt=dt, daz=daz, ndof=ndof,
-				B=B, a=a, da=da, iA=iA, model=model, resid=resid, chisq=chisq, neff=nt-ndof, ts=tedges,
-				dur=t[-1]-t[0], azslope=azslope)
-
-	def normalize_piecewise_model(model):
-		# Reformat the model so that it always has at least two points and an az slope.
-		# This makes it easier to work with later.
-		res    = model.copy()
-		del res.B, res.iA
-		npoint = res.ndof-res.azslope
-		if npoint == 1:
-			res.a, res.da = [np.concatenate([x[:,:1],x],1) for x in [res.a, res.da]]
-			res.ts = np.concatenate([res.ts,[res.t0+res.dur]])
-		if not res.azslope:
-			res.a, res.da = [np.concatenate([x, np.zeros([2,1])],1) for x in [res.a, res.da]]
-		return res
 
 	comm = mpi.COMM_WORLD
 	utils.mkdir(args.odir)
@@ -1281,6 +1436,111 @@ elif mode == "model":
 	modpointfile.close()
 	modelfile.close()
 
+elif mode == "remodel":
+	# Read in a model and some new data points, and spit out a new model that's the
+	# old model, but modified by those data points. The use case for this is when we have
+	# an array with only low-S/N measurements and so can't build a decent model on our own,
+	# and instead base it on the model from a better array.
+	import argparse
+	parser = argparse.ArgumentParser()
+	parser.add_argument("mode", help="remodel")
+	parser.add_argument("imodel")
+	parser.add_argument("gfit_pos")
+	parser.add_argument("odir")
+	args = parser.parse_args()
+	import numpy as np
+	from pixell import enmap, utils, mpi, bunch
+	from scipy import ndimage
+
+	comm = mpi.COMM_WORLD
+	utils.mkdir(args.odir)
+	snr_cap       =  8
+	snr_target    = 50
+	outlier_sigma =  8
+	min_dpos      = 0.05
+
+	# Read in the input model. has t0s[:] and segments[{t0,dur,baz,npoint[n,2],ts[n],points[n,2,2],slope[2,2]}]
+	model = read_model(args.imodel)
+
+	# Read in the analysis result.
+	# ctime, dt, snr, y, x, dy, dx, baz, waz, bel, az, daz, ra, dra, dec, ddec
+	data = np.loadtxt(args.gfit_pos, ndmin=2, usecols=list(range(16))).T
+
+	# It should be sorted, but make sure anyway
+	order = np.argsort(data[0])
+	data  = data[:,order]
+	# Avoid az jumps
+	data[7] = utils.rewind(data[7], ref=0, period=360)
+
+	inds = find_segments(model.t0s, model.durs, data[0])
+	vals, order, edges = utils.find_equal_groups_fast(inds)
+	for i, ind in enumerate(vals):
+		if ind < 0: continue
+		model.segments[ind].point_inds = order[edges[i]:edges[i+1]]
+	del inds, vals, order, edges
+
+	# The model consists of segments, but a single segment may be too short
+	# for a meaningful fit, so we will fit multiple segments jointly. Split
+	# the segments into sufficently large groups. Start by counting the capped
+	# total snr of the points in each segment
+	for seg in model.segments:
+		if "point_inds" not in seg: seg.point_inds = []
+		seg.point_snr_capped = np.sum(np.minimum(data[2,seg.point_inds], snr_cap)**2)**0.5
+
+	snrs  = np.array([seg.point_snr_capped for seg in model.segments])
+	edges = group_cumulative(snrs**2, snr_target**2)
+
+	# For each group we will fit an offset between the arrays. The az slope could
+	# also be different, but we'll keep it the same for now.
+	ogind     = 0
+	modelfile = open(args.odir + "/models.txt", "w")
+	for gind in range(len(edges)-1):
+		i1, i2 = edges[gind:gind+2]
+		# Get all the matching data points
+		dinds = np.concatenate([seg.point_inds for seg in model.segments[i1:i2]]).astype(int)
+		gdata = data[:,dinds]
+		# Get our model parameters. Embarassingly unvectorized
+		pred  = bunch.concatenate([evaluate_model(seg, data[0,i]) for seg in model.segments[i1:i2] for i in seg.point_inds])
+		# To just fit for a pointing offset, we subtract of the az part and then get
+		# the weighted mean of the results.
+		daz   = gdata[10]-pred.baz
+		azcorr= pred.slope[:,:,:] * daz[:,None,None]
+		dposs = gdata[[3,4]] - azcorr[:,:,0].T - pred.point[:,:,0].T
+		ddposs= (gdata[[5,6]]**2 + azcorr[:,:,1].T**2 + pred.point[:,:,1].T**2)**0.5
+		bad   = classify_outliers(dposs, ddposs, nsigma=outlier_sigma)
+		dposs, ddposs = dposs[:,~bad], ddposs[:,~bad]
+		# Skip if we're empty
+		if dposs.size == 0: continue
+		# Enforce minium position uncertainty
+		ddposs = np.maximum(ddposs, min_dpos)
+		# Get the mean offset
+		dpos  = np.sum(dposs*ddposs**-2,1)
+		ddpos = np.sum(ddposs**-2,1)**-0.5
+		dpos /= ddpos**-2
+		# Update the model with this offset
+		for seg in model.segments[i1:i2]:
+			if len(seg.point_inds) == 0: continue
+			seg.points[:,:,0] += dpos
+			seg.points[:,:,1]  = (seg.points[:,:,1]**2 + ddpos**2)**0.5
+			tot_snr = np.sum(data[2,seg.point_inds]**2)**0.5
+			# Output the model
+			j = seg.point_inds[0]
+			msg1 = "%4d %.0f %5.0f %3d %3d %8.3f %8.3f %8.3f %2d" % (ogind, seg.t0, seg.dur,
+					len(seg.point_inds), 0, seg.baz, seg.waz, seg.bel, len(seg.ts))
+			# Then the actual parameters.
+			msg2 = ""
+			for i in range(len(seg.ts)):
+				# t y dy x dx
+				msg2 += (" %5.0f" + " %8.3f"*4) % (seg.ts[i], *seg.points[i].reshape(-1))
+			# y dy/daz err dz/daz err
+			msg2 += (" %8.5f"*4) % tuple(seg.slope.reshape(-1))
+			# Some summary stuff for the screen print
+			agrad_snr = np.sum((seg.slope[:,0]/np.maximum(seg.slope[:,1],1e-10))**2)**0.5
+			modelfile.write(msg1 + msg2 + "\n")
+			modelfile.flush()
+			ogind += 1
+	modelfile.close()
+
 elif mode == "calfile":
 	# Given the model files and a tod selector, output the new pointing model
 	import numpy as np, warnings, time, h5py, os, sys
@@ -1295,133 +1555,6 @@ elif mode == "calfile":
 	parser.add_argument("-e", "--maxerr-other",  type=float, default=0.2)
 	parser.add_argument("-E", "--maxerr-giveup", type=float, default=2)
 	args = parser.parse_args()
-
-	def read_model(fname):
-		model = bunch.Bunch(segments=[])
-		with open(fname, "r") as ifile:
-			for line in ifile:
-				# Line has format gind, ctime0, dur, ngood, nbad, baz, waz, bel, params..
-				toks = line.split()
-				t0, dur, baz = [float(toks[i]) for i in [1,2,5]]
-				data         = np.array([float(w) for w in toks[9:]])
-				npoint       = (len(data)-4)//5 if len(data) > 5 else 1
-				pdata        = data[0:5*npoint].reshape(npoint,5)
-				ts           = pdata[:,0]
-				points       = pdata[:,1:].reshape(-1,2,2)
-				slope        = data[5*npoint:].reshape(2,2) if npoint > 1 else None
-				model.segments.append(bunch.Bunch(t0=t0, dur=dur, baz=baz, npoint=npoint, ts=ts, points=points, slope=slope))
-		model.t0s = np.array([segment.t0+ts[0] for segment in model.segments])
-		return model
-
-	def find_segment(model, t):
-		i     = np.searchsorted(model.t0s, t)
-		# Are we at one of the ends?
-		if   i  == 0: return i 
-		elif i  == len(model.t0s): return i-1
-		# Otherwise we either belong to segment i-1...
-		elif t >= model.t0s[i-1] and t <= model.t0s[i-1]+model.segments[i-1].dur:
-			return i-1
-		# ... or we're between segments, in which case we choose the nearest
-		elif abs(model.t0s[i]-t) > abs(model.t0s[i-1]+model.segments[i-1].dur-t):
-			return i-1
-		else:
-			return i
-
-	def evaluate_model(segment, t, maxslope=1/3600):
-		# Are we earlier than the start?
-		ts = segment.ts + segment.t0
-		if t <= ts[0]:
-			point = np.array(segment.points[0]) # {y,x},{val,dval}
-			dur_extrap = ts[0]-t
-			slope = None
-		# Or after the end?
-		elif t >= ts[-1]:
-			point = np.array(segment.points[-1])
-			dur_extrap = t-ts[-1]
-			slope = None
-		# Or inside?
-		else:
-			# Find which points we're between
-			i2 = np.searchsorted(ts, t)
-			i1 = i2-1
-			# Linear interpolation
-			x     = (t-ts[i1])/(ts[i2]-ts[i1])
-			val   = segment.points[i1,:,0]*(1-x) + segment.points[i2,:,0]*x
-			dval  = ((segment.points[i1,:,1]*(1-x))**2 + (segment.points[i2,:,1]*x)**2)**0.5
-			point = np.concatenate([val[:,None],dval[:,None]],-1)
-			dur_extrap = 0
-			slope = segment.slope
-		# Fill in slope
-		if slope is None:
-			slope = np.zeros((2,2))
-		# Increase uncertainty based on extrapolation
-		point[:,1] = (point[:,1]**2 + (maxslope*dur_extrap)**2)**0.5
-		return bunch.Bunch(point=point, slope=slope, baz=segment.baz, extrap=dur_extrap)
-
-	class OffsetCache:
-		def __init__(self, db):
-			self.db    = db
-			self.cache = {}
-		def get(self, id):
-			entry = self.db[id]
-			fname = entry.point_offsets
-			if fname not in self.cache:
-				self.cache[fname] = files.read_point_offsets(fname)
-			return self.cache[fname][entry.id]
-
-	def get_prediction(model, t):
-		i     = find_segment(model, t)
-		vals  = evaluate_model(model.segments[i], t)
-		return vals
-
-	def bin_models(models, bsize=3600):
-		# Bin models in time, with a bin size of bsize in seconds
-		data = []
-		for model in models:
-			t      = np.concatenate([seg.ts+seg.t0 for seg in model.segments])
-			points = np.concatenate([seg.points    for seg in model.segments],0)
-			tmin, tmax = utils.minmax(t)
-			data.append(bunch.Bunch(t=t, vals=points[:,:,0], ivars=points[:,:,1]**-2, tmin=tmin, tmax=tmax))
-		tmin = np.min([d.tmin for d in data])
-		tmax = np.max([d.tmax for d in data])
-		npix = int(np.ceil((tmax-tmin)/bsize))
-		ncomp= data[0].vals.shape[1]
-		vals, ivars = np.zeros([2,len(models),ncomp,npix])
-		for di, d in enumerate(data):
-			pix = utils.nint((d.t-tmin)/bsize)
-			for j in range(ncomp):
-				vals [di,j] = np.bincount(pix, d.vals[:,j]*d.ivars[:,j], minlength=npix)[:npix]
-				ivars[di,j] = np.bincount(pix, d.ivars[:,j],             minlength=npix)[:npix]
-		vals[ivars>0] /= ivars[ivars>0]
-		t = tmin+(np.arange(npix)+0.5)*bsize
-		# vals: [arr,{y,x},nt]
-		return bunch.Bunch(vals=vals, ivars=ivars, t=t, tmin=tmin, bsize=bsize)
-
-	def build_typical_array_offsets(models, bsize=3600, bouter=24):
-		arrs = sorted(list(models.keys()))
-		data = bin_models([models[key] for key in models], bsize=bsize)
-		# Split our binned data into bigger bins, with bouter points each
-		narr, ncomp, nt = data.vals.shape
-		bvals = data.vals [:,:,:nt//bouter*bouter].reshape(narr,ncomp,nt//bouter,bouter)
-		bivars= data.ivars[:,:,:nt//bouter*bouter].reshape(narr,ncomp,nt//bouter,bouter)
-		# For each group, find the one with the largest total ivar, and make
-		# it the reference
-		best  = np.argmax(np.sum(bivars,(1,3)),0)
-		ref   = np.moveaxis(bvals [(best, slice(None), np.arange(len(best)), slice(None))], 0,1)
-		rivar = np.moveaxis(bivars[(best, slice(None), np.arange(len(best)), slice(None))], 0,1)
-		mask  = rivar > 0
-		# Our model is
-		# d = p + a + n => a = np.sum((d-p)*N")/np.sum(N")
-		offs  = np.sum(bivars*mask*(bvals-ref), -1)
-		oivar = np.sum(bivars*mask,             -1)
-		offs[oivar>0] /= oivar[oivar>0]
-		# Return the information we need to get the array offsets at some random time
-		return bunch.Bunch(arrs=arrs, offs=offs, oivar=oivar, tmin=data.tmin, bsize=bsize*bouter)
-
-	def get_array_offsets(array_offsets, t):
-		pix = (t-array_offsets.tmin)/array_offsets.bsize
-		offs= utils.interpol(array_offsets.offs, [pix])
-		return {arr:offs[i] for i, arr in enumerate(array_offsets.arrs)}
 
 	# Parse our model files
 	models = {}

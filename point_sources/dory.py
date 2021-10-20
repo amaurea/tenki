@@ -45,6 +45,7 @@ parser.add_argument(      "--rsplit",  type=int,   default=0,  help="Split regio
 parser.add_argument("-a", "--apod",    type=int,   default=30, help="The width of the apodization region, in pixels.")
 parser.add_argument("--apod-margin",   type=int,   default=10, help="How far away from the apod region a source should be to be valid.")
 parser.add_argument("-s", "--nsigma",  type=float, default=None, help="The number a sigma a source must be to be included. Defaults to 3.5 when finding sources and None when fitting and subtracting")
+parser.add_argument("-S", "--status",  type=int, default=None, help="Only subtract point sources with this status. Only applies to dory subtract.")
 parser.add_argument("-p", "--pad",     type=int,   default=60, help="The number of pixels to extend each region by in each direciton, to avoid losing sources at region boundaries. Should be larger than apod+apod_margin")
 parser.add_argument("-P", "--prior",   type=float, default=1.0, help="The strength of the input prior in fit mode. Actually the inverse of the source variability assumed, so 0 means the source will be assumed to be infinitely variable, and hence the input database amplitudes don't add anything to the new fit. infinity means that the source is completley stable, and the input statistics add in inverse variance to the measurements. The default is 1, which means that the input database contributes only at the 1 sigma level")
 parser.add_argument("-v", "--verbose", action="store_true")
@@ -250,6 +251,8 @@ elif args.mode == "fit":
 			dory.write_catalog_txt (args.odir + "/cat.txt",  tot_cat)
 elif args.mode == "subtract":
 	icat      = dory.read_catalog(args.icat)
+	if args.status is not None:
+		icat = icat[icat.status == args.status]
 	if args.nsigma is not None:
 		icat  = icat[icat.flux[:,0] >= icat.dflux[:,0]*args.nsigma]
 	beam_prof = dory.get_beam_profile(beam)

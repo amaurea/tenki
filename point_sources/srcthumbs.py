@@ -955,7 +955,6 @@ elif mode == "analyse":
 		res    = np.mean(np.product(data.table["pixshape"],1))**0.5
 		bsigma = (data.barea/(2*np.pi))**0.5
 		apod   = min(apod, utils.ceil(min(data.maps.shape[-2:])/2 - (4*utils.arcmin+2*bsigma)/res))
-		print(apod)
 		odata.maps = enmap.zeros(data.maps. shape[:-2]+oshape[-2:], owcs, data.maps. dtype)
 		odata.ivars= enmap.zeros(data.ivars.shape[:-2]+oshape[-2:], owcs, data.ivars.dtype)
 		for sind in range(nsrc):
@@ -1193,6 +1192,9 @@ elif mode == "analyse":
 
 	# 1. Get and group our input files
 	ifiles = sorted(sum([glob.glob(ifile) for ifile in args.ifiles],[]))
+	if len(ifiles) == 0:
+		print("No input files given!")
+		sys.exit(1)
 	groups = make_groups(ifiles, grouping=args.group)
 	# Get our source blacklist too. These are the sids of sources that should always be ignored.
 	blacklist = read_blacklist(args.blacklist)

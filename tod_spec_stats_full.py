@@ -88,7 +88,7 @@ for chunk in range(nchunk):
 	nctod  = ind2-ind1
 	dspecs = np.zeros([nctod,ndet,args.nbin_det], dtype=dtype)
 	dzooms = np.zeros([nctod,ndet,args.nbin_zoom],dtype=dtype)
-	tspecs = np.zeros([5,nctod,args.nbin],dtype=dtype)
+	tspecs = np.zeros([7,nctod,args.nbin],dtype=dtype)
 	nhits  = np.zeros([nctod,args.nbin],dtype=int)
 	tcorrs = np.zeros([nctod,args.nbin],dtype=dtype)
 	srates = np.zeros([nctod],dtype=dtype)
@@ -136,6 +136,8 @@ for chunk in range(nchunk):
 		tspecs[2,i] = np.percentile(dhigh,84.13447,0)
 		tspecs[3,i] = np.min(dhigh,0)
 		tspecs[4,i] = np.max(dhigh,0)
+		tspecs[5,i] = np.mean(dhigh,0)
+		tspecs[6,i] = bin(np.abs(np.mean(ft,0))**2, args.nbin)
 		del ps
 		# Normalize ft in bins, since we want correlations
 		for di in range(d.ndet):

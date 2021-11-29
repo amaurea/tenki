@@ -397,6 +397,11 @@ def get_map_path(path):
 	if path.endswith(".fits"): return path
 	else: return filedb.get_patch_path(path)
 
+def expand_ncomp(imap, ncomp=3):
+	omap = enmap.zeros((ncomp,)+imap.shape[-2:], imap.wcs, imap.dtype)
+	omap.preflat[:imap.preflat.shape[0]] = imap.preflat[:omap.preflat.shape[0]]
+	return omap
+
 # UGLY HACK: Handle individual output file mode
 nouter = 1
 if args.individual:
@@ -510,7 +515,8 @@ for out_ind in range(nouter):
 			if param["srcs"] == "none": srcs = None
 			else: srcs = pointsrcs.read(param["srcs"])
 			minamp = float(param["minamp"])
-			if "mask" in param: m = enmap.read_map(param["mask"]).astype(dtype)
+			if "mask" in param:
+				m = expand_ncomp(enmap.read_map(param["mask"]).astype(dtype))
 			else: m = None
 			signal = mapmaking.SignalSrcSamp(active_scans, dtype=dtype, comm=comm,
 					srcs=srcs, amplim=minamp, mask=m, sys=param["sys"])

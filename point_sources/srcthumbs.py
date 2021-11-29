@@ -17,7 +17,25 @@ help_general = """Usage:
     can be analysed jointly. An observing period can also be split into sub-periods
     (e.g. 10 minutes, like a TOD) for higher time resolution at the cost of S/N.
     Outputs these in text format.
+
+  srcthumbs model gfit_pos odir
+    Split the data points output from "analyse" into segments with the same scanning patterns and
+    not too large gaps in time. Remove any outliers, and model the points as a slowly changing
+    function in time and a gradient in azimuth.
+
+  srcthumbs remodel imodel gfits_pos odir
+    Read in a model and some new data points, and spit out a new model that's the
+    old model, but modified by those data points. The use case for this is when we have
+    an array with only low-S/N measurements and so can't build a decent model on our own,
+    and instead base it on the model from a better array.
+
+  srcthumbs calfile sel modelfiles odir
+    Given the model files and a tod selector, output the new pointing model
+
 """
+
+import numpy as np
+from pixell import utils
 
 if len(sys.argv) < 2:
 	sys.stderr.write(help_general + "\n")
@@ -341,6 +359,642 @@ def group_cumulative(vals, target=15):
 	else: edges[-1] = len(vals)
 	return edges
 
+def read_freq_fluxes(desc):
+	toks = desc.split(",")
+	res  = {}
+	for tok in toks:
+		ftag, fname = tok.split(":")
+		icat = dory.read_catalog(fname)
+		res[ftag] = icat.flux[:,0]*1e3 # Jy -> mJy
+	return res
+
+def amps_to_fluxes_default(amps, freq=150, fwhm=1.4):
+	barea = 2*np.pi*(fwhm*utils.arcmin*utils.fwhm)**2
+	fconv = utils.flux_factor(barea, freq*1e9)
+	return amps * fconv / 1e3 # uK -> mJy
+
+def get_array(ids):
+	return np.char.replace(np.char.replace(np.char.rpartition(db.ids,".")[:,2],"ar","pa"),":","_")
+
+def names2uinds(names, return_unique=False):
+	"""Given a set of names, return an array where each input element has been replaced by
+	a unique integer for each unique name, counting from zero"""
+	order = np.argsort(names)
+	uinds = np.zeros(len(names),int)
+	uvals, inverse = np.unique(names[order], return_inverse=True)
+	uinds[order] = inverse
+	return uinds if not return_unique else (uinds, uvals)
+
+def build_geometry(scandb, entrydb, res=0.5*utils.arcmin, margin=0.5*utils.degree):
+	# all tods in group have same site. We also assume the same detector layout
+	entry    = entrydb[scandb.ids[0]]
+	site     = files.read_site(entry.site)
+	detpos   = actdata.read_point_offsets(entry).point_offset
+	# Array center and radius in focalplane coordinates
+	acenter  = np.mean(detpos,0)
+	arad     = np.max(np.sum((detpos-acenter)**2,1)**0.5)
+	# Find the center point of this group. We do this by transforming the array center to
+	# celestial coordinates at the mid-point time of the group.
+	t1 = np.min(scandb.data["t"]-0.5*scandb.data["dur"])
+	t2 = np.max(scandb.data["t"]+0.5*scandb.data["dur"])
+	t0 = 0.5*(t1+t2)
+	baz, bel, waz, wel = [scandb.data[x][0]*utils.degree for x in ["baz", "bel", "waz", "wel"]]
+	ra0, dec0 = coordinates.transform("bore", "cel", acenter, time=utils.ctime2mjd(t0), bore=[baz,bel,0,0], site=site)
+	# We want to map in coordinates where (ra0,dec0) are mapped to (0,0) and where the up
+	# direction is the same as in horizontal coordinates at time t0.
+	ra_up, dec_up = coordinates.transform("tele", "cel", [0, np.pi/2], time=utils.ctime2mjd(t0), site=site)
+	sys = ["cel", [[ra0, dec0, 0, 0, ra_up, dec_up], 0]]
+	sysinfo = np.array([[ra0,dec0],[ra_up,dec_up]]) # more storage-friendly representation of sys
+	# We need the bounding box for our map in these coordinates. We will get that by translating
+	# (azmin,azmid,azmax)*(elmin,elmax)*(tmin,tmax) for each tod.
+	ipoints = np.array(np.meshgrid(
+		[t1,t2],
+		np.linspace(baz-waz/2, baz+waz/2, 100),
+		[bel-wel/2,bel+wel/2]
+	)).reshape(3,-1)
+	zero    = ipoints[0]*0
+	opoints = coordinates.transform("bore", sys, zero+acenter[:,None], time=utils.ctime2mjd(ipoints[0]), bore=[ipoints[1],ipoints[2],zero,zero], site=site)
+	box     = utils.bounding_box(opoints.T)
+	box     = utils.widen_box(box, (arad+margin)*2, relative=False) # x2 = both sides, not just total width
+	box[:,0]= box[::-1,0] # descending ra
+	# Use this to build our geometry
+	shape, wcs = enmap.geometry(box[:,::-1], res=res, proj="car", ref=(0,0))
+	return bunch.Bunch(sys=sys, shape=shape, wcs=wcs, site=site, trange=[t1,t2], t0=t0, acenter=acenter, arad=arad,
+			baz=baz, bel=bel, waz=waz, wel=wel, sysinfo=sysinfo)
+
+def find_obs_times(radecs, targ_el, t0, site, step=1, tol=1e-4, maxiter=100):
+	"""Find the unix time when each object with celestial coordinates radecs[{ra,dec},...]
+	hits the given target elevation. This can fail for sources that never rise high enough
+	in the sky to reach targ_el. Those have to be very close to north/south, though.
+	They could be handled by looking at the whole array instead of just the array center,
+	but for now we will just return NaN for these.
+	"""
+	# The maximum el for each source is i/2-abs(dec-lat). We could use this to
+	# figure out which sources don't properly cross the array, but for now we
+	# will just skip them.
+	maxel = np.pi/2 - np.abs(radecs[1]-site.lat*utils.degree)
+	good  = np.where(maxel > targ_el)[0]
+	if len(good) == 0: return np.full(radecs_shape[1], np.nan)
+	def getel(dt): return coordinates.transform("cel", "tele", radecs, time=utils.ctime2mjd(t0+dt), site=site)[1]
+	def getder(dt): return (getel(dt+step/2)-getel(dt-step/2))/step
+	dt    = np.zeros(radecs.shape[1:])
+	for it in range(maxiter):
+		el    = getel(dt)
+		deriv = getder(dt)
+		resid = el-targ_el
+		dt   -= resid/deriv
+		resid = np.max(np.abs(resid)[good])
+		if resid < tol: break
+	res      = t0+dt
+	bad      = np.abs(el-targ_el) > tol
+	res[bad] = np.nan
+	return res
+
+def recover_boresight(pos_tele, pos_fplane):
+	"""Given a position in both telescope coordinates (pos_tele[{az,el},...]) and
+	focalplane coordinates (pos_fplane[{x,y},...]), infer the boresight coordinates
+	in telescope coordinates: [{baz,bel},...]. Telescope coordinates are very similar to
+	horizontal coordinates, and only differ due to the telescope baseline tilt."""
+	# p_fplane = [xf,yf,zf]
+	# Ry(-bel) p_fplane = [
+	#   xf cos(bel) - zf sin(bel),
+	#   yf,
+	#   zf cos(bel) + xf sin(bel),
+	# ]
+	# Rz(baz) Ry(-bel) p_fplane = [
+	#  [xf cos(bel) - zf sin(bel)] cos(baz) - yf sin(baz),
+	#  yf cos(baz) + [xf cos(bel) - zf sin(bel)] sin(baz),
+	#  zf cos(bel) + xf sin(bel)
+	# ]
+	# This should equal [xt,yt,zt]. The z axis lets us solve for bel:
+	# zf cos(bel) + xf sin(bel) = zt
+	# bel = -2 atan2(±sqrt(xf**2+zf**2-zt**2)-xf, zt+zf)
+	# There are two solutions. I think there should only be one with sensible angle
+	# bounds, though. So choose the one with abs(bel) <= pi/2
+	# Given bel we can compute q = xf cos(bel) - zf sin(bel), and use this to solve for baz:
+	# q  cos(baz) - yf sin(baz) = xt
+	# yf cos(baz) + q  sin(baz) = yt
+	# baz = 2 atan2(±sqrt(yf**2+q**2-xt**2)-yf, xt+q)
+	# Wolfram alpha couldn't solve the two equations jointly, for some reason.
+	# The solution above is for the first one. Of the sign options there, choos the
+	# one that also fulfills the second equation.
+	pos_tele, pos_fplane = [a.T for a in np.broadcast_arrays(pos_tele.T, pos_fplane.T)]
+	ishape = pos_tele.shape[1:]
+	xf, yf, zf = utils.ang2rect(pos_fplane).reshape(3,-1)
+	xt, yt, zt = utils.ang2rect(pos_tele).reshape(3,-1)
+	pm  = np.array([1,-1])[:,None]
+	bel = -2*np.arctan2(pm*(xf**2+zf**2-zt**2)**0.5-xf, zt+zf)
+	# Of our two possible angles, select the one within the normal elevation range.
+	# The argmax stuff is to ensure that we always slect exactly one angle
+	tol = np.finfo(bel.dtype).eps*10
+	good= np.abs(bel) <= np.pi/2+tol
+	def select(arr, good):
+		return np.where(np.argmax(good,0)==0, *arr)
+	bel = select(bel, good)
+	# Compute the azimuth angle too. Here we have a second equation to help us choose
+	# the right angle. There is probably a better way of doing this, without all those
+	# conditionals
+	q   = xf*np.cos(bel) - zf*np.sin(bel)
+	baz = 2*np.arctan2(pm*(yf**2+q**2-xt**2)**0.5-yf, xt+q)
+	good= np.abs(yf*np.cos(baz) + q*np.sin(baz) - yt) < tol
+	baz = select(baz, good)
+	# Go back to original shape
+	baz = baz.reshape(ishape)
+	bel = bel.reshape(ishape)
+	return np.array([baz, bel])
+
+def build_src_jacobi(info, spos_cel, stimes, delta=1*utils.arcmin):
+	"""Compute the [{ora,ocde},{x,y},nsrc] jacobian for the sources with celestial coordinates
+	spos_cel[{ra,dec},nsrc] that hit the array center at times stimes[nsrc]. ora, odec
+	refer to the "ra" and "dec" of the rotated output coordinate system desribed by info.sys."""
+	acenter_el = coordinates.recenter(info.acenter, [0,0,0,info.bel])[1]
+	acenter_az = coordinates.transform("cel","tele", spos_cel, time=utils.ctime2mjd(stimes), site=info.site)[0]
+	spos_tele  = np.array([acenter_az, acenter_az*0+acenter_el])
+	sbaz, sbel = recover_boresight(spos_tele, info.acenter)
+	# With the boresight known, we can now propagate [x,y], [x+dx,y] and [x,y+dy], where [x,y] = info.acenter,
+	# to our final output system
+	ipoints = info.acenter[:,None]+np.array([[0,1,0],[0,0,1]])*delta
+	zero    = stimes*0
+	opoints = coordinates.transform("bore", info.sys, ipoints[:,:,None], time=utils.ctime2mjd(stimes), bore=[sbaz, sbel, zero, zero], site=info.site)
+	jac_osys= np.moveaxis([opoints[:,1]-opoints[:,0], opoints[:,2]-opoints[:,0]], 0, 1)/delta # [{ora,odec},{x,y},nok]
+	# Get it in terms of pixels too
+	opix    = enmap.sky2pix(info.shape, info.wcs, opoints[::-1])
+	jac_opix= np.moveaxis([opix[:,1]-opix[:,0], opix[:,2]-opix[:,0]], 0, 1)/delta # [{oy,ox},{x,y},nok]
+	return jac_osys, jac_opix
+
+def build_map(info, scans, dtype=np.float32, tag=None, comm=None):
+	if comm is None: comm = mpi.COMM_WORLD
+	pre = "" if tag is None else tag + " "
+	L.info(pre + "Initializing equation system")
+	signal_cut  = mapmaking.SignalCut(scans, dtype=dtype, comm=comm)
+	area        = enmap.zeros((ncomp,)+info.shape, info.wcs, dtype)
+	signal_sky  = mapmaking.SignalMap(scans, area, comm=comm, sys=info.sys)
+	window      = mapmaking.FilterWindow(config.get("tod_window"))
+	eqsys       = mapmaking.Eqsys(scans, [signal_cut, signal_sky], weights=[window], dtype=dtype, comm=comm)
+	L.info(pre + "Building RHS")
+	eqsys.calc_b()
+	L.info(pre + "Building preconditioner")
+	signal_cut.precon = mapmaking.PreconCut(signal_cut, scans)
+	signal_sky.precon = mapmaking.PreconMapBinned(signal_sky, scans, [window])
+	L.info(pre + "Solving")
+	solver = cg.CG(eqsys.A, eqsys.b, M=eqsys.M, dot=eqsys.dot)
+	while solver.i < args.niter:
+		t1 = time.time()
+		solver.step()
+		t2 = time.time()
+		L.info(pre + "CG step %5d %15.7e %6.1f %6.3f" % (solver.i, solver.err, (t2-t1), (t2-t1)/len(scans)))
+	# Ok, now that we have our map. Extract it and ivar. That's the only stuff we need from this
+	map  = eqsys.dof.unzip(solver.x)[1]
+	ivar = signal_sky.precon.div[0,0]
+	return map, ivar
+
+def build_exposure_mask(ivar, quant=0.9, tol=0.01, edge=2*utils.arcmin, ignore=1*utils.arcmin, thin=100):
+	samps= ivar[ivar>0]
+	if len(samps) > 100*thin: samps = samps[::thin]
+	if len(samps) == 0: return enmap.zeros(ivar.shape, ivar.wcs, bool)
+	ref  = np.percentile(ivar[ivar>0][::thin], 100*quant)
+	mask = ivar > ref*tol
+	# This shrinks the mask by edge, but ignores holes smaller than ignore
+	mask = enmap.shrink_mask(mask, edge+ignore)
+	mask = enmap.grow_mask  (mask, ignore)
+	return mask
+
+def too_masked(mask, rcore=10, maxcut=0.1, maxcut_core=0.05):
+	"""mask: True = usable, False = unusable"""
+	h,w = mask.shape
+	return np.mean(~mask[h//2-rcore:h//2+rcore,w//2-rcore:w//2+rcore]) > maxcut_core or np.mean(~mask) > maxcut
+
+def extract_srcs(map, ivar, spos, tsize=30):
+	# Get the source thumbnails
+	spix       = utils.nint(map.sky2pix(spos[::-1]).T)
+	pboxes     = np.moveaxis([spix-tsize//2,spix-tsize//2+tsize],0,1) # [srcs,{from,to},{y,x}]
+	inds, maps, ivars, centers, pixshapes = [], [], [], [], []
+	for si, pbox in enumerate(pboxes):
+		# Is this thumbnail acceptable? Reject if source itself is masked,
+		# or if too large a fraction is masked
+		tivar = ivar.extract_pixbox(pbox)
+		if too_masked(tivar>0): continue
+		tmap  = map.extract_pixbox(pbox)
+		# We could store the geometry of each tile, but that's cumbersome. For such
+		# small area like this, all we need is the pixel shape and source position.
+		center   = tmap.sky2pix(spos[::-1,si])
+		pixshape = tmap.pixshape()
+		# And append to output lists
+		for alist, a in zip([inds,maps,ivars,centers,pixshapes],[si,tmap,tivar,center,pixshape]):
+			alist.append(a)
+	return bunch.Bunch(inds=np.array(inds), maps=np.array(maps), ivars=np.array(ivars),
+			centers=np.array(centers), pixshapes=np.array(pixshapes))
+
+def get_polrot(isys, osys, spos, site):
+	"""Get the angle by which the polarization was rotated when going from isys to osys."""
+	return coordinates.transform(isys, osys, spos, site=site, pol=True)[2]
+
+def build_noise_model_simple(map, ivar, tsize=30):
+	"""Build a simple noise model consisting of a single 2d power spectrum for the whitened map,
+	scaled down to a single tile's size. This ignores sky curvature and any weather etc. changes
+	during the scan, but will probably be pretty good. We will also ignore QU correlations, so the
+	result will just be TT,QQ,UU."""
+	# Start by making the maps whole multiples of the tile size. This will
+	# make the final downgrade of the 2d power spectrum clean and robust
+	(nby, nbx), (ey, ex) = np.divmod(map.shape[-2:], tsize)
+	map, ivar = [a[...,ey//2:ey//2+nby*tsize, ex//2:ex//2+nbx*tsize] for a in [map, ivar]]
+	# Whitened and mask-corrected map
+	wmap = map * ivar**0.5 / np.mean(ivar > 0)**0.5
+	ps2d = np.abs(enmap.fft(wmap))**2
+	thumb_ps2d = enmap.downgrade(ps2d, [nby,nbx])
+	return thumb_ps2d
+
+def mask_bright_srcs(shape, wcs, spos, samp, amp_lim=10e3, rmask=7*utils.arcmin):
+	spos_bright = spos[:,samp>amp_lim]
+	r = enmap.distance_from(shape, wcs, spos[:,samp>amp_lim], rmax=rmask)
+	return r >= rmask
+
+def write_bunch(fname, bunch):
+	with h5py.File(fname, "w") as ofile:
+		for key in bunch:
+			ofile[key] = bunch[key]
+
+def write_empty(fname, desc="empty"):
+	with open(fname, "w") as ofile:
+		ofile.write("%s\n" % desc)
+
+def maybe_skip(condition, reason, ename):
+	if not condition: return False
+	L.info("%s. Skipping" % reason)
+	write_empty(ename, reason)
+	return True
+
+
+def make_groups(ifiles, grouping="none"):
+	"""Given a set of input files with name format */thumbs_timetag_array_ftag.hdf,
+	return a list of groups that should be analysed together. Each group consists
+	of a list of indices into the list of input files. The valid groupings are
+	"none":  Each file in its own group.
+	"array": Group the different frequencies of the same array for each oberving time.
+	"all":   Group all observations taken at the same time."""
+	if grouping == "none":
+		return [[i] for i in range(len(ifiles))]
+	elif grouping == "array":
+		tags = np.char.rpartition(np.array(ifiles), "/")[:,2]
+		tags = np.char.rpartition(tags, "_")[:,0]
+		return utils.find_equal_groups(tags)
+	elif grouping == "all":
+		tags = np.char.rpartition(np.array(ifiles), "/")[:,2]
+		tags = np.char.rpartition(tags, "_")[:,0]
+		tags = np.char.rpartition(tags, "_")[:,0]
+		return utils.find_equal_groups(tags)
+	else:
+		raise ValueError("Unknown grouping '%s'" % str(grouping))
+
+def read_blacklist(bdesc):
+	if bdesc is None: return None
+	try: return np.loadtxt(bdesc, usecols=(0,), ndmin=2)[:,0].astype(int)
+	except OSError: return np.array([int(w) for w in bdesc.split(",")])
+
+def add_geometry(data):
+	"""The data structure we read in doesn't contain any wcs information, so
+	set that up here, along the r and l in each pixel for convenience"""
+	odata = data.copy()
+	shape = data.maps.shape[-2:]
+	wcss  = []
+	rs    = []
+	ls    = []
+	for i in range(len(data.table)):
+		wcs = wcsutils.WCS(naxis=2)
+		wcs.wcs.ctype = ["RA---CAR", "DEC--CAR"]
+		wcs.wcs.cdelt = data.table["pixshape"][i][::-1]/utils.degree
+		wcs.wcs.crpix = data.table["center"][i][::-1]+1
+		wcss.append(wcs)
+		rs.append(enmap.modrmap(shape, wcs, [0,0]))
+		ls.append(enmap.modlmap(shape, wcs))
+	odata.wcss = np.array(wcss)
+	odata.rs   = rs
+	odata.ls   = ls
+	return odata
+
+def expand_table(data):
+	# Add the telescope coordinates (basically the same as horizontal coords).
+	# Ideally this information would have already been present in table to begin with,
+	# such that all act-depenent stuff was there.
+	from enlib import coordinates
+	import numpy.lib.recfunctions as rfn
+	pos_tele   = coordinates.transform("cel", "tele", data.table["pos_cel"].T, time=utils.ctime2mjd(data.table["ctime"]))
+	model_flux = data.table["ref_flux"]
+	data.table = rfn.append_fields(data.table, ["az","el", "model_flux"], [pos_tele[0], pos_tele[1], model_flux])
+	return data
+
+def mask_data(data, tol=0.1):
+	odata = data.copy()
+	refs  = np.median(data.ivars,(-2,-1))
+	mask  = data.ivars > refs[:,None,None]*tol
+	odata.ivars *= mask
+	odata.maps  *= mask[:,None]
+	return odata
+
+def get_lbeam_flat(r, br, shape, wcs):
+	"""Given a 1d beam br(r), compute the 2d beam transform bl(ly,lx) for
+	the l-space of the map with the given shape, wcs, assuming a flat sky.
+	The resulting beam is normalized to have a peak of 1."""
+	cpix   = np.array(shape[-2:])//2-1
+	cpos   = enmap.pix2sky(shape, wcs, cpix)
+	rmap   = enmap.shift(enmap.modrmap(shape, wcs, cpos), -cpix)
+	bmap   = enmap.ndmap(np.interp(rmap, r, br, right=0), wcs)
+	lbeam  = enmap.fft(bmap, normalize=False).real
+	return lbeam
+
+def gapfill_data(data, n=3, tol=15):
+	odata = data.copy()
+	if n <= 1: return odata
+	# First figure out which pixels are bad. We can't trust ivar to tell us this,
+	# apparently. So we will compare the map pixel values to median-filtered versions
+	# of the same, and see if they differ by more than expected from the noise.
+	# It looks like all problematic pixels in T are also bad in Q, and to a lesser
+	# extent in U. This lets us use pol as the masking diagnostic, which helps avoiding
+	# problems with strong sources being masked.
+	fmaps = ndimage.median_filter(data.maps, (1,)*(data.maps.ndim-2)+(n,1))
+	diffs = np.max(np.abs(data.maps-fmaps)[:,1:],1)
+	ref_err = np.median(data.ivars, (-2,-1))**-0.5
+	bad   = diffs > ref_err[:,None,None]*tol
+	bad   = np.tile(bad[:,None], (1,fmaps.shape[1],1,1))
+	# Replace bad pixels with filtered versions
+	odata.maps[bad] = fmaps[bad]
+	odata.gapfilled = np.sum(bad,(-2,-1))
+	return odata
+
+def calibrate_data(data):
+	"""Transform from uK to mJy/sr"""
+	# uK to mJy/sr
+	odata       = data.copy()
+	unit        = utils.dplanck(data.freq*1e9, utils.T_cmb) / 1e3
+	odata.maps  = data.maps  * unit
+	odata.ivars = data.ivars * unit**-2
+	return odata
+
+def nonan(a):
+	res = np.asanyarray(a).copy()
+	res[~np.isfinite(a)] = 0
+	return res
+
+def apod_crossfade(a, n):
+	a = np.asanyarray(a).copy()
+	def helper(a1, a2, axis):
+		if axis < 0: axis += a1.ndim
+		x = (np.arange(1, a1.shape[axis]+1)/(2*a1.shape[axis]))[(slice(None),)+(None,)*(a1.ndim-1-axis)]
+		reverse = (slice(None),)*axis + (slice(None,None,-1),)
+		return a1*(1-x) + a2[reverse]*x, a2*x + a1[reverse]*(1-x)
+	a[...,:,-n:], a[...,:,:n] = helper(a[...,:,-n:], a[...,:,:n], -1)
+	a[...,-n:,:], a[...,:n,:] = helper(a[...,-n:,:], a[...,:n,:], -2)
+	return a
+
+def reproject_data(data, oshape, owcs, apod=10, pointoff=None):
+	"""Reproject the maps from having separate wcses per thumb to a common
+	geometry given by oshape, owcs. Replaces maps, ivars and ps2d. Does not change table."""
+	odata= data.copy()
+	opos = enmap.posmap(oshape, owcs)
+	nsrc = len(data.table)
+	# Estimate how much apod we can afford. We want to leave an unapodized area
+	# at least 4 arcmin + 2 bsigma on each edge
+	res    = np.mean(np.product(data.table["pixshape"],1))**0.5
+	bsigma = (data.barea/(2*np.pi))**0.5
+	apod   = min(apod, utils.ceil(min(data.maps.shape[-2:])/2 - (4*utils.arcmin+2*bsigma)/res))
+	odata.maps = enmap.zeros(data.maps. shape[:-2]+oshape[-2:], owcs, data.maps. dtype)
+	odata.ivars= enmap.zeros(data.ivars.shape[:-2]+oshape[-2:], owcs, data.ivars.dtype)
+	# optional pointing offset
+	pointoff = np.zeros((nsrc,2)) + (0 if pointoff is None else pointoff)
+	for sind in range(nsrc):
+		# jacobian {y,x},{focx,focy}. We switch the last axis to make it {y,x},{focy,focx} instead
+		jac  = data.table["jacobi"][sind,:,::-1]
+		ipix = np.einsum("ab,bij->aij", jac, opos - pointoff[sind,:,None,None]) + data.table["center"][sind,:,None,None]
+		map  = enmap.apod(enmap.enmap(data.maps[sind], data.wcss[sind]), apod)
+		#map  = apod_crossfade(enmap.enmap(data.maps[sind], data.wcss[sind]), apod)
+		# Ideally we would transform QU to tan too, then measure, and finally transform back
+		# all the way to cel when interpreting the result. In practice curvature across the
+		# thumbnail is tiny, so it's enough to transform QU from the mapping system to cel here.
+		map  = enmap.rotate_pol(map, -data.table["polrot"][sind])
+		ivar = enmap.enmap(data.ivars[sind], data.wcss[sind])
+		odata.maps [sind] = utils.interpol(map,  ipix, order=3, mode="wrap")
+		with utils.nowarn():
+			# Interpolate var instead of ivar. This makes low-hit regions grow instead of shrink
+			# when interpolating, making us downweight areas that have contributions from low-hit
+			# pixels. This removes a lot of stripiness and bad pixels in the result.
+			odata.ivars[sind] = nonan(1/utils.interpol(1/ivar, ipix, order=1, mode="wrap"))
+		# ivars is in units of white noise per original pixel. Transform that to the equivalent
+		# white noise per new pixel
+		old_pixsize = np.product(data.table["pixshape"][sind])
+		new_pixsize = odata.ivars[sind].pixsize()
+		odata.ivars[sind] *= new_pixsize/old_pixsize
+
+	# Handle the power spectrum too
+	mean_wcs = wcsutils.WCS(naxis=2)
+	mean_wcs.wcs.ctype = ["RA---CAR", "DEC--CAR"]
+	mean_wcs.wcs.cdelt = np.mean(data.table["pixshape"][:,::-1],0)/utils.degree
+	mean_wcs.wcs.crpix = np.mean(data.table["center"][:,::-1],0)+1
+	# This will have inf entries, but will invert before using it
+	with utils.nowarn():
+		odata.ps2d = 1/enmap.enmap(utils.interpol(1/data.ps2d, enmap.l2pix(data.maps.shape, mean_wcs, enmap.lmap(oshape, owcs))), owcs)
+	return odata
+
+def beam2fwhm(r, br):
+	return 2*r[br>np.max(br)/2][-1]
+
+def select_srcs(data, sel):
+	odata = data.copy()
+	odata.table = data.table[sel]
+	odata.maps  = data.maps[sel]
+	odata.ivars = data.ivars[sel]
+	if "wcss" in odata:
+		odata.wcss  = data.wcss[sel]
+	return odata
+
+class DataError(Exception): pass
+
+def prepare_data(data, oshape, owcs, blacklist=None, pointoff=None):
+	if blacklist is not None:
+		data = select_srcs(data, ~utils.contains(data.table["sid"], blacklist))
+	if data.maps.size == 0: raise DataError("No sources left")
+	data.ftag = data.ftag.decode()
+	data = add_geometry(data)
+	data = gapfill_data(data)
+	data = calibrate_data(data)
+	data = expand_table(data)
+	#data = mask_data(data)
+
+	data = reproject_data(data, oshape, owcs, pointoff=pointoff)
+	data.lbeam = get_lbeam_flat(data.beam[0], data.beam[1],    oshape, owcs)
+	data.lbeam2= get_lbeam_flat(data.beam[0], data.beam[1]**2, oshape, owcs)
+	norm = np.max(data.lbeam)
+	data.lbeam  /= norm
+	data.lbeam2 /= norm**2
+	data.fwhm    = beam2fwhm(data.beam[0], data.beam[1])
+	return data
+
+def solve(rho, kappa):
+	mask = kappa==0
+	with utils.nowarn():
+		flux  = rho/kappa
+		dflux = kappa**-0.5
+		snr   = flux/dflux
+		for a in [flux, dflux, snr]:
+			a[mask] = 0
+	return flux, dflux, snr
+
+def group_srcs_snmin(gdata, inds, snmin=5):
+	"""Given a set of inds [(gind,sind),...] into gdata, split these into sub-groups
+	that each have a (model) S/N ratio of snmin, but keep individual sources that are
+	already that bright separate. So undetectable sources will be merged, but not
+	already detectable ones. Multiple versions of the same source will always be merged."""
+	table      = np.concatenate([gdata[gind].table[sind:sind+1] for gind, sind in inds]).view(np.recarray)
+	ref_dflux  = np.array([gdata[gind].ref_dflux[sind] for gind, sind in inds])
+	model_snr  = table["model_flux"]/ref_dflux
+	# First merge multiple instances of the same source
+	wgroups    = utils.find_equal_groups(table["sid"])
+	# Order these by time
+	t     = table["ctime"][[g[0] for g in wgroups]]
+	order = np.argsort(t)
+	# And loop through, building the final groups
+	ogroups = []
+	weak_g, weak_snr2, weak_prev = [], 0, -1
+	for ind in order:
+		g   = wgroups[ind]
+		snr2= np.sum(model_snr[g]**2)
+		if snr2 >= snmin**2:
+			# Is the work-group already strong enough? If so, accept it as is
+			ogroups.append(g)
+		else:
+			# Otherwise accumulate into the weak group
+			weak_g    += g
+			weak_snr2 += snr2
+			if weak_snr2 >= snmin**2:
+				weak_prev = len(ogroups)
+				ogroups.append(weak_g)
+				weak_g, weak_snr2 = [], 0
+	# If we have some left-over weak groups, merge them with the last one.
+	# Otherwise just accept them as a sub-standard group
+	if weak_g:
+		if weak_prev >= 0: ogroups[weak_prev] += weak_g
+		else:              ogroups.append(weak_g)
+	# Finally translate the indices from internal to full indices
+	ogroups = [[inds[i] for i in g] for g in ogroups]
+	return ogroups
+
+def find_peaks(snr, snlim=None, bounds=None, fwhm=None):
+	"""Find the peak location in the S/N map snr. Any cropping etc. is assumed to have
+	already been done."""
+	if bounds is not None: snr   = snr.submap(bounds)
+	if snlim  is None:     snlim = 4
+	dtype = [("snr", "d"), ("pos", "2d"), ("dpos", "2d")]
+	labels, nlabel = ndimage.label(snr >= snlim)
+	if nlabel == 0: return np.zeros([0], dtype).view(np.recarray)
+	allofthem = np.arange(nlabel)+1
+	peak_snr  = ndimage.maximum(snr, labels, allofthem)
+	peak_pos  = snr.pix2sky(np.array(ndimage.center_of_mass(snr**2, labels, allofthem)).T).T
+	# Estimate the position error from the FWHM and snr. This is safer than peak chisq -1 area,
+	# since that area could be very small (e.g. less than one pixel)
+	res = np.zeros(nlabel, dtype).view(np.recarray)
+	res.snr = peak_snr
+	res.pos = peak_pos
+	objects   = ndimage.find_objects(labels)
+	for i, obj in enumerate(objects):
+		sub_snr = snr[obj]
+		if fwhm is None:
+			mask    = sub_snr >= peak_snr[i]/2
+			area    = np.sum(sub_snr.pixsizemap()*mask)
+			area   /= 2 # we want area of B, not of N"B²
+			fwhm_est= 2*(area/np.pi)**0.5
+		else:
+			fwhm_est= fwhm
+		res.dpos[i] = 0.6*fwhm/peak_snr[i]
+	# Sort them by peak snr
+	order     = np.argsort(peak_snr)[::-1]
+	res = res[order]
+	return res
+
+class FitMultiModalError(Exception): pass
+class FitNonDetectionError(Exception): pass
+class FitUnexpectedFluxError(Exception): pass
+
+def fit_group(gdata, inds, bounds=None, snmin=None):
+	"""Fit the source offset (the negative of the pointing offset) and the
+	source flux for each source in the time-group given by tgroups. Returns
+	a bunch with members pos, dpos, snr, ctime, fluxes[nsrc,TQU], dfluxes[nsrc,TQU]"""
+	# First flatten rho, kappa and table for convenience
+	rho   = enmap.enmap([gdata[gi].rho  [subi] for gi, subi in inds])
+	kappa = enmap.enmap([gdata[gi].kappa[subi] for gi, subi in inds])
+	table = np.concatenate([gdata[gi].table[subi:subi+1] for gi, subi in inds]).view(np.recarray)
+	fwhms = np.array([gdata[gi].fwhm for gi, subi in inds])
+	model_flux = table["model_flux"]
+	model_ivar = kappa[:,0].at([0,0],order=1)
+	model_snr  = model_flux * model_ivar**0.5
+	# Build the optimally weighted combined map
+	rho_tot   = np.sum(rho[:,0]  *model_flux[:,None,None],0)
+	kappa_tot = np.sum(kappa[:,0]*model_flux[:,None,None]**2,0)
+	snr_tot   = solve(rho_tot, kappa_tot)[2]
+	# Find the (hopefully) single significant peak in the result
+	fwhm_eff  = np.sum(fwhms * model_snr**2)/np.sum(model_snr**2)
+	peaks     = find_peaks(snr_tot, bounds=bounds, snlim=snmin, fwhm=fwhm_eff)
+	# Disqualify any unreasonably weak peaks
+	tot_snr = np.sum(model_snr**2)**0.5
+	peaks   = peaks[peaks.snr > tot_snr * 0.2]
+	if len(peaks) == 0: raise FitNonDetectionError()
+	if len(peaks)  > 1: raise FitMultiModalError()
+	# Ok, we have a good fit
+	fit = bunch.Bunch(pos=peaks[0].pos, dpos=peaks[0].dpos, snr=peaks[0].snr, model_snr=tot_snr, snr_map=snr_tot)
+	# Measure the properties of individual srcs
+	fit.table   = table
+	fit.flux    = rho.at(fit.pos)/kappa.at(fit.pos)
+	fit.dflux   = kappa.at(fit.pos)**-0.5
+	fit.ftags   = [gdata[gi].ftag for gi,subi in inds]
+	fit.inds    = inds
+	fit.ref_dflux = np.mean(kappa_tot)**-0.5
+	# Measure the weighted mean ctime, az and el for the group, as well as a weighted stddev
+	W = model_snr**2
+	def meandev(a, W):
+		mean = np.sum(a*W)/np.sum(W)
+		dev  = (np.sum((a-mean)**2*W)/np.sum(W))**0.5
+		return mean, dev
+	for name in ["ctime", "az", "el"]:
+		fit[name], fit["d"+name] = meandev(table[name], W)
+	for i, name in enumerate(["ra","dec"]):
+		fit[name], fit["d"+name] = meandev(utils.unwind(table["pos_cel"][:,i]), W)
+	# The boresight info is assumed to be constant inside a group
+	for name in ["baz", "waz", "bel"]:
+		fit[name] = gdata[0][name]
+	return fit
+
+def merge_files(ifiles, ofile):
+	lines = []
+	for ifile in ifiles:
+		with open(ifile, "r") as f:
+			lines += f.readlines()
+	lines = sorted(lines)
+	with open(ofile, "w") as f:
+		f.writelines(lines)
+
+def debug_outlier(gdata, inds, bounds=None):
+	"""Output thumbnails and catalog information for the point sources that went
+	into the given inds, and exit"""
+	with open("debug_info.txt", "w") as ofile:
+		for i, (gi, subi) in enumerate(inds):
+			data = gdata[gi]
+			enmap.write_map("debug_map_%02d.fits" % i, data.maps[subi])
+			enmap.write_map("debug_rho_%02d.fits" % i, data.rho[subi])
+			enmap.write_map("debug_kappa_%02d.fits" % i, data.kappa[subi])
+			enmap.write_map("debug_ivar_%02d.fits" % i, data.ivars[subi])
+			with utils.nowarn():
+				enmap.write_map("debug_snr_%02d.fits" % i, data.rho[subi]/gdata[gi].kappa[subi]**0.5)
+			tab  = data.table[subi].view(np.recarray)
+			desc = "%2d %5d %8.3f %8.3f %8.2f" % (i, tab.sid, tab.pos_cel[0]/utils.degree, tab.pos_cel[1]/utils.degree, tab.ref_flux)
+			ofile.write(desc + "\n")
+			print(desc)
+	tot_rho   = np.sum(data.rho,0)
+	tot_kappa = np.sum(data.kappa,0)
+	tot_flux, tot_dflux, tot_snr = solve(tot_rho, tot_kappa)
+	enmap.write_map("debug_snr_tot.fits", tot_snr)
+	fit = fit_group(gdata, inds, bounds=bounds)
+	enmap.write_map("debug_snr_tot2.fits", fit.snr_map)
+	sys.exit(0)
+
+
 if mode == "build":
 	import numpy as np, warnings, time, h5py, os, sys
 	from enlib  import config, coordinates, mapmaking, bench, scanutils, log, cg, dory
@@ -389,270 +1043,6 @@ if mode == "build":
 	logfile   = root + ".log/log%03d.txt" % comm_world.rank
 	log_level = log.verbosity2level(config.get("verbosity"))
 	L = log.init(level=log_level, file=logfile, rank=comm_world.rank, shared=False)
-
-	def read_freq_fluxes(desc):
-		toks = desc.split(",")
-		res  = {}
-		for tok in toks:
-			ftag, fname = tok.split(":")
-			icat = dory.read_catalog(fname)
-			res[ftag] = icat.flux[:,0]*1e3 # Jy -> mJy
-		return res
-
-	def amps_to_fluxes_default(amps, freq=150, fwhm=1.4):
-		barea = 2*np.pi*(fwhm*utils.arcmin*utils.fwhm)**2
-		fconv = utils.flux_factor(barea, freq*1e9)
-		return amps * fconv / 1e3 # uK -> mJy
-
-	def get_array(ids):
-		return np.char.replace(np.char.replace(np.char.rpartition(db.ids,".")[:,2],"ar","pa"),":","_")
-
-	def names2uinds(names, return_unique=False):
-		"""Given a set of names, return an array where each input element has been replaced by
-		a unique integer for each unique name, counting from zero"""
-		order = np.argsort(names)
-		uinds = np.zeros(len(names),int)
-		uvals, inverse = np.unique(names[order], return_inverse=True)
-		uinds[order] = inverse
-		return uinds if not return_unique else (uinds, uvals)
-
-	def build_geometry(scandb, entrydb, res=0.5*utils.arcmin, margin=0.5*utils.degree):
-		# all tods in group have same site. We also assume the same detector layout
-		entry    = entrydb[scandb.ids[0]]
-		site     = files.read_site(entry.site)
-		detpos   = actdata.read_point_offsets(entry).point_offset
-		# Array center and radius in focalplane coordinates
-		acenter  = np.mean(detpos,0)
-		arad     = np.max(np.sum((detpos-acenter)**2,1)**0.5)
-		# Find the center point of this group. We do this by transforming the array center to
-		# celestial coordinates at the mid-point time of the group.
-		t1 = np.min(scandb.data["t"]-0.5*scandb.data["dur"])
-		t2 = np.max(scandb.data["t"]+0.5*scandb.data["dur"])
-		t0 = 0.5*(t1+t2)
-		baz, bel, waz, wel = [scandb.data[x][0]*utils.degree for x in ["baz", "bel", "waz", "wel"]]
-		ra0, dec0 = coordinates.transform("bore", "cel", acenter, time=utils.ctime2mjd(t0), bore=[baz,bel,0,0], site=site)
-		# We want to map in coordinates where (ra0,dec0) are mapped to (0,0) and where the up
-		# direction is the same as in horizontal coordinates at time t0.
-		ra_up, dec_up = coordinates.transform("tele", "cel", [0, np.pi/2], time=utils.ctime2mjd(t0), site=site)
-		sys = ["cel", [[ra0, dec0, 0, 0, ra_up, dec_up], 0]]
-		sysinfo = np.array([[ra0,dec0],[ra_up,dec_up]]) # more storage-friendly representation of sys
-		# We need the bounding box for our map in these coordinates. We will get that by translating
-		# (azmin,azmid,azmax)*(elmin,elmax)*(tmin,tmax) for each tod.
-		ipoints = np.array(np.meshgrid(
-			[t1,t2],
-			np.linspace(baz-waz/2, baz+waz/2, 100),
-			[bel-wel/2,bel+wel/2]
-		)).reshape(3,-1)
-		zero    = ipoints[0]*0
-		opoints = coordinates.transform("bore", sys, zero+acenter[:,None], time=utils.ctime2mjd(ipoints[0]), bore=[ipoints[1],ipoints[2],zero,zero], site=site)
-		box     = utils.bounding_box(opoints.T)
-		box     = utils.widen_box(box, (arad+margin)*2, relative=False) # x2 = both sides, not just total width
-		box[:,0]= box[::-1,0] # descending ra
-		# Use this to build our geometry
-		shape, wcs = enmap.geometry(box[:,::-1], res=res, proj="car", ref=(0,0))
-		return bunch.Bunch(sys=sys, shape=shape, wcs=wcs, site=site, trange=[t1,t2], t0=t0, acenter=acenter, arad=arad,
-				baz=baz, bel=bel, waz=waz, wel=wel, sysinfo=sysinfo)
-
-	def find_obs_times(radecs, targ_el, t0, site, step=1, tol=1e-4, maxiter=100):
-		"""Find the unix time when each object with celestial coordinates radecs[{ra,dec},...]
-		hits the given target elevation. This can fail for sources that never rise high enough
-		in the sky to reach targ_el. Those have to be very close to north/south, though.
-		They could be handled by looking at the whole array instead of just the array center,
-		but for now we will just return NaN for these.
-		"""
-		# The maximum el for each source is i/2-abs(dec-lat). We could use this to
-		# figure out which sources don't properly cross the array, but for now we
-		# will just skip them.
-		maxel = np.pi/2 - np.abs(radecs[1]-site.lat*utils.degree)
-		good  = np.where(maxel > targ_el)[0]
-		if len(good) == 0: return np.full(radecs_shape[1], np.nan)
-		def getel(dt): return coordinates.transform("cel", "tele", radecs, time=utils.ctime2mjd(t0+dt), site=site)[1]
-		def getder(dt): return (getel(dt+step/2)-getel(dt-step/2))/step
-		dt    = np.zeros(radecs.shape[1:])
-		for it in range(maxiter):
-			el    = getel(dt)
-			deriv = getder(dt)
-			resid = el-targ_el
-			dt   -= resid/deriv
-			resid = np.max(np.abs(resid)[good])
-			if resid < tol: break
-		res      = t0+dt
-		bad      = np.abs(el-targ_el) > tol
-		res[bad] = np.nan
-		return res
-
-	def recover_boresight(pos_tele, pos_fplane):
-		"""Given a position in both telescope coordinates (pos_tele[{az,el},...]) and
-		focalplane coordinates (pos_fplane[{x,y},...]), infer the boresight coordinates
-		in telescope coordinates: [{baz,bel},...]. Telescope coordinates are very similar to
-		horizontal coordinates, and only differ due to the telescope baseline tilt."""
-		# p_fplane = [xf,yf,zf]
-		# Ry(-bel) p_fplane = [
-		#   xf cos(bel) - zf sin(bel),
-		#   yf,
-		#   zf cos(bel) + xf sin(bel),
-		# ]
-		# Rz(baz) Ry(-bel) p_fplane = [
-		#  [xf cos(bel) - zf sin(bel)] cos(baz) - yf sin(baz),
-		#  yf cos(baz) + [xf cos(bel) - zf sin(bel)] sin(baz),
-		#  zf cos(bel) + xf sin(bel)
-		# ]
-		# This should equal [xt,yt,zt]. The z axis lets us solve for bel:
-		# zf cos(bel) + xf sin(bel) = zt
-		# bel = -2 atan2(±sqrt(xf**2+zf**2-zt**2)-xf, zt+zf)
-		# There are two solutions. I think there should only be one with sensible angle
-		# bounds, though. So choose the one with abs(bel) <= pi/2
-		# Given bel we can compute q = xf cos(bel) - zf sin(bel), and use this to solve for baz:
-		# q  cos(baz) - yf sin(baz) = xt
-		# yf cos(baz) + q  sin(baz) = yt
-		# baz = 2 atan2(±sqrt(yf**2+q**2-xt**2)-yf, xt+q)
-		# Wolfram alpha couldn't solve the two equations jointly, for some reason.
-		# The solution above is for the first one. Of the sign options there, choos the
-		# one that also fulfills the second equation.
-		pos_tele, pos_fplane = [a.T for a in np.broadcast_arrays(pos_tele.T, pos_fplane.T)]
-		ishape = pos_tele.shape[1:]
-		xf, yf, zf = utils.ang2rect(pos_fplane).reshape(3,-1)
-		xt, yt, zt = utils.ang2rect(pos_tele).reshape(3,-1)
-		pm  = np.array([1,-1])[:,None]
-		bel = -2*np.arctan2(pm*(xf**2+zf**2-zt**2)**0.5-xf, zt+zf)
-		# Of our two possible angles, select the one within the normal elevation range.
-		# The argmax stuff is to ensure that we always slect exactly one angle
-		tol = np.finfo(bel.dtype).eps*10
-		good= np.abs(bel) <= np.pi/2+tol
-		def select(arr, good):
-			return np.where(np.argmax(good,0)==0, *arr)
-		bel = select(bel, good)
-		# Compute the azimuth angle too. Here we have a second equation to help us choose
-		# the right angle. There is probably a better way of doing this, without all those
-		# conditionals
-		q   = xf*np.cos(bel) - zf*np.sin(bel)
-		baz = 2*np.arctan2(pm*(yf**2+q**2-xt**2)**0.5-yf, xt+q)
-		good= np.abs(yf*np.cos(baz) + q*np.sin(baz) - yt) < tol
-		baz = select(baz, good)
-		# Go back to original shape
-		baz = baz.reshape(ishape)
-		bel = bel.reshape(ishape)
-		return np.array([baz, bel])
-
-	def build_src_jacobi(info, spos_cel, stimes, delta=1*utils.arcmin):
-		"""Compute the [{ora,ocde},{x,y},nsrc] jacobian for the sources with celestial coordinates
-		spos_cel[{ra,dec},nsrc] that hit the array center at times stimes[nsrc]. ora, odec
-		refer to the "ra" and "dec" of the rotated output coordinate system desribed by info.sys."""
-		acenter_el = coordinates.recenter(info.acenter, [0,0,0,info.bel])[1]
-		acenter_az = coordinates.transform("cel","tele", spos_cel, time=utils.ctime2mjd(stimes), site=info.site)[0]
-		spos_tele  = np.array([acenter_az, acenter_az*0+acenter_el])
-		sbaz, sbel = recover_boresight(spos_tele, info.acenter)
-		# With the boresight known, we can now propagate [x,y], [x+dx,y] and [x,y+dy], where [x,y] = info.acenter,
-		# to our final output system
-		ipoints = info.acenter[:,None]+np.array([[0,1,0],[0,0,1]])*delta
-		zero    = stimes*0
-		opoints = coordinates.transform("bore", info.sys, ipoints[:,:,None], time=utils.ctime2mjd(stimes), bore=[sbaz, sbel, zero, zero], site=info.site)
-		jac_osys= np.moveaxis([opoints[:,1]-opoints[:,0], opoints[:,2]-opoints[:,0]], 0, 1)/delta # [{ora,odec},{x,y},nok]
-		# Get it in terms of pixels too
-		opix    = enmap.sky2pix(info.shape, info.wcs, opoints[::-1])
-		jac_opix= np.moveaxis([opix[:,1]-opix[:,0], opix[:,2]-opix[:,0]], 0, 1)/delta # [{oy,ox},{x,y},nok]
-		return jac_osys, jac_opix
-
-	def build_map(info, scans, dtype=np.float32, tag=None, comm=mpi.COMM_WORLD):
-		pre = "" if tag is None else tag + " "
-		L.info(pre + "Initializing equation system")
-		signal_cut  = mapmaking.SignalCut(scans, dtype=dtype, comm=comm)
-		area        = enmap.zeros((ncomp,)+info.shape, info.wcs, dtype)
-		signal_sky  = mapmaking.SignalMap(scans, area, comm=comm, sys=info.sys)
-		window      = mapmaking.FilterWindow(config.get("tod_window"))
-		eqsys       = mapmaking.Eqsys(scans, [signal_cut, signal_sky], weights=[window], dtype=dtype, comm=comm)
-		L.info(pre + "Building RHS")
-		eqsys.calc_b()
-		L.info(pre + "Building preconditioner")
-		signal_cut.precon = mapmaking.PreconCut(signal_cut, scans)
-		signal_sky.precon = mapmaking.PreconMapBinned(signal_sky, scans, [window])
-		L.info(pre + "Solving")
-		solver = cg.CG(eqsys.A, eqsys.b, M=eqsys.M, dot=eqsys.dot)
-		while solver.i < args.niter:
-			t1 = time.time()
-			solver.step()
-			t2 = time.time()
-			L.info(pre + "CG step %5d %15.7e %6.1f %6.3f" % (solver.i, solver.err, (t2-t1), (t2-t1)/len(scans)))
-		# Ok, now that we have our map. Extract it and ivar. That's the only stuff we need from this
-		map  = eqsys.dof.unzip(solver.x)[1]
-		ivar = signal_sky.precon.div[0,0]
-		return map, ivar
-
-	def build_exposure_mask(ivar, quant=0.9, tol=0.01, edge=2*utils.arcmin, ignore=1*utils.arcmin, thin=100):
-		samps= ivar[ivar>0]
-		if len(samps) > 100*thin: samps = samps[::thin]
-		if len(samps) == 0: return enmap.zeros(ivar.shape, ivar.wcs, bool)
-		ref  = np.percentile(ivar[ivar>0][::thin], 100*quant)
-		mask = ivar > ref*tol
-		# This shrinks the mask by edge, but ignores holes smaller than ignore
-		mask = enmap.shrink_mask(mask, edge+ignore)
-		mask = enmap.grow_mask  (mask, ignore)
-		return mask
-
-	def too_masked(mask, rcore=10, maxcut=0.1, maxcut_core=0.05):
-		"""mask: True = usable, False = unusable"""
-		h,w = mask.shape
-		return np.mean(~mask[h//2-rcore:h//2+rcore,w//2-rcore:w//2+rcore]) > maxcut_core or np.mean(~mask) > maxcut
-
-	def extract_srcs(map, ivar, spos, tsize=30):
-		# Get the source thumbnails
-		spix       = utils.nint(map.sky2pix(spos[::-1]).T)
-		pboxes     = np.moveaxis([spix-tsize//2,spix-tsize//2+tsize],0,1) # [srcs,{from,to},{y,x}]
-		inds, maps, ivars, centers, pixshapes = [], [], [], [], []
-		for si, pbox in enumerate(pboxes):
-			# Is this thumbnail acceptable? Reject if source itself is masked,
-			# or if too large a fraction is masked
-			tivar = ivar.extract_pixbox(pbox)
-			if too_masked(tivar>0): continue
-			tmap  = map.extract_pixbox(pbox)
-			# We could store the geometry of each tile, but that's cumbersome. For such
-			# small area like this, all we need is the pixel shape and source position.
-			center   = tmap.sky2pix(spos[::-1,si])
-			pixshape = tmap.pixshape()
-			# And append to output lists
-			for alist, a in zip([inds,maps,ivars,centers,pixshapes],[si,tmap,tivar,center,pixshape]):
-				alist.append(a)
-		return bunch.Bunch(inds=np.array(inds), maps=np.array(maps), ivars=np.array(ivars),
-				centers=np.array(centers), pixshapes=np.array(pixshapes))
-
-	def get_polrot(isys, osys, spos, site):
-		"""Get the angle by which the polarization was rotated when going from isys to osys."""
-		return coordinates.transform(isys, osys, spos, site=site, pol=True)[2]
-
-	def build_noise_model_simple(map, ivar, tsize=30):
-		"""Build a simple noise model consisting of a single 2d power spectrum for the whitened map,
-		scaled down to a single tile's size. This ignores sky curvature and any weather etc. changes
-		during the scan, but will probably be pretty good. We will also ignore QU correlations, so the
-		result will just be TT,QQ,UU."""
-		# Start by making the maps whole multiples of the tile size. This will
-		# make the final downgrade of the 2d power spectrum clean and robust
-		(nby, nbx), (ey, ex) = np.divmod(map.shape[-2:], tsize)
-		map, ivar = [a[...,ey//2:ey//2+nby*tsize, ex//2:ex//2+nbx*tsize] for a in [map, ivar]]
-		# Whitened and mask-corrected map
-		wmap = map * ivar**0.5 / np.mean(ivar > 0)**0.5
-		ps2d = np.abs(enmap.fft(wmap))**2
-		thumb_ps2d = enmap.downgrade(ps2d, [nby,nbx])
-		return thumb_ps2d
-
-	def mask_bright_srcs(shape, wcs, spos, samp, amp_lim=10e3, rmask=7*utils.arcmin):
-		spos_bright = spos[:,samp>amp_lim]
-		r = enmap.distance_from(shape, wcs, spos[:,samp>amp_lim], rmax=rmask)
-		return r >= rmask
-
-	def write_bunch(fname, bunch):
-		with h5py.File(fname, "w") as ofile:
-			for key in bunch:
-				ofile[key] = bunch[key]
-
-	def write_empty(fname, desc="empty"):
-		with open(fname, "w") as ofile:
-			ofile.write("%s\n" % desc)
-
-	def maybe_skip(condition, reason, ename):
-		if not condition: return False
-		L.info("%s. Skipping" % reason)
-		write_empty(ename, reason)
-		return True
 
 	# Read our point source database: .ra, .dec and .I (amp uK). Should probably change to flux later
 	# These sources will be used for all arrays and frequencies, with the assumption that all have the
@@ -823,373 +1213,6 @@ elif mode == "analyse":
 	comm = mpi.COMM_WORLD
 	utils.mkdir(args.odir)
 
-	def make_groups(ifiles, grouping="none"):
-		"""Given a set of input files with name format */thumbs_timetag_array_ftag.hdf,
-		return a list of groups that should be analysed together. Each group consists
-		of a list of indices into the list of input files. The valid groupings are
-		"none":  Each file in its own group.
-		"array": Group the different frequencies of the same array for each oberving time.
-		"all":   Group all observations taken at the same time."""
-		if grouping == "none":
-			return [[i] for i in range(len(ifiles))]
-		elif grouping == "array":
-			tags = np.char.rpartition(np.array(ifiles), "/")[:,2]
-			tags = np.char.rpartition(tags, "_")[:,0]
-			return utils.find_equal_groups(tags)
-		elif grouping == "all":
-			tags = np.char.rpartition(np.array(ifiles), "/")[:,2]
-			tags = np.char.rpartition(tags, "_")[:,0]
-			tags = np.char.rpartition(tags, "_")[:,0]
-			return utils.find_equal_groups(tags)
-		else:
-			raise ValueError("Unknown grouping '%s'" % str(grouping))
-
-	def read_blacklist(bdesc):
-		if bdesc is None: return None
-		try: return np.loadtxt(bdesc, usecols=(0,), ndmin=2)[:,0].astype(int)
-		except OSError: return np.array([int(w) for w in bdesc.split(",")])
-
-	def add_geometry(data):
-		"""The data structure we read in doesn't contain any wcs information, so
-		set that up here, along the r and l in each pixel for convenience"""
-		odata = data.copy()
-		shape = data.maps.shape[-2:]
-		wcss  = []
-		rs    = []
-		ls    = []
-		for i in range(len(data.table)):
-			wcs = wcsutils.WCS(naxis=2)
-			wcs.wcs.ctype = ["RA---CAR", "DEC--CAR"]
-			wcs.wcs.cdelt = data.table["pixshape"][i][::-1]/utils.degree
-			wcs.wcs.crpix = data.table["center"][i][::-1]+1
-			wcss.append(wcs)
-			rs.append(enmap.modrmap(shape, wcs, [0,0]))
-			ls.append(enmap.modlmap(shape, wcs))
-		odata.wcss = np.array(wcss)
-		odata.rs   = rs
-		odata.ls   = ls
-		return odata
-
-	def expand_table(data):
-		# Add the telescope coordinates (basically the same as horizontal coords).
-		# Ideally this information would have already been present in table to begin with,
-		# such that all act-depenent stuff was there.
-		from enlib import coordinates
-		import numpy.lib.recfunctions as rfn
-		pos_tele   = coordinates.transform("cel", "tele", data.table["pos_cel"].T, time=utils.ctime2mjd(data.table["ctime"]))
-		model_flux = data.table["ref_flux"]
-		data.table = rfn.append_fields(data.table, ["az","el", "model_flux"], [pos_tele[0], pos_tele[1], model_flux])
-		return data
-
-	def mask_data(data, tol=0.1):
-		odata = data.copy()
-		refs  = np.median(data.ivars,(-2,-1))
-		mask  = data.ivars > refs[:,None,None]*tol
-		odata.ivars *= mask
-		odata.maps  *= mask[:,None]
-		return odata
-
-	def get_lbeam_flat(r, br, shape, wcs):
-		"""Given a 1d beam br(r), compute the 2d beam transform bl(ly,lx) for
-		the l-space of the map with the given shape, wcs, assuming a flat sky.
-		The resulting beam is normalized to have a peak of 1."""
-		cpix   = np.array(shape[-2:])//2-1
-		cpos   = enmap.pix2sky(shape, wcs, cpix)
-		rmap   = enmap.shift(enmap.modrmap(shape, wcs, cpos), -cpix)
-		bmap   = enmap.ndmap(np.interp(rmap, r, br, right=0), wcs)
-		lbeam  = enmap.fft(bmap, normalize=False).real
-		return lbeam
-
-	def gapfill_data(data, n=3, tol=15):
-		odata = data.copy()
-		if n <= 1: return odata
-		# First figure out which pixels are bad. We can't trust ivar to tell us this,
-		# apparently. So we will compare the map pixel values to median-filtered versions
-		# of the same, and see if they differ by more than expected from the noise.
-		# It looks like all problematic pixels in T are also bad in Q, and to a lesser
-		# extent in U. This lets us use pol as the masking diagnostic, which helps avoiding
-		# problems with strong sources being masked.
-		fmaps = ndimage.median_filter(data.maps, (1,)*(data.maps.ndim-2)+(n,1))
-		diffs = np.max(np.abs(data.maps-fmaps)[:,1:],1)
-		ref_err = np.median(data.ivars, (-2,-1))**-0.5
-		bad   = diffs > ref_err[:,None,None]*tol
-		bad   = np.tile(bad[:,None], (1,fmaps.shape[1],1,1))
-		# Replace bad pixels with filtered versions
-		odata.maps[bad] = fmaps[bad]
-		odata.gapfilled = np.sum(bad,(-2,-1))
-		return odata
-
-	def calibrate_data(data):
-		"""Transform from uK to mJy/sr"""
-		# uK to mJy/sr
-		odata       = data.copy()
-		unit        = utils.dplanck(data.freq*1e9, utils.T_cmb) / 1e3
-		odata.maps  = data.maps  * unit
-		odata.ivars = data.ivars * unit**-2
-		return odata
-
-	def nonan(a):
-		res = np.asanyarray(a).copy()
-		res[~np.isfinite(a)] = 0
-		return res
-
-	def apod_crossfade(a, n):
-		a = np.asanyarray(a).copy()
-		def helper(a1, a2, axis):
-			if axis < 0: axis += a1.ndim
-			x = (np.arange(1, a1.shape[axis]+1)/(2*a1.shape[axis]))[(slice(None),)+(None,)*(a1.ndim-1-axis)]
-			reverse = (slice(None),)*axis + (slice(None,None,-1),)
-			return a1*(1-x) + a2[reverse]*x, a2*x + a1[reverse]*(1-x)
-		a[...,:,-n:], a[...,:,:n] = helper(a[...,:,-n:], a[...,:,:n], -1)
-		a[...,-n:,:], a[...,:n,:] = helper(a[...,-n:,:], a[...,:n,:], -2)
-		return a
-
-	def reproject_data(data, oshape, owcs, apod=10):
-		"""Reproject the maps from having separate wcses per thumb to a common
-		geometry given by oshape, owcs. Replaces maps, ivars and ps2d. Does not change table."""
-		odata= data.copy()
-		opos = enmap.posmap(oshape, owcs)
-		nsrc = len(data.table)
-		# Estimate how much apod we can afford. We want to leave an unapodized area
-		# at least 4 arcmin + 2 bsigma on each edge
-		res    = np.mean(np.product(data.table["pixshape"],1))**0.5
-		bsigma = (data.barea/(2*np.pi))**0.5
-		apod   = min(apod, utils.ceil(min(data.maps.shape[-2:])/2 - (4*utils.arcmin+2*bsigma)/res))
-		odata.maps = enmap.zeros(data.maps. shape[:-2]+oshape[-2:], owcs, data.maps. dtype)
-		odata.ivars= enmap.zeros(data.ivars.shape[:-2]+oshape[-2:], owcs, data.ivars.dtype)
-		for sind in range(nsrc):
-			# jacobian {y,x},{focx,focy}. We switch the last axis to make it {y,x},{focy,focx} instead
-			jac  = data.table["jacobi"][sind,:,::-1]
-			ipix = np.einsum("ab,bij->aij", jac, opos) + data.table["center"][sind,:,None,None]
-			map  = enmap.apod(enmap.enmap(data.maps[sind], data.wcss[sind]), apod)
-			#map  = apod_crossfade(enmap.enmap(data.maps[sind], data.wcss[sind]), apod)
-			# Ideally we would transform QU to tan too, then measure, and finally transform back
-			# all the way to cel when interpreting the result. In practice curvature across the
-			# thumbnail is tiny, so it's enough to transform QU from the mapping system to cel here.
-			map  = enmap.rotate_pol(map, -data.table["polrot"][sind])
-			ivar = enmap.enmap(data.ivars[sind], data.wcss[sind])
-			odata.maps [sind] = utils.interpol(map,  ipix, order=3, mode="wrap")
-			with utils.nowarn():
-				# Interpolate var instead of ivar. This makes low-hit regions grow instead of shrink
-				# when interpolating, making us downweight areas that have contributions from low-hit
-				# pixels. This removes a lot of stripiness and bad pixels in the result.
-				odata.ivars[sind] = nonan(1/utils.interpol(1/ivar, ipix, order=1, mode="wrap"))
-			# ivars is in units of white noise per original pixel. Transform that to the equivalent
-			# white noise per new pixel
-			old_pixsize = np.product(data.table["pixshape"][sind])
-			new_pixsize = odata.ivars[sind].pixsize()
-			odata.ivars[sind] *= new_pixsize/old_pixsize
-
-		# Handle the power spectrum too
-		mean_wcs = wcsutils.WCS(naxis=2)
-		mean_wcs.wcs.ctype = ["RA---CAR", "DEC--CAR"]
-		mean_wcs.wcs.cdelt = np.mean(data.table["pixshape"][:,::-1],0)/utils.degree
-		mean_wcs.wcs.crpix = np.mean(data.table["center"][:,::-1],0)+1
-		# This will have inf entries, but will invert before using it
-		with utils.nowarn():
-			odata.ps2d = 1/enmap.enmap(utils.interpol(1/data.ps2d, enmap.l2pix(data.maps.shape, mean_wcs, enmap.lmap(oshape, owcs))), owcs)
-		return odata
-
-	def beam2fwhm(r, br):
-		return 2*r[br>np.max(br)/2][-1]
-
-	def select_srcs(data, sel):
-		odata = data.copy()
-		odata.table = data.table[sel]
-		odata.maps  = data.maps[sel]
-		odata.ivars = data.ivars[sel]
-		if "wcss" in odata:
-			odata.wcss  = data.wcss[sel]
-		return odata
-
-	class DataError(Exception): pass
-
-	def prepare_data(data, oshape, owcs, blacklist=None):
-		if blacklist is not None:
-			data = select_srcs(data, ~utils.contains(data.table["sid"], blacklist))
-		if data.maps.size == 0: raise DataError("No sources left")
-		data.ftag = data.ftag.decode()
-		data = add_geometry(data)
-		data = gapfill_data(data)
-		data = calibrate_data(data)
-		data = expand_table(data)
-		#data = mask_data(data)
-
-		data = reproject_data(data, oshape, owcs)
-		data.lbeam = get_lbeam_flat(data.beam[0], data.beam[1],    oshape, owcs)
-		data.lbeam2= get_lbeam_flat(data.beam[0], data.beam[1]**2, oshape, owcs)
-		norm = np.max(data.lbeam)
-		data.lbeam  /= norm
-		data.lbeam2 /= norm**2
-		data.fwhm    = beam2fwhm(data.beam[0], data.beam[1])
-		return data
-
-	def solve(rho, kappa):
-		mask = kappa==0
-		with utils.nowarn():
-			flux  = rho/kappa
-			dflux = kappa**-0.5
-			snr   = flux/dflux
-			for a in [flux, dflux, snr]:
-				a[mask] = 0
-		return flux, dflux, snr
-
-	def group_srcs_snmin(gdata, inds, snmin=5):
-		"""Given a set of inds [(gind,sind),...] into gdata, split these into sub-groups
-		that each have a (model) S/N ratio of snmin, but keep individual sources that are
-		already that bright separate. So undetectable sources will be merged, but not
-		already detectable ones. Multiple versions of the same source will always be merged."""
-		table      = np.concatenate([gdata[gind].table[sind:sind+1] for gind, sind in inds]).view(np.recarray)
-		ref_dflux  = np.array([gdata[gind].ref_dflux[sind] for gind, sind in inds])
-		model_snr  = table["model_flux"]/ref_dflux
-		# First merge multiple instances of the same source
-		wgroups    = utils.find_equal_groups(table["sid"])
-		# Order these by time
-		t     = table["ctime"][[g[0] for g in wgroups]]
-		order = np.argsort(t)
-		# And loop through, building the final groups
-		ogroups = []
-		weak_g, weak_snr2, weak_prev = [], 0, -1
-		for ind in order:
-			g   = wgroups[ind]
-			snr2= np.sum(model_snr[g]**2)
-			if snr2 >= snmin**2:
-				# Is the work-group already strong enough? If so, accept it as is
-				ogroups.append(g)
-			else:
-				# Otherwise accumulate into the weak group
-				weak_g    += g
-				weak_snr2 += snr2
-				if weak_snr2 >= snmin**2:
-					weak_prev = len(ogroups)
-					ogroups.append(weak_g)
-					weak_g, weak_snr2 = [], 0
-		# If we have some left-over weak groups, merge them with the last one.
-		# Otherwise just accept them as a sub-standard group
-		if weak_g:
-			if weak_prev >= 0: ogroups[weak_prev] += weak_g
-			else:              ogroups.append(weak_g)
-		# Finally translate the indices from internal to full indices
-		ogroups = [[inds[i] for i in g] for g in ogroups]
-		return ogroups
-
-	def find_peaks(snr, snlim=None, bounds=None, fwhm=None):
-		"""Find the peak location in the S/N map snr. Any cropping etc. is assumed to have
-		already been done."""
-		if bounds is not None: snr   = snr.submap(bounds)
-		if snlim  is None:     snlim = 4
-		dtype = [("snr", "d"), ("pos", "2d"), ("dpos", "2d")]
-		labels, nlabel = ndimage.label(snr >= snlim)
-		if nlabel == 0: return np.zeros([0], dtype).view(np.recarray)
-		allofthem = np.arange(nlabel)+1
-		peak_snr  = ndimage.maximum(snr, labels, allofthem)
-		peak_pos  = snr.pix2sky(np.array(ndimage.center_of_mass(snr**2, labels, allofthem)).T).T
-		# Estimate the position error from the FWHM and snr. This is safer than peak chisq -1 area,
-		# since that area could be very small (e.g. less than one pixel)
-		res = np.zeros(nlabel, dtype).view(np.recarray)
-		res.snr = peak_snr
-		res.pos = peak_pos
-		objects   = ndimage.find_objects(labels)
-		for i, obj in enumerate(objects):
-			sub_snr = snr[obj]
-			if fwhm is None:
-				mask    = sub_snr >= peak_snr[i]/2
-				area    = np.sum(sub_snr.pixsizemap()*mask)
-				area   /= 2 # we want area of B, not of N"B²
-				fwhm_est= 2*(area/np.pi)**0.5
-			else:
-				fwhm_est= fwhm
-			res.dpos[i] = 0.6*fwhm/peak_snr[i]
-		# Sort them by peak snr
-		order     = np.argsort(peak_snr)[::-1]
-		res = res[order]
-		return res
-
-	class FitMultiModalError(Exception): pass
-	class FitNonDetectionError(Exception): pass
-	class FitUnexpectedFluxError(Exception): pass
-
-	def fit_group(gdata, inds, bounds=None, snmin=None):
-		"""Fit the source offset (the negative of the pointing offset) and the
-		source flux for each source in the time-group given by tgroups. Returns
-		a bunch with members pos, dpos, snr, ctime, fluxes[nsrc,TQU], dfluxes[nsrc,TQU]"""
-		# First flatten rho, kappa and table for convenience
-		rho   = enmap.enmap([gdata[gi].rho  [subi] for gi, subi in inds])
-		kappa = enmap.enmap([gdata[gi].kappa[subi] for gi, subi in inds])
-		table = np.concatenate([gdata[gi].table[subi:subi+1] for gi, subi in inds]).view(np.recarray)
-		fwhms = np.array([gdata[gi].fwhm for gi, subi in inds])
-		model_flux = table["model_flux"]
-		model_ivar = kappa[:,0].at([0,0],order=1)
-		model_snr  = model_flux * model_ivar**0.5
-		# Build the optimally weighted combined map
-		rho_tot   = np.sum(rho[:,0]  *model_flux[:,None,None],0)
-		kappa_tot = np.sum(kappa[:,0]*model_flux[:,None,None]**2,0)
-		snr_tot   = solve(rho_tot, kappa_tot)[2]
-		# Find the (hopefully) single significant peak in the result
-		fwhm_eff  = np.sum(fwhms * model_snr**2)/np.sum(model_snr**2)
-		peaks     = find_peaks(snr_tot, bounds=bounds, snlim=snmin, fwhm=fwhm_eff)
-		# Disqualify any unreasonably weak peaks
-		tot_snr = np.sum(model_snr**2)**0.5
-		peaks   = peaks[peaks.snr > tot_snr * 0.2]
-		if len(peaks) == 0: raise FitNonDetectionError()
-		if len(peaks)  > 1: raise FitMultiModalError()
-		# Ok, we have a good fit
-		fit = bunch.Bunch(pos=peaks[0].pos, dpos=peaks[0].dpos, snr=peaks[0].snr, model_snr=tot_snr, snr_map=snr_tot)
-		# Measure the properties of individual srcs
-		fit.table   = table
-		fit.flux    = rho.at(fit.pos)/kappa.at(fit.pos)
-		fit.dflux   = kappa.at(fit.pos)**-0.5
-		fit.ftags   = [gdata[gi].ftag for gi,subi in inds]
-		fit.inds    = inds
-		fit.ref_dflux = np.mean(kappa_tot)**-0.5
-		# Measure the weighted mean ctime, az and el for the group, as well as a weighted stddev
-		W = model_snr**2
-		def meandev(a, W):
-			mean = np.sum(a*W)/np.sum(W)
-			dev  = (np.sum((a-mean)**2*W)/np.sum(W))**0.5
-			return mean, dev
-		for name in ["ctime", "az", "el"]:
-			fit[name], fit["d"+name] = meandev(table[name], W)
-		for i, name in enumerate(["ra","dec"]):
-			fit[name], fit["d"+name] = meandev(utils.unwind(table["pos_cel"][:,i]), W)
-		# The boresight info is assumed to be constant inside a group
-		for name in ["baz", "waz", "bel"]:
-			fit[name] = gdata[0][name]
-		return fit
-
-	def merge_files(ifiles, ofile):
-		lines = []
-		for ifile in ifiles:
-			with open(ifile, "r") as f:
-				lines += f.readlines()
-		lines = sorted(lines)
-		with open(ofile, "w") as f:
-			f.writelines(lines)
-
-	def debug_outlier(gdata, inds, bounds=None):
-		"""Output thumbnails and catalog information for the point sources that went
-		into the given inds, and exit"""
-		with open("debug_info.txt", "w") as ofile:
-			for i, (gi, subi) in enumerate(inds):
-				data = gdata[gi]
-				enmap.write_map("debug_map_%02d.fits" % i, data.maps[subi])
-				enmap.write_map("debug_rho_%02d.fits" % i, data.rho[subi])
-				enmap.write_map("debug_kappa_%02d.fits" % i, data.kappa[subi])
-				enmap.write_map("debug_ivar_%02d.fits" % i, data.ivars[subi])
-				with utils.nowarn():
-					enmap.write_map("debug_snr_%02d.fits" % i, data.rho[subi]/gdata[gi].kappa[subi]**0.5)
-				tab  = data.table[subi].view(np.recarray)
-				desc = "%2d %5d %8.3f %8.3f %8.2f" % (i, tab.sid, tab.pos_cel[0]/utils.degree, tab.pos_cel[1]/utils.degree, tab.ref_flux)
-				ofile.write(desc + "\n")
-				print(desc)
-		tot_rho   = np.sum(data.rho,0)
-		tot_kappa = np.sum(data.kappa,0)
-		tot_flux, tot_dflux, tot_snr = solve(tot_rho, tot_kappa)
-		enmap.write_map("debug_snr_tot.fits", tot_snr)
-		fit = fit_group(gdata, inds, bounds=bounds)
-		enmap.write_map("debug_snr_tot2.fits", fit.snr_map)
-		sys.exit(0)
-
 	# 1. Get and group our input files
 	ifiles = sorted(sum([glob.glob(ifile) for ifile in args.ifiles],[]))
 	if len(ifiles) == 0:
@@ -1209,7 +1232,6 @@ elif mode == "analyse":
 	rmax = np.max(np.abs(np.array(data.maps.shape[-2:])*data.table["pixshape"]/2))
 	res  = np.mean(np.product(data.table["pixshape"],1))**0.5 / 4
 	oshape, owcs = enmap.thumbnail_geometry(r=rmax, res=res)
-	opos = enmap.posmap(oshape, owcs)
 	del data
 	uht  = uharm.UHT(oshape, owcs, mode="flat")
 
@@ -1656,3 +1678,223 @@ elif mode == "calfile":
 	opointfile.close()
 	oslopefile.close()
 	ofullfile.close()
+
+elif mode == "stack":
+	# Stack thumbnails in time-bins per array using the position and flux fits
+	# from analyse mode
+	import numpy as np, argparse, os, sys, glob, warnings
+	from scipy  import ndimage
+	from pixell import utils, bunch, enmap, mpi, wcsutils, uharm, analysis
+	import numpy.lib.recfunctions as rfn
+	parser = argparse.ArgumentParser()
+	parser.add_argument("ifiles", nargs="+", help="arr:gfits_pos1 arr:gfits_pos2 ... thumb1 thumb2 thumb3 ...")
+	parser.add_argument("odir")
+	parser.add_argument("-T", "--tstep",     type=float, default=3600)
+	parser.add_argument(      "--blacklist", type=str,   default=None)
+	parser.add_argument("-N", "--max-rms",   type=float, default=0.20)
+	parser.add_argument(      "--time-tol",  type=float, default=10)
+	parser.add_argument("-l", "--lknee",     type=float, default=1500)
+	parser.add_argument("-a", "--alpha",     type=float, default=-3)
+	parser.add_argument("-r", "--res",       type=float, default=0.5)
+	parser.add_argument("-R", "--rmax",      type=float, default=8)
+	parser.add_argument(      "--nline",     type=int,   default=None)
+	args = parser.parse_args()
+
+	def organize_ifiles_thumbs(ifiles):
+		"""Given a list of thumbnail files, returns a dictionary
+		with a key for each array-freq (atag) combination. The value
+		for each of these will be a bunch with members .ctimes and .fnames.
+		.ctimes is an array of the starting ctime for each, and .fnames
+		has the corresponding file file names copied from ifiles.
+		The order is sorted by ctime."""
+		res = {}
+		for ifile in ifiles:
+			toks = os.path.basename(ifile).split(".")[0].split("_")
+			ctime = float(toks[1])
+			atag  = "_".join(toks[2:4])
+			if atag not in res:
+				res[atag] = bunch.Bunch(ctimes=[], fnames=[])
+			res[atag].ctimes.append(ctime)
+			res[atag].fnames.append(ifile)
+		# Convert from lists to arrays, and sort
+		for atag in res:
+			for key in res[atag]:
+				res[atag][key] = np.array(res[atag][key])
+			order = np.argsort(res[atag].ctimes)
+			for key in res[atag]:
+				res[atag][key] = res[atag][key][order]
+		return res
+
+	def apply_filter(map, ivar, filter, tol=1e-4, ref=0.9):
+		rhs = enmap.ifft(enmap.fft(map*ivar)*(1-filter)).real
+		div = enmap.ifft(enmap.fft(    ivar)*(1-filter)).real
+		ref = np.percentile(div, ref*100,(-2,-1))[...,None,None]*tol
+		ref[ref<=0] = 1
+		div = np.maximum(div, ref)
+		bad = rhs/div
+		omap = (map-bad)*(ivar>0)
+		return omap
+
+	def find_close(a, b, tol=1):
+		"""Find matches between the (1d) lists a and b that are closer than tol.
+		Returns [{ind_a, ind_b}]"""
+		a = np.asarray(a)
+		b = np.asarray(b)
+		pairs = utils.crossmatch(a[:,None],b[:,None],rmax=tol,mode="closest")
+		return [(ia,ib) for ia,ib in pairs if abs(a[ia]-b[ib])<=tol]
+
+	def sort_atags(atags):
+		"""Sort atags by freq first, then by array"""
+		atags = np.array(atags)
+		parts = np.char.partition(atags,"_")
+		arrs  = parts[:,0]
+		ftags = parts[:,2]
+		order = np.lexsort([arrs, ftags])
+		return atags[order]
+
+	gfits_flux_dtype = [
+			("ctime","d"),("sid","i"),("ftag","U4"),("snr","d"),("tot_snr","d"),
+			("y","d"),("x","d"),("ref_flux","d"),("Tflux","d"),("dTflux","d"),
+			("Qflux","d"),("dQflux","d"),("Uflux","d"),("dUflux","d"),
+			("baz","d"),("waz","d"),("bel","d"),("az","d"),("ra","d"),("dec","d"),
+			("hour","d"),("gind","i"),("ind1","i"),("ind2","i")]
+
+	dtype= np.float32
+	comm = mpi.COMM_WORLD
+	utils.mkdir(args.odir)
+
+	# Get our source blacklist too. These are the sids of sources that should always be ignored.
+	blacklist = read_blacklist(args.blacklist)
+
+	ifiles_fits   = []
+	ifiles_thumbs = []
+	for ifile in args.ifiles:
+		if ":" in ifile:
+			ifiles_fits.append(ifile)
+		else:
+			ifiles_thumbs.append(sorted(glob.glob(ifile)))
+	ifiles_thumbs = sum(ifiles_thumbs,[])
+
+	# Read in the first file to set up the output geometry
+	oshape, owcs = enmap.thumbnail_geometry(r=args.rmax*utils.arcmin, res=args.res*utils.arcmin)
+
+	# Set up our simple filter
+	l = enmap.modlmap(oshape, owcs).astype(dtype)
+	filter = (1+(np.maximum(l,0.5)/args.lknee)**args.alpha)**-1
+
+	# Organize the thumbnails by array and time, so that we can quickly
+	# look up files by time.
+	ifiles_thumbs = organize_ifiles_thumbs(ifiles_thumbs)
+
+	# Read in all our fits and merge them into a single array after
+	# annotating them with the array
+	fits  = []
+	atags = []
+	for ifile in ifiles_fits:
+		aname, fname = ifile.split(":")
+		data = np.loadtxt(fname, dtype=gfits_flux_dtype, max_rows=args.nline)
+		data = rfn.append_fields(data, ["arr"], [np.full(len(data), aname, dtype="U3")])
+		ftags= np.unique(data["ftag"])
+		fits.append(data)
+		for ftag in ftags:
+			atags.append("%s_%s" % (aname, ftag))
+	fits = np.concatenate(fits)
+	fits = fits[np.argsort(fits["ctime"])]
+	fits["baz"] = utils.rewind(fits["baz"], ref=0, period=360)
+	atags = np.unique(atags)
+	atags = sort_atags(atags)
+
+	# Remove the blacklisted sources
+	if blacklist is not None:
+		fits = fits[~utils.contains(fits["sid"], blacklist)]
+
+	# Split into groups with edges where ctime, baz, waz or bel change too much
+	groups = build_groups([fits["ctime"],fits["baz"],fits["waz"],fits["bel"]],[args.tstep,1,1,1])
+	groups = split_long_groups(groups, fits["ctime"], maxdur=args.tstep)
+	if comm.rank == 0: print("Processing %d groups" % len(groups))
+
+	# Process each group
+	for gi in range(comm.rank, len(groups), comm.size):
+		group = groups[gi]
+		gfits = fits[group[0]:group[1]]
+		# Get all thumbnail files that cover this time period
+		t1    = gfits["ctime"][0]
+		t2    = gfits["ctime"][-1]
+		opre  = args.odir + "/stack_%.0f" % t1
+		omaps, oivars = enmap.zeros((2,len(atags),)+oshape, owcs, dtype)
+		used_fits = []
+		for ai, atag in enumerate(atags):
+			print("Processing group %4d array %s" % (gi, atag))
+			arr, ftag = atag.split("_")
+			afits = gfits[(gfits["arr"] == arr)&(gfits["ftag"]==ftag)]
+			# For each array-freq (atag) we will build the S/N-weighted
+			# stack of all the sources
+			rhs = enmap.zeros(oshape, owcs, dtype)
+			div = enmap.zeros(oshape, owcs, dtype)
+			# Go through all the thumbnails for this array
+			finfo = ifiles_thumbs[atag]
+			i1 = np.searchsorted(finfo.ctimes, t1-args.time_tol)
+			i2 = np.searchsorted(finfo.ctimes, t2+args.time_tol)+1
+			for fname in finfo.fnames[i1:i2]:
+				data    = bunch.read(fname)
+				# Get the thumbnails that correspond to entries in gfits
+				matches = find_close(afits["ctime"], data.table["ctime"], tol=1)
+				mfits   = afits[[i1 for i1,i2 in matches]]
+				data    = select_srcs(data, [i2 for i2,i2 in matches])
+				# mfits and data are now in the same order. Next reproject while
+				# applying the pointing offsets from mfits
+				pointoff= np.array([mfits["y"],mfits["x"]]).T*utils.arcmin
+				#pointoff = None
+				try:
+					data  = prepare_data(data, oshape, owcs, pointoff=pointoff)
+				except DataError:
+					continue
+				# Ok, we can now do our filtering and stacking. Only keep T. For the stacking
+				# we need the estimated signal strength. This comes as flux but maps are in flux
+				# per steradian. Make the units compatible by converting the flux to that too
+				T       = mfits["Tflux"] / data.barea
+				maps    = apply_filter(data.maps[:,0,:,:], data.ivars, filter) / T[:,None,None]
+				ivars   = data.ivars * T[:,None,None]**2
+				rhs    += np.sum(maps*ivars,0)
+				div    += np.sum(ivars,0)
+				# Collect mfits so that we can output the mean properties later
+				used_fits.append(mfits)
+			# Phew! We've processed all the data for this atag in this group. Solve
+			with utils.nowarn():
+				map = rhs/div
+				map[~np.isfinite(map)] = 0
+			# And copy into our output file
+			omaps[ai]  = map
+			oivars[ai] = div
+		if len(used_fits) == 0: continue
+		# Count how many atags we have with sufficient snr. We will put this in the
+		# output file name so that it's easier to avoid plotting empty or overly noisy
+		# images
+		mean_ivar = np.mean(oivars,(-2,-1))
+		ngood     = np.sum(mean_ivar > args.max_rms**-2)
+		# Group is done. Write
+		enmap.write_map(opre + "_map_%d.fits" % ngood,  omaps)
+		# Output mean scan properties in group
+		used_fits = np.concatenate(used_fits)
+		with open(opre + "_info.txt", "w") as ofile:
+			# ctime snr y x baz waz bel hour n
+			weight = (used_fits["Tflux"]/used_fits["dTflux"])**2
+			def mean(a): return np.sum(a*weight)/np.sum(weight)
+			def slope(t,a):
+				dt = (t - mean(t))/3600
+				B  = np.array([dt*0+1,dt])
+				W  = 1/np.maximum(1/weight,np.max(1/weight)*0.1)
+				rhs=np.sum(B*a*W,-1)
+				div=np.sum(B[:,None]*B[None,:]*W,-1)
+				try: amps = np.linalg.solve(div,rhs)
+				except np.LinAlgError: amps = np.zeros(2)
+				return amps[1]
+			ofile.write("%.0f %.0f %8.3f %8.3f %8.3f %8.3f %8.3f %8.3f %8.3f %8.3f %5.2f %2d %4d\n" % (
+				t1, mean(used_fits["ctime"]),
+				max(0,np.sum(weight)-len(weight))**0.5,
+				mean (used_fits["y"]), mean (used_fits["x"]),
+				slope(used_fits["ctime"], used_fits["y"]),
+				slope(used_fits["ctime"], used_fits["x"]),
+				mean(used_fits["baz"]), mean(used_fits["waz"]), mean(used_fits["bel"]),
+				(mean(used_fits["ctime"])/3600)%24,
+				ngood, len(weight)))

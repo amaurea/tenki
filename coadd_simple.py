@@ -21,7 +21,7 @@ for imapfile, ihitfile in zip(imaps,ihits):
 	print("Reading %s" % imapfile)
 	imap = enmap.read_map(imapfile)
 	print("Reading %s" % ihitfile)
-	ihit = enmap.read_map(ihitfile)
+	ihit = enmap.read_map(ihitfile).preflat[0]
 	if omap is None:
 		omap = imap*0
 		ohit = ihit*0

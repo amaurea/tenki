@@ -67,6 +67,7 @@ ndir    = 1
 verbose = args.verbose - args.quiet
 R       = args.radius*utils.arcmin
 res     = args.res*utils.arcmin
+down    = config.get("downsample")
 poly_pad= 3*utils.degree
 grid_bounds = np.array([[-2,-3],[2,5]])*utils.arcmin
 grid_res    = 0.75*utils.arcmin
@@ -131,20 +132,20 @@ else:
 # 1 when they aren't relevant. This results in amps always being 4d
 
 class PmatTot:
-	def __init__(self, data, srcpos, ndir=1, perdet=False):
+	def __init__(self, scan, srcpos, ndir=1, perdet=False):
 		# Build source parameter struct for PmatPtsrc
-		self.params = np.zeros([srcpos.shape[-1],ndir,data.ndet if perdet else 1,8],np.float)
+		self.params = np.zeros([srcpos.shape[-1],ndir,scan.ndet if perdet else 1,8],np.float)
 		self.params[:,:,:,:2] = srcpos[::-1,None,None,:].T
 		self.params[:,:,:,5:7] = 1
-		scan = actscan.ACTScan(data.entry, d=data)
 		self.psrc = pmat.PmatPtsrc(scan, self.params, sys=src_sys)
 		self.pcut = pmat.PmatCut(scan)
-		# Extract basic offset
-		self.off0 = data.point_correction
+		# Extract basic offset. Warning: referring to scan.d is fragile, since
+		# scan.d is not updated when scan is sliced
+		self.off0 = scan.d.point_correction
 		self.off  = self.off0*0
-		self.el   = np.mean(data.boresight[2,::100])
-		self.point_template = data.point_template
-		self.cut = data.cut
+		self.el   = np.mean(scan.boresight[::100,2])
+		self.point_template = scan.d.point_template
+		self.cut = scan.cut
 	def set_offset(self, off):
 		self.off = off*1
 		self.psrc.scan.offsets[:,1:] = actdata.offset_to_dazel(self.point_template + off + self.off0, [0,self.el])
@@ -163,19 +164,19 @@ class PmatTot:
 		return amps
 
 class NmatTot:
-	def __init__(self, data, model=None, window=None, filter=None):
+	def __init__(self, scan, model=None, window=None, filter=None):
 		model  = config.get("noise_model", model)
-		window = config.get("tod_window", window)*data.srate
-		nmat.apply_window(data.tod, window)
-		self.nmat = nmat_measure.NmatBuildDelayed(model, cut=data.cut_noiseest, spikes=data.spikes[:2].T)
-		self.nmat = self.nmat.update(data.tod, data.srate)
-		nmat.apply_window(data.tod, window, inverse=True)
+		window = config.get("tod_window", window)*scan.srate
+		nmat.apply_window(scan.tod, window)
+		self.nmat = nmat_measure.NmatBuildDelayed(model, cut=scan.cut_noiseest, spikes=scan.spikes)
+		self.nmat = self.nmat.update(scan.tod, scan.srate)
+		nmat.apply_window(scan.tod, window, inverse=True)
 		self.model, self.window = model, window
 		self.ivar = self.nmat.ivar
-		self.cut  = data.cut
+		self.cut  = scan.cut
 		# Optional extra filter
 		if filter:
-			freq = fft.rfftfreq(data.nsamp, 1/data.srate)
+			freq = fft.rfftfreq(scan.nsamp, 1/scan.srate)
 			fknee, alpha = filter
 			with utils.nowarn():
 				self.filter = (1 + (freq/fknee)**-alpha)**-1
@@ -194,19 +195,18 @@ class NmatTot:
 		nmat.apply_window(tod, self.window)
 
 class PmatThumbs:
-	def __init__(self, data, srcpos, res=0.25*utils.arcmin, rad=20*utils.arcmin, perdet=False, detoff=10*utils.arcmin):
-		scan = actscan.ACTScan(data.entry, d=data)
+	def __init__(self, scan, srcpos, res=0.25*utils.arcmin, rad=20*utils.arcmin, perdet=False, detoff=10*utils.arcmin):
 		if perdet:
 			# Offset each detector's pointing so that we produce a grid of images, one per detector.
-			gside  = int(np.ceil(data.ndet**0.5))
+			gside  = int(np.ceil(scan.ndet**0.5))
 			goffs  = np.mgrid[:gside,:gside] - (gside-1)/2.0
-			goffs  = goffs.reshape(2,-1).T[:data.ndet]*detoff
+			goffs  = goffs.reshape(2,-1).T[:scan.ndet]*detoff
 			scan.offsets = scan.offsets.copy()
 			scan.offsets[:,1:] += goffs
 			rad    = rad + np.max(np.abs(goffs))
 		# Build geometry for each source
 		shape, wcs = enmap.geometry(pos=[[-rad,-rad],[rad,rad]], res=res, proj="car")
-		area = enmap.zeros((3,)+shape, wcs, dtype=data.tod.dtype)
+		area = enmap.zeros((3,)+shape, wcs, dtype=scan.tod.dtype)
 		self.pmats = []
 		for i, pos in enumerate(srcpos.T):
 			if planet: sys = src_sys
@@ -223,12 +223,12 @@ class PmatThumbs:
 			p.backward(tod, map[i])
 
 class ThumbMapper:
-	def __init__(self, data, srcpos, pcut, nmat, perdet=False):
-		pthumb = PmatThumbs(data, srcpos, perdet=perdet)
-		twork  = np.full(data.tod.shape, 1.0, data.tod.dtype)
+	def __init__(self, scan, srcpos, pcut, nmat, perdet=False):
+		pthumb = PmatThumbs(scan, srcpos, perdet=perdet)
+		twork  = np.full(scan.tod.shape, 1.0, scan.tod.dtype)
 		nmat.white(twork)
-		div   = enmap.zeros(pthumb.shape, pthumb.wcs, data.tod.dtype)
-		junk  = np.zeros(pcut.njunk,data.tod.dtype)
+		div   = enmap.zeros(pthumb.shape, pthumb.wcs, scan.tod.dtype)
+		junk  = np.zeros(pcut.njunk,scan.tod.dtype)
 		pcut.backward(twork, junk)
 		pthumb.backward(twork, div)
 		div = div[:,0]
@@ -254,14 +254,14 @@ class ThumbMapper:
 # dchisq = -2*d(Pa)'N"(d-Pa/2) + (Pa')N"dPa = 
 
 class Likelihood:
-	def __init__(self, data, srcpos, srcamp, perdet=False, ncomp=1, thumbs=False, N=None, method="fixamp", filter=None):
+	def __init__(self, scan, srcpos, srcamp, perdet=False, ncomp=1, thumbs=False, N=None, method="fixamp", filter=None):
 		# Set up fiducial source model. These source parameters
 		# are not the same as those we will be optimizing.
 		with bench.show("PmatTot"):
-			self.P = PmatTot(data, srcpos, perdet=perdet)
+			self.P = PmatTot(scan, srcpos, perdet=perdet)
 		with bench.show("NmatTot"):
-			self.N = N if N else NmatTot(data, filter=filter)
-		self.tod  = data.tod # might only need the one below
+			self.N = N if N else NmatTot(scan, filter=filter)
+		self.tod  = scan.tod # might only need the one below
 		with bench.show("Nmat apply"):
 			self.Nd   = self.N.apply(self.tod.copy())
 		self.i    = 0
@@ -275,7 +275,7 @@ class Likelihood:
 		self.thumb_mapper = None
 		if thumbs:
 			with bench.show("ThumbMapper"):
-				self.thumb_mapper = ThumbMapper(data, srcpos, self.P.pcut, self.N, perdet=perdet)
+				self.thumb_mapper = ThumbMapper(scan, srcpos, self.P.pcut, self.N, perdet=perdet)
 		self.amp_unit, self.off_unit = 1e3, utils.arcmin
 		# Save samples from the wrapper, so we can use them to estimate uncertainty
 		self.samples = bunch.Bunch(offs=[], amps=[], aicovs=[], chisqs=[])
@@ -378,7 +378,7 @@ class Likelihood:
 				for i in range(len(famps)):
 					nsigma = np.sum(amatmul(faicov[i],famps[i])*famps[i])**0.5
 					msg += " %10.3f %8.1f" % (famps[i,0]/self.amp_unit, nsigma)
-				print(msg)
+				if verbose: print(msg)
 				self.samples.offs.append(off)
 				self.samples.amps.append(amps)
 				self.samples.aicovs.append(aicov)
@@ -530,7 +530,8 @@ groups = get_groups(ids, args.group)
 srcpos, amps = srcdata[:2], srcdata[2]
 # Which sources pass our requirements?
 base_sids  = set(range(amps.size))
-base_sids &= set(np.where(amps > args.minamp)[0])
+if args.minamp is not None:
+	base_sids &= set(np.where(amps > args.minamp)[0])
 if args.srcs is not None:
 	selected = [int(w) for w in args.srcs.split(",")]
 	base_sids &= set(selected)
@@ -570,24 +571,30 @@ for gid in range(comm.rank, len(groups), comm.size):
 		# Read the data
 		entry = filedb.data[id]
 		try:
-			data = actdata.read(entry, exclude=["tod"], verbose=verbose)
-			data+= actdata.read_tod(entry)
-			data = actdata.calibrate(data, verbose=verbose)
+			scan = actscan.ACTScan(entry, verbose=verbose>=2)
+			#data = actdata.read(entry, exclude=["tod"], verbose=verbose)
+			#data+= actdata.read_tod(entry)
+			#data = actdata.calibrate(data, verbose=verbose)
 			#print("fixme") # FIXME
 			#data.restrict(dets=data.dets[100:150])
 			# Avoid planets while building noise model
 			if planet is not None:
-				data.cut_noiseest *= actdata.cuts.avoidance_cut(data.boresight, data.point_offset, data.site, planet, R)
-			if data.ndet < 2 or data.nsamp < 1: raise errors.DataMissing("no data in tod")
+				scan.cut_noiseest *= actdata.cuts.avoidance_cut(scan.d.boresight, scan.d.point_offset, scan.site, planet, R)
+			if scan.ndet < 2 or scan.nsamp < 1: raise errors.DataMissing("no data in tod")
 		except errors.DataMissing as e:
 			print("%s skipped: %s" % (id, e))
 			continue
+		# Apply downsampling
+		scan = scan[:,::down]
 		# Prepeare our samples
+		scan.tod = scan.get_samples()
+		scan.tod-= scan.tod[:,None,0].copy()
+		scan.tod = scan.tod.astype(dtype)
 		#data.tod -= np.mean(data.tod,1)[:,None]
-		data.tod -= data.tod[:,None,0].copy()
-		data.tod  = data.tod.astype(dtype)
+		#data.tod -= data.tod[:,None,0].copy()
+		#data.tod  = data.tod.astype(dtype)
 		# Set up our likelihood
-		L = Likelihood(data, srcpos[:,sids], amps[sids], filter=highpass)
+		L = Likelihood(scan, srcpos[:,sids], amps[sids], filter=highpass)
 		# Find out which sources are reliable, so we don't waste time on bad ones
 		if prune_unreliable_srcs:
 			_, aicov = L.fit_amp()
@@ -596,20 +603,20 @@ for gid in range(comm.rank, len(groups), comm.size):
 			nsrc = len(sids)
 			print("Restricted to %d srcs: %s" % (nsrc,", ".join(["%d (%.1f)" % (i,a) for i,a in zip(sids,amps[sids])])))
 		if nsrc == 0: continue
-		L    = Likelihood(data, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=True, N=L.N, method=args.method, filter=highpass)
-		beam_area = get_beam_area(data.beam)
-		_, uids   = actdata.split_detname(data.dets) # Argh, stupid detnames
-		freq      = data.array_info.info.nom_freq[uids[0]]
+		L    = Likelihood(scan, srcpos[:,sids], amps[sids], perdet=perdet, thumbs=args.minimaps, N=L.N, method=args.method, filter=highpass)
+		beam_area = get_beam_area(scan.beam)
+		_, uids   = actdata.split_detname(scan.dets) # Argh, stupid detnames
+		freq      = scan.array_info.info.nom_freq[uids[0]]
 		fluxconv  = utils.flux_factor(beam_area, freq*1e9)
-		group_data.append(bunch.Bunch(data=data, sids=sids, lik=L, id=id, oid=oid, ind=ind, beam_area=beam_area, freq=freq, fluxconv=fluxconv))
+		group_data.append(bunch.Bunch(scan=scan, sids=sids, lik=L, id=id, oid=oid, ind=ind, beam_area=beam_area, freq=freq, fluxconv=fluxconv))
 
 	if len(group_data) == 0:
 		print("No usable tods in group %s. Skipping" % ",".join([ids[i] for i in group]))
 		continue
 
 	# Set up the full likelihood
-	progress_thumbs = args.minimaps and verbose >= 3
-	chisq_wrappers  = [data.lik.chisq_wrapper(thumb_path=args.odir + "/" + data.oid + "_thumb%03d.fits", thumb_interval=progress_thumbs) for data in group_data]
+	progress_thumbs = args.minimaps and verbose >= 4
+	chisq_wrappers  = [data.lik.chisq_wrapper(thumb_path=args.odir + "/" + data.oid + "_thumb%03d.fits", thumb_interval=progress_thumbs, verbose=verbose >= 3) for data in group_data]
 	def likfun(off): return sum([chisq_wrapper(off) for chisq_wrapper in chisq_wrappers])
 	# Representaive individual lik for stuff that's common to them. This is a bit hacky.
 	# A single joint lik class would have been cleaner.
@@ -669,9 +676,9 @@ for gid in range(comm.rank, len(groups), comm.size):
 		del model
 
 		# Output our fit to hdf file
-		_, uid = actdata.split_detname(data.data.dets) # :(
-		row = data.data.array_info.info.row[uid]
-		col = data.data.array_info.info.col[uid]
+		_, uid = actdata.split_detname(data.scan.dets) # :(
+		row = data.scan.array_info.info.row[uid]
+		col = data.scan.array_info.info.col[uid]
 		with h5py.File(args.odir + "/fit_%s.hdf" % data.oid, "w") as ofile:
 			ofile["off"]  = off
 			ofile["doff"] = doff
@@ -689,7 +696,7 @@ for gid in range(comm.rank, len(groups), comm.size):
 			ofile["beam_area"] = data.beam_area
 			ofile["freq"] = data.freq
 			ofile["fluxconv"] = data.fluxconv
-			ofile["detoff"] = data.data.point_template
+			ofile["detoff"] = data.scan.d.point_template
 
 		meanamps  = padto(np.mean(data.oamps, (1,2)),3)
 		# mean here because we want to show the typical error bars, not the error on the mean
@@ -708,12 +715,12 @@ for gid in range(comm.rank, len(groups), comm.size):
 					db.data["hour"][ind], db.data["baz"][ind], db.data["bel"][ind], db.data["waz"][ind],
 					L.P.off0[0]/utils.arcmin, L.P.off0[1]/utils.arcmin,
 					data.beam_area*1e9, data.freq, data.fluxconv)
-		print(msg)
+		if verbose >= 2: print(msg)
 		f.write(msg + "\n")
 		f.flush()
 
 		if args.dump_tod:
-			data_dump  = data.data.tod
+			data_dump  = data.scan.tod
 			model_dump = L.get_model(off, data.oamps)
 			resid_dump = data_dump - model_dump
 			best = np.argsort(np.max(model_dump,1))[::-1]

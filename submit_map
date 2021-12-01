@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 # Script for quickly submitting tod2map runs
-# Format: submit_map nsplit patch,patch,... tag,tag,... tag,tag,... 
 import argparse, os, subprocess, re, sys
 parser = argparse.ArgumentParser()
 parser.add_argument("sel")
@@ -11,6 +10,8 @@ parser.add_argument("-N", "--nnode",  type=int,   default=1)
 parser.add_argument("-T", "--tblock", type=float, default=4)
 parser.add_argument("-d", "--dry-run", action="store_true")
 parser.add_argument("-s", "--sky",    type=str,   default="sky")
+parser.add_argument(      "--sys",    type=str,   default=None)
+parser.add_argument("-t", "--time",   type=str,   default="24:00:00")
 parser.add_argument("--split-mode",   type=str,   default="jon")
 parser.add_argument("--no-prune",      action="store_true")
 args, unknown = parser.parse_known_args()
@@ -26,7 +27,8 @@ utils.mkdir(rundir)
 array_freqs = {"pa1":["f150"], "pa2":["f150"], "pa3":["f090","f150"],
 	"pa4":["f150","f220"], "pa5":["f090","f150"], "pa6":["f090","f150"]}
 season_arrays = {"s13":["pa1"], "s14":["pa1","pa2"], "s15":["pa1","pa2","pa3"],
-		"s16":["pa2","pa3","pa4"], "s17":["pa4","pa5","pa6"], "s18":["pa4","pa5","pa6"]}
+		"s16":["pa2","pa3","pa4"], "s17":["pa4","pa5","pa6"], "s18":["pa4","pa5","pa6"],
+		"s19":["pa4","pa5","pa6"], "s20":["pa4","pa5","pa7"], "s21":["pa4","pa5","pa7"]}
 
 tag_map = {"+":"", "~":"no", ">":"_gt_", "<":"_lt_"}
 def remap(toks, tag_map):
@@ -91,13 +93,13 @@ for toks in utils.list_combination_iter(alts):
 		# Allow variable replacement in the unknown arguments
 		unknown_expanded = [a.format(*otoks, i=i) for a in unknown]
 		batch = """#!/bin/bash
-#SBATCH --nodes %(nnode)d --ntasks-per-node=10 --cpus-per-task=8 --time=24:00:00
+#SBATCH --nodes %(nnode)d --ntasks-per-node=10 --cpus-per-task=4 --time=%(time)s
 #SBATCH --job-name %(name)s
 cd "%(cdir)s"
-OMP_NUM_THREADS=8 mpirun -bind-to none -ppn 10 python ~/local/tenki/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s""" % {
+OMP_NUM_THREADS=4 mpirun -bind-to none -npernode 10 --oversubscribe python -u ~/local/tenki/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s%(sys)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s""" % {
 		"nnode": args.nnode, "name": otag, "cdir": os.getcwd(),
 		"patch": patch_file, "map_type": map_type, "osel": osel,
-		"sky": args.sky,
+		"sky": args.sky, "time": args.time, "sys": ",sys="+args.sys if args.sys else "",
 		"otag": otag, "odir": args.odir, "extra_args": " ".join(unknown_expanded)}
 		runfile = rundir + "/%s.txt" % otag
 		with open(runfile, "w") as f:

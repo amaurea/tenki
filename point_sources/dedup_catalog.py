@@ -56,7 +56,7 @@ nbad, nsrc, nsz = np.bincount(cat.status, minlength=3)[:3]
 
 cat = cat[cat.status>0]
 if args.sort:
-	sn = cat.flux[:,0]/cat.dflux[:,0]
+	sn = cat.amp[:,0]/cat.damp[:,0]
 	cat = cat[np.argsort(sn)[::-1]]
 
 print("%d read, %d art, %d cut, %d src, %d sz" % (nread, nart, nbad, nsrc, nsz))

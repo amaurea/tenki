@@ -39,11 +39,12 @@ config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1.0,tol=0.5", "Default parameters for scan/pickup signal")
 config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
-config.default("signal_srcsamp_default",  "use=no,type=srcsamp,name=srcsamp,srcs=none,minamp=10000,ofmt={name}_{rank:03},output=no", "Default parameters for source model error handling signal")
+config.default("signal_srcsamp_default",  "use=no,type=srcsamp,name=srcsamp,srcs=none,minamp=10000,ofmt={name}_{rank:03},output=no,sys=cel", "Default parameters for source model error handling signal")
+config.default("signal_template_default",  "use=no,type=template,name=template,ofmt={name}_{rank:03},output=yes,sys=cel,order=0,pmul=1", "Default parameters for per-tod template amplitude fit")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
-config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012", "Default parameters for map subtraction filter")
+config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012,jitter=0,gainerr=0,deterr=0", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012,jitter=0,gainerr=0,deterr=0", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
@@ -54,6 +55,7 @@ config.default("filter_fitphase_default",  "use=no,name=fitphase,value=1,mul=+1,
 config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", "Default parameters for filter that simply scale the TOD by the given value")
 config.default("filter_null_default",     "use=no,name=null", "Default parameters for filter that does nothing")
 config.default("filter_beamsym_default", "use=no,name=beamsym,value=1,ibeam=1,obeam=1,postnoise=1", "Default parameters for beam symmetrization filter. ibeam and obeam (fwhm arcmin) specify the current and target beam horizontal size. To symmetrize, set the target horizontal beam size to its vertical size. If this filter becomes standard, these paramters should be moved to filedb or something.")
+config.default("filter_deslope_default", "use=no,name=deslope,value=1", "Desloping filter.")
 
 # Default map filter parameters
 config.default("mapfilter_gauss_default", "use=no,name=gauss,value=0,cap=1e3,type=gauss,sky=yes", "Default parameters for gaussian map filter in mapmaking")
@@ -64,6 +66,8 @@ config.default("icovstep",    6, "Physical degree interval between inverse corre
 config.default("icovyskew",   1, "Number of degrees in the y direction (dec) to shift by per step in x (ra)")
 
 config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
+
+config.default("skip_main_cuts", False, "Hack: skip the 'main' cuts, the ones used in the actual mapmaking equation")
 
 parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
 parser.add_argument("filelist")
@@ -288,6 +292,11 @@ del myscans # scans do take up some space, even without the tod being read in
 myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
 		db, dets=args.dets, downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
 
+if config.get("skip_main_cuts"):
+	from enlib import sampcut
+	for scan in myscans:
+		scan.cut = sampcut.empty(scan.cut.ndet, scan.cut.nsamp)
+
 # I would like to be able to do on-the-fly nmat computation.
 # However, preconditioners depend on the noise matrix.
 # Hence, to be able to do this, Eqsys initialization must go like this:
@@ -388,6 +397,11 @@ def get_map_path(path):
 	if path.endswith(".fits"): return path
 	else: return filedb.get_patch_path(path)
 
+def expand_ncomp(imap, ncomp=3):
+	omap = enmap.zeros((ncomp,)+imap.shape[-2:], imap.wcs, imap.dtype)
+	omap.preflat[:imap.preflat.shape[0]] = imap.preflat[:omap.preflat.shape[0]]
+	return omap
+
 # UGLY HACK: Handle individual output file mode
 nouter = 1
 if args.individual:
@@ -415,7 +429,7 @@ elif args.group:
 for out_ind in range(nouter):
 	if args.individual:
 		myscans = myscans_tot[out_ind:out_ind+1]
-		root = root_tot + myscans[0].entry.id + "_"
+		root = root_tot + myscans[0].id.replace(":","_") + "_"
 	elif args.group:
 		raw_inds = np.arange(out_ind*args.group, min((out_ind+1)*args.group,ntod))
 		row, col = raw_inds%comm.size, raw_inds//comm.size
@@ -439,8 +453,17 @@ for out_ind in range(nouter):
 			signal_cut = signal
 		elif param["type"] == "map":
 			area = enmap.read_map(get_map_path(param["value"]))
-			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
+			if "split" in param:
+				split = True
+				if param["split"] == "leftright":
+					for scan in active_scans:
+						scan.split = np.concatenate([[0],scan.boresight[1:,1]<=scan.boresight[:-1,1]])
+						area = enmap.zeros((2,args.ncomp)+area.shape[-2:], area.wcs, dtype)
+				else: raise ValueError("Split type %s not recognized" % param["split"])
+			else:
+				split = False
+				area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param), split=split)
 		elif param["type"] == "fmap":
 			area = enmap.read_map(get_map_path(param["value"]))
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
@@ -492,9 +515,17 @@ for out_ind in range(nouter):
 			if param["srcs"] == "none": srcs = None
 			else: srcs = pointsrcs.read(param["srcs"])
 			minamp = float(param["minamp"])
+			if "mask" in param:
+				m = expand_ncomp(enmap.read_map(param["mask"]).astype(dtype))
+			else: m = None
 			signal = mapmaking.SignalSrcSamp(active_scans, dtype=dtype, comm=comm,
-					srcs=srcs, amplim=minamp)
+					srcs=srcs, amplim=minamp, mask=m, sys=param["sys"])
 			signal_srcsamp = signal
+		elif param["type"] == "template":
+			template = enmap.read_map(param["map"]).astype(dtype)
+			pmul     = float(param["pmul"])
+			template[1:] *= pmul
+			signal   = mapmaking.SignalTemplate(active_scans, template, comm=comm, name=effname, ofmt=param["ofmt"], sys=param["sys"], pmat_order=param["order"])
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 		# Hack. Special source handling for some signals
@@ -513,6 +544,7 @@ for out_ind in range(nouter):
 	L.info("Initializing filters")
 	filters = []
 	filters2= []
+	filters_noisebuild= []
 	src_filters = []
 	map_add_filters = []
 	for param in filter_params:
@@ -543,6 +575,18 @@ for out_ind in range(nouter):
 			mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
 			comps = set([int(c) for c in param["comps"]])
 			tmul = float(param["tmul"])
+			order = int(param["order"]) if "order" in param else None
+			# Set up optional pointing jitter and random gain errors
+			jitter  = float(param["jitter"])*utils.arcmin
+			gainerr = float(param["gainerr"])
+			deterr  = float(param["deterr"])
+			ptoff = jitter*np.random.standard_normal([len(myscans),2]) if jitter > 0 else [0,0]
+			if gainerr:
+				mul = mul * (1+gainerr*np.random.standard_normal(len(myscans)))
+			if deterr:
+				det_muls = [1+deterr*np.random.standard_normal(scan.ndet) for scan in myscans]
+			else: det_muls = None
+
 			if mode == 0: continue
 			if param["type"] == "auto":
 				param["type"] = ("dmap" if os.path.isdir(fname) else "map")
@@ -554,18 +598,19 @@ for out_ind in range(nouter):
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
 				for i in range(len(m)):
 					if i not in comps: m[i] = 0
-				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=mul, tmul=tmul)
+				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order)
 			else:
 				m = enmap.read_map(fname).astype(dtype)
 				for i in range(len(m)):
 					if i not in comps: m[i] = 0
-				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul)
+				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order, ptoff=ptoff, det_muls=det_muls)
 			map_add_filters.append(filter)
 			if mode >= 2:
 				# In post mode we subtract the map that was added before each output. That's
 				# why mul is -1 here
 				for sparam, signal in matching_signals(param, signal_params, signals):
 					assert sparam["sys"] == param["sys"]
+					print(signal.area.shape, m.shape)
 					assert signal.area.shape[-2:] == m.shape[-2:]
 					signal.post.append(mapmaking.PostAddMap(m, mul=-mul))
 		elif param["name"] == "addphase" or param["name"] == "fitphase":
@@ -652,12 +697,18 @@ for out_ind in range(nouter):
 			ibeam = float(param["ibeam"])*utils.arcmin*utils.fwhm
 			obeam = float(param["obeam"])*utils.arcmin*utils.fwhm
 			filter = mapmaking.FilterBroadenBeamHor(ibeam, obeam)
+		elif param["name"] == "deslope":
+			filter = mapmaking.FilterDeslope()
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
+
 		# Add to normal filters of post-noise-model filters based on parameters
 		if "postnoise" in param and int(param["postnoise"]) > 0:
 			print("postnosie", param["name"])
 			filters2.append(filter)
+		elif "noisebuild" in param and int(param["noisebuild"]) > 0:
+			print("noisebuild", param["name"])
+			filters_noisebuild.append(filter)
 		else:
 			filters.append(filter)
 	# If any filters were added, append a gapfilling operation, since the filters may have
@@ -707,7 +758,7 @@ for out_ind in range(nouter):
 			multiposts.append(insert_srcsamp)
 
 	L.info("Initializing equation system")
-	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, filters2=filters2, weights=weights, multiposts=multiposts, dtype=dtype, comm=comm)
+	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, filters2=filters2, filters_noisebuild=filters_noisebuild, weights=weights, multiposts=multiposts, dtype=dtype, comm=comm)
 
 	L.info("Initializing RHS")
 	eqsys.calc_b()
@@ -735,7 +786,7 @@ for out_ind in range(nouter):
 			signal.precon = mapmaking.PreconNull()
 			print("Warning: map and cut precon must have compatible units")
 			continue
-		if param["type"] in ["cut","srcsamp"]:
+		if param["type"] in ["cut","srcsamp","template"]:
 			signal.precon = mapmaking.PreconCut(signal, myscans)
 		elif param["type"] in ["map","bmap","fmap","noiserect"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
@@ -822,7 +873,7 @@ for out_ind in range(nouter):
 	if map_add_filters:
 		L.info("Writing added/subtracted template map")
 		for fi, filter in enumerate(map_add_filters):
-			map   = filter.map * filter.mul
+			map   = filter.map * np.mean(filter.mul)
 			# It would be nice to only write the total added map, but they may be a mix
 			# of dmaps and enmap, or even have different coordinate systems, so this is safer.
 			# Anyway, in almost all the cases only a single map will be added

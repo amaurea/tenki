@@ -25,7 +25,9 @@ ntod   = len(db)
 nsplit = args.nsplit
 nopt   = args.nopt if nsplit > 1 else 0
 optimize_subsets = (args.mode == "crosslink" or args.mode=="scanpat")
+detdir = args.odir + "/details"
 utils.mkdir(args.odir)
+utils.mkdir(detdir)
 
 # Determine which arrays we have. We can't process arrays independently,
 # as they in principle have correlated noise. But we also want to distinguish
@@ -45,6 +47,8 @@ elif args.mode == "scanpat":
 		anames[pids==pid] = np.char.add(anames[pids==pid], "p%d" % pid)
 
 def ids2ctimes(ids): return np.char.partition(ids,".").T[0].astype(int)
+def fix_aname(aname): return aname.replace("ar","pa").replace(":","_")
+anames = np.array([fix_aname(aname) for aname in anames])
 arrays, ais, nper = np.unique(anames, return_counts=True, return_inverse=True)
 narray = len(arrays)
 ctime  = ids2ctimes(pre)
@@ -73,11 +77,11 @@ def read_existing(dirname):
 	# where splits = [ids1, ids2, ...].
 	work = {}
 	for fname in glob.glob(dirname + "/ids*.txt"):
-		m = re.match(r"ids_([^_]+)_set(\d+)\.txt", os.path.basename(fname))
+		m = re.match(r"ids_([^_]+_f[^_]+[rs])_set(\d+)\.txt", os.path.basename(fname))
 		if not m: continue
 		array = m.group(1)
 		split = int(m.group(2))
-		ids   = np.loadtxt(fname, usecols=(0,), dtype="S")
+		ids   = np.loadtxt(fname, usecols=(0,), dtype="U")
 		if array not in work: work[array] = {}
 		work[array][split] = ids
 	# Check that we have a consistent number of splits
@@ -295,9 +299,9 @@ if optimize_subsets:
 	# by first handling the individual ones, and then combining them
 	for i in range(nsplit):
 		for ai, aname in enumerate(arrays):
-			enmap.write_map(args.odir + "/hits_%s_set%d.fits" % (aname, i), split_hits[i,ai])
-			enmap.write_map(args.odir + "/hits_masked_%s_set%d.fits" % (aname,i), split_hits[i,ai]*mask[ai])
-			with open(args.odir + "/ids_%s_set%d.txt" % (aname,i), "w") as f:
+			enmap.write_map(detdir + "/hits_%s_set%d.fits" % (aname, i), split_hits[i,ai])
+			enmap.write_map(detdir + "/hits_masked_%s_set%d.fits" % (aname,i), split_hits[i,ai]*mask[ai])
+			with open(detdir + "/ids_%s_set%d.txt" % (aname,i), "w") as f:
 				for id in sorted(split_ids[i][ai]):
 					f.write(id + "\n")
 	sys.stderr.write("split stats by rise vs. set\n")
@@ -308,7 +312,7 @@ if optimize_subsets:
 		for ai, aname in enumerate(arrays):
 			stats += (" %-5s %s" % (name,aname) + " ".join(["%7.1f" % op(split_hits[i,ai][mask[ai]]) for i in range(nsplit)]) + "\n")
 	sys.stderr.write(stats)
-	with open(args.odir + "/stats_rs.txt", "w") as f:
+	with open(detdir + "/stats_rs.txt", "w") as f:
 		f.write(stats)
 	# Combine rising and setting versions of each array
 	if   args.mode == "crosslink": patdig = 1
@@ -334,7 +338,7 @@ for name, op in [("min",np.min),("max",np.max),("mean",np.mean)]:
 	for ai, aname in enumerate(arrays):
 		stats += (" %-5s %s" % (name,aname) + " ".join(["%7.1f" % op(split_hits[i,ai][mask[ai]]) for i in range(nsplit)]) + "\n")
 sys.stderr.write(stats)
-with open(args.odir + "/stats.txt", "w") as f:
+with open(detdir + "/stats.txt", "w") as f:
 	f.write(stats)
 
 # Print overlap matrix
@@ -342,17 +346,16 @@ sys.stderr.write("overlap matrix\n")
 omat    = calc_overlap_matrix(split_ids)
 overlap = format_overlap_matrix(omat)
 sys.stderr.write(overlap)
-with open(args.odir + "/overlap.txt", "w") as f:
+with open(detdir + "/overlap.txt", "w") as f:
 	f.write(overlap)
 
 # Get the ids that go into each split
 for i in range(nsplit):
 	for ai, aname in enumerate(arrays):
-		aname = aname.replace("ar","pa").replace(":","_")
 		with open(args.odir + "/ids_%s_set%d.txt" % (aname,i), "w") as f:
 			for id in sorted(split_ids[i][ai]):
 				f.write(id + "\n")
-		enmap.write_map(args.odir + "/hits_%s_set%d.fits" % (aname, i), split_hits[i,ai])
-		enmap.write_map(args.odir + "/hits_masked_%s_set%d.fits" % (aname,i), split_hits[i,ai]*mask[ai])
-enmap.write_map(args.odir + "/nblock.fits", nblock_per_pix)
-enmap.write_map(args.odir + "/mask.fits", mask.astype(np.int16))
+		enmap.write_map(detdir + "/hits_%s_set%d.fits" % (aname, i), split_hits[i,ai])
+		enmap.write_map(detdir + "/hits_masked_%s_set%d.fits" % (aname,i), split_hits[i,ai]*mask[ai])
+enmap.write_map(detdir + "/nblock.fits", nblock_per_pix)
+enmap.write_map(detdir + "/mask.fits", mask.astype(np.int16))

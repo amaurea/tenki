@@ -27,11 +27,12 @@
 # To avoid needing to keep many gigs in memory, we do this in chunks
 # of e.g. 250 tods, making each file just 324 MB large.
 
+from __future__ import division, print_function
 import numpy as np, argparse, h5py, os, sys
 from enlib import fft, utils, errors, config, mpi, colors, bench
 from enact import filedb, actdata
 config.default("cut_mostly_cut",False)
-parser = config.ArgumentParser(os.environ["HOME"] + "/.enkirc")
+parser = config.ArgumentParser()
 parser.add_argument("sel")
 parser.add_argument("odir")
 parser.add_argument("prefix", nargs="?", default=None)
@@ -41,6 +42,7 @@ parser.add_argument("-B", "--nbin-det",   type=int,   default=100)
 parser.add_argument("-Z", "--nbin-zoom",  type=int,   default=100)
 parser.add_argument("-F", "--fmax-zoom",  type=float, default=10)
 parser.add_argument("-C", "--chunk-size", type=int,   default=250)
+parser.add_argument("-c", "--cont", action="store_true")
 parser.add_argument("--tconst",     action="store_true")
 parser.add_argument("--no-autocut", action="store_true")
 args = parser.parse_args()
@@ -50,7 +52,7 @@ ids   = filedb.scans[args.sel]
 comm  = mpi.COMM_WORLD
 ntod  = len(ids)
 csize = args.chunk_size
-nchunk= (ntod+csize-1)/csize
+nchunk= (ntod+csize-1)//csize
 dtype = np.float32
 
 utils.mkdir(args.odir)
@@ -63,7 +65,7 @@ ndet   = array_info.ndet
 
 def bin(a, nbin, zoom=1, return_inds=False):
 	ps     = a.reshape(-1,a.shape[-1])
-	binds  = np.arange(ps.shape[1])*nbin*zoom/ps.shape[1]
+	binds  = np.arange(ps.shape[1])*nbin*zoom//ps.shape[1]
 	mask   = binds < nbin
 	ps, binds = ps[:,mask], binds[mask]
 	res    = np.zeros([ps.shape[0],nbin],dtype=ps.dtype)
@@ -79,12 +81,14 @@ def bin(a, nbin, zoom=1, return_inds=False):
 for chunk in range(nchunk):
 	# It's simples to just allocate the full output buffer
 	# for every mpi task, even though it wastes a bit of memory
+	ofile  = prefix + "specs%03d.hdf" % chunk
+	if args.cont and os.path.isfile(ofile): continue
 	ind1   = chunk*csize
 	ind2   = min(ind1+csize,ntod)
 	nctod  = ind2-ind1
 	dspecs = np.zeros([nctod,ndet,args.nbin_det], dtype=dtype)
 	dzooms = np.zeros([nctod,ndet,args.nbin_zoom],dtype=dtype)
-	tspecs = np.zeros([5,nctod,args.nbin],dtype=dtype)
+	tspecs = np.zeros([7,nctod,args.nbin],dtype=dtype)
 	nhits  = np.zeros([nctod,args.nbin],dtype=int)
 	tcorrs = np.zeros([nctod,args.nbin],dtype=dtype)
 	srates = np.zeros([nctod],dtype=dtype)
@@ -97,15 +101,15 @@ for chunk in range(nchunk):
 		try:
 			# Do not apply time constants. We want raw spectra so that we can
 			# use them to estimate time constants ourselves.
-			fields= ["array_info", "tags", "site", "mce_filter", "gain","cut","tod","boresight"]
+			fields = ["array_info", "tags", "gain", "mce_filter", "cut", "site", "boresight", "tod"]
 			if args.tconst: fields.append("tconst")
 			d     = actdata.read(entry, fields=fields)
 			d     = actdata.calibrate(d, exclude=(["autocut"] if not args.no_autocut else []))
 			if d.ndet == 0 or d.nsamp == 0: raise errors.DataMissing("empty tod")
 		except (IOError, OSError, errors.DataMissing) as e:
-			print "Skipped (%s)" % (str(e))
+			print("Skipped (%s)" % (str(e)))
 			continue
-		print "Processing %s" % id
+		print("Processing %s" % id)
 		srates[i] = d.srate
 		mce_fsamps[i] = d.mce_fsamp
 		mce_params[i] = d.mce_params[:4]
@@ -132,6 +136,8 @@ for chunk in range(nchunk):
 		tspecs[2,i] = np.percentile(dhigh,84.13447,0)
 		tspecs[3,i] = np.min(dhigh,0)
 		tspecs[4,i] = np.max(dhigh,0)
+		tspecs[5,i] = np.mean(dhigh,0)
+		tspecs[6,i] = bin(np.abs(np.mean(ft,0))**2, args.nbin)
 		del ps
 		# Normalize ft in bins, since we want correlations
 		for di in range(d.ndet):
@@ -150,12 +156,11 @@ for chunk in range(nchunk):
 		nhits  = utils.allreduce(nhits,  comm)
 		mce_fsamps = utils.allreduce(mce_fsamps, comm)
 		mce_params = utils.allreduce(mce_params, comm)
-	ofile  = prefix + "specs%03d.hdf" % chunk
 	if comm.rank == 0:
 		# Get rid of empty tods
 		good   = np.where(np.any(dspecs>0,(1,2)))[0]
 		if len(good) == 0:
-			print "No usable tods in chunk!"
+			print("No usable tods in chunk!")
 			continue
 		dspecs = dspecs[good]
 		dzooms = dzooms[good]
@@ -163,14 +168,14 @@ for chunk in range(nchunk):
 		tcorrs = tcorrs[good]
 		nhits  = nhits[good]
 		chunk_ids = ids[good+ind1]
-		print "Writing %s" % ofile
+		print("Writing %s" % ofile)
 		with h5py.File(ofile, "w") as hfile:
 			hfile["dspecs"] = dspecs
 			hfile["dzooms"] = dzooms
 			hfile["tspecs"] = tspecs
 			hfile["tcorrs"] = tcorrs
 			hfile["nhits"]  = nhits
-			hfile["ids"]    = chunk_ids
+			hfile["ids"]    = np.char.encode(chunk_ids)
 			hfile["srates"] = srates
 			hfile["mce_fsamps"] = mce_fsamps
 			hfile["mce_params"] = mce_params

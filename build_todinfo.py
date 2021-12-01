@@ -1,3 +1,4 @@
+from __future__ import division, print_function
 import numpy as np, os, h5py
 from enlib import config, mpi, coordinates, utils, errors, tagdb
 from enact import filedb, actdata, todinfo
@@ -23,12 +24,12 @@ for ind in range(comm.rank, len(ids), comm.size):
 	try:
 		stats.append(todinfo.build_tod_stats(entry))
 	except (errors.DataMissing,AttributeError) as e:
-		print "%3d %4d/%d %5.1f%% Skipping %s (%s)" % (comm.rank, ind+1, len(ids), (ind+1)/float(len(ids))*100, id, str(e))
+		print("%3d %4d/%d %5.1f%% Skipping %s (%s)" % (comm.rank, ind+1, len(ids), (ind+1)/float(len(ids))*100, id, str(e)))
 		continue
-	print "%3d %4d/%d %5.1f%% %s" % (comm.rank, ind+1, len(ids), (ind+1)/float(len(ids))*100, id)
+	print("%3d %4d/%d %5.1f%% %s" % (comm.rank, ind+1, len(ids), (ind+1)/float(len(ids))*100, id))
 stats = todinfo.merge_tod_stats(stats)
 
-if comm.rank == 0: print "Reducing"
+if comm.rank == 0: print("Reducing")
 comm.Barrier()
 for key in stats:
 	stats[key] = utils.allgatherv(stats[key],comm)
@@ -44,6 +45,6 @@ stat_db = todinfo.Todinfo(stats)
 stat_db = scan_db + stat_db
 
 if comm.rank == 0:
-	print "Writing"
+	print("Writing")
 	stat_db.write(args.ofile)
-	print "Done"
+	print("Done")

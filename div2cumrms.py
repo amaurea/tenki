@@ -6,6 +6,7 @@ parser.add_argument("ofile", nargs="?", default="/dev/stdout")
 parser.add_argument("-d", "--downgrade", type=int, default=1)
 parser.add_argument("-t", "--thin", type=int, default=1000)
 parser.add_argument("-A", "--area-model", type=str, default="exact", help="How to model pixel area. exact: Compute shape of each pixel. average: Use a single average number for all")
+parser.add_argument(      "--already-arcmin", action="store_true")
 args = parser.parse_args()
 
 div = enmap.read_fits(args.div)
@@ -33,7 +34,7 @@ div = div.reshape(-1)
 pix_area = pix_area.reshape(-1)
 
 with utils.nowarn():
-	rms  = (pix_area/div)**0.5
+	rms  = (pix_area/div)**0.5 if not args.already_arcmin else div**-0.5
 	inds = np.argsort(rms, axis=None)
 	rms  = rms[inds]
 	area = np.cumsum(pix_area[inds])/3600

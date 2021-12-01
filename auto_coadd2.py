@@ -62,7 +62,7 @@ def mapdiag(map):
 	else: raise NotImplementedError
 
 def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=False):
-	if not overlaps_any(box, boxes): return None
+	if not overlaps_any(np.sort(box,0), boxes): return None
 	mapset = mapinfo.read(box, pad=pad, dtype=dtype, verbose=verbose, ncomp=ncomp)
 	if mapset is None: return None
 	if all([d.insufficient for d in mapset.datasets]): return None

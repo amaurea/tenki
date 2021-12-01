@@ -71,7 +71,7 @@ tile1, tile2 = retile.find_tile_range(ipathfmt)
 reader = MapReader(ipathfmt, crop=args.edge, nphi=tile2[1], ncomp=args.ncomp)
 # Precompute edge weights:
 ncontext = args.pad - args.edge
-weight   = 1-np.arange(2*ncontext)*1.0/(2*ncontext)
+weight   = 1-np.arange(2*ncontext+1)[1:]*1.0/(2*ncontext+1)
 
 # Loop through tiles
 utils.mkdir(args.odir)

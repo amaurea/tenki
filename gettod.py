@@ -21,7 +21,7 @@ if len(ids) > 1:
 	# Will process multiple files
 	utils.mkdir(args.ofile)
 for id in ids:
-	print id
+	print(id)
 	entry = filedb.data[id]
 	subdets = None
 	absdets = None
@@ -53,8 +53,10 @@ for id in ids:
 			d = actdata.calibrate(d, operations=["tod_fourier"])
 	if args.bin > 1:
 		d.tod = resample.downsample_bin(d.tod, steps=[args.bin])
-		d.boresight = resample.downsample_bin(d.boresight, steps=[args.bin])
-		d.flags = resample.downsample_bin(d.flags, steps=[args.bin])
+		if "boresight" in d:
+			d.boresight = resample.downsample_bin(d.boresight, steps=[args.bin])
+		if "flags" in d:
+			d.flags = resample.downsample_bin(d.flags, steps=[args.bin])
 	oname = args.ofile
 	if len(ids) > 1: oname = "%s/%s.hdf" % (args.ofile, id)
 	with h5py.File(oname, "w") as hfile:
@@ -62,7 +64,7 @@ for id in ids:
 		if "boresight" in d:
 			hfile["az"]  = d.boresight[1]
 			hfile["el"]  = d.boresight[2]
-		hfile["dets"] = d.dets
+		hfile["dets"] = np.char.encode(d.dets)
 		try:
 			hfile["mask"] = d.cut.to_mask().astype(np.int16)
 		except AttributeError: pass

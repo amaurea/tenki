@@ -8,6 +8,7 @@ parser.add_argument("-a", "--allow-nonstandard",   action="store_true")
 parser.add_argument("-c", "--cont",                action="store_true")
 parser.add_argument("-d", "--dry",                 action="store_true")
 parser.add_argument("-O", "--output",    type=str, default="map,ivar,sens,xlink,hits,totmap,totsens,totxlink,tothits")
+parser.add_argument("--exclude",         type=str, default=None)
 args = parser.parse_args()
 import numpy as np, glob, re, os, shutil, sys
 from enlib import enmap, utils, retile, bunch, mpi
@@ -20,6 +21,7 @@ verbose = True
 datasets = {}
 for fname in glob.glob(args.idir + "/*map????.fits"):
 	fname = os.path.basename(fname)
+	if re.search(args.exclude, fname): continue
 	m = re.search(r"^(.*)_(\d+)way_(\d+)_sky_map(\d\d\d\d).fits", fname)
 	if not m:
 		if comm.rank == 0: print("Skipping unrecognized map name: " + fname)

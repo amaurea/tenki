@@ -15,9 +15,9 @@ parser.add_argument("-c", "--cont",    action="store_true")
 parser.add_argument("-v", "--verbose", action="store_true")
 parser.add_argument("-W", "--wiener",  action="store_true")
 parser.add_argument("-m", "--mask",   type=str,   default=None)
-parser.add_argument("--filter-mode",  type=str,   default="weight")
+#parser.add_argument("--filter-mode",  type=str,   default="weight")
 parser.add_argument("--cg-tol",       type=float, default=1e-4)
-parser.add_argument(      "--detrend",type=int,   default=1)
+parser.add_argument(      "--detrend",type=int,   default=0)
 args = parser.parse_args()
 
 config  = jointmap.read_config(args.config)
@@ -72,7 +72,11 @@ def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=F
 	if all([d.insufficient for d in mapset.datasets]): return None
 	jointmap.setup_beams(mapset)
 	jointmap.setup_target_beam(mapset, obeam)
-	jointmap.setup_filter(mapset, mode=args.filter_mode)
+	# For pa7 the ground pickup is too narrow for planck to help, so filtering is the only option.
+	# But ideally the filter needs a source/galaxy mask. Probably best to just filter the map in
+	# postprocessing instead, and just disable the filter, while solving, at least for now.
+	jointmap.setup_downweight(mapset)
+	jointmap.setup_filter    (mapset)
 	jointmap.setup_background_spectrum(mapset)
 	mask    = jointmap.get_mask_insufficient(mapset)
 	if args.wiener: coadder = jointmap.Wiener(mapset)

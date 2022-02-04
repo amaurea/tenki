@@ -61,6 +61,11 @@ def mapdiag(map):
 	elif map.ndim == 4: enmap.samewcs(np.einsum("iiyx->iyx",map),map)
 	else: raise NotImplementedError
 
+def moo(tag, mapset):
+	for dataset in mapset.datasets:
+		for i, split in enumerate(dataset.splits):
+			print(tag, dataset.name, i, np.std(split.data.map))
+
 def get_coadded_tile(mapinfo, box, obeam=None, ncomp=1, dump_dir=None, verbose=False):
 	if not overlaps_any(np.sort(box,0), boxes): return None
 	mapset = mapinfo.read(box, pad=pad, dtype=dtype, verbose=verbose, ncomp=ncomp)

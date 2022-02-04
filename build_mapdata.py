@@ -1,7 +1,7 @@
 import argparse
 parser = argparse.ArgumentParser()
+parser.add_argument("ifile", nargs="?", default=None)
 parser.add_argument("ofile")
-parser.add_argument("-r", "--ref",   type=str, default=None)
 parser.add_argument("-m", "--maps",  type=str, default=None)
 parser.add_argument("-v", "--ivars", type=str, default=None)
 parser.add_argument("-b", "--beam",  type=str, default=None)
@@ -18,7 +18,7 @@ ivars = args.ivars.split(",") if args.ivars else None
 
 mapinfo = mapdata.build_mapinfo(mapfiles=maps, ivarfiles=ivars,
 		beamfile=args.beam, infofile=args.info, gain=args.gain, freq=args.freq,
-		mapdatafile=args.ref)
+		mapdatafile=args.ifile)
 
 if   mapinfo.maps  is None: print("Maps missing!")
 elif mapinfo.ivars is None: print("Ivars missing!")

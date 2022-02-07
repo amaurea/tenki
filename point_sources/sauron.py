@@ -10,15 +10,19 @@ parser.add_argument("--nmat-smooth", type=str, default="angular")
 parser.add_argument("--cmb",   type=str, default=None)
 parser.add_argument("--slice", type=str, default=None)
 parser.add_argument("--box",   type=str, default=None)
-parser.add_argument("-c", "--cont", action="store_true")
+parser.add_argument("-c", "--cont",   action="store_true")
+parser.add_argument("-t", "--tshape", type=str, default="1000")
+parser.add_argument("-C", "--comps",  type=str, default="TQU")
 args = parser.parse_args()
 import numpy as np
 from numpy.lib import recfunctions
-from pixell import enmap, utils, bunch, analysis, uharm, powspec, pointsrcs, curvedsky
+from pixell import enmap, utils, bunch, analysis, uharm, powspec, pointsrcs, curvedsky, mpi
 from enlib import mapdata, array_ops, wavelets, multimap
 from scipy import ndimage
 
 utils.mkdir(args.odir)
+comm = mpi.COMM_WORLD
+tshape= np.zeros(2,int)+utils.parse_ints(args.tshape)
 
 class Nmat:
 	def matched_filter(self, map, cache=None): raise NotImplementedError
@@ -197,7 +201,9 @@ def make_invertible(N, mintol=1e-2, corrtol=0.99, inplace=False):
 # be reusable.
 def build_iN_constcorr_prior(data, cmb=None, lknee0=2000, constcov=False):
 	N    = enmap.zeros((data.n,data.n)+data.maps.shape[-2:], data.maps.wcs, data.maps.dtype)
-	norm = 1/(np.mean(data.ivars,(-2,-1))/data.ivars.pixsize())
+	ref  = np.mean(data.ivars,(-2,-1))
+	ref  = np.maximum(ref, np.max(ref)*1e-4)
+	norm = 1/(ref/data.ivars.pixsize())
 	for i, freq in enumerate(data.freqs):
 		lknee  = lknee0*freq/100
 		N[i,i] = (1+(np.maximum(0.5,data.l)/lknee)**-3.5) * norm[i]
@@ -221,7 +227,7 @@ def build_iN_constcorr(data, maps, smooth="angular", brel=2, lsigma=500, lmin=10
 	fhmap = enmap.map2harm(maps, spin=0, normalize="phys") / maps.pixsize()**0.5
 	del maps
 	N     = (fhmap[:,None]*np.conj(fhmap[None,:])).real
-	N    /= data.fapod
+	N    /= np.maximum(data.fapod, 1e-8)
 	del fhmap
 	# Smooth in piwwin-space, since things are expected to be more isotopic there
 	N = N * data.wy[:,None]**2 * data.wx[None,:]**2
@@ -233,14 +239,13 @@ def build_iN_constcorr(data, maps, smooth="angular", brel=2, lsigma=500, lmin=10
 		N = smooth_ps_mixed(N, brel=brel, lsigma=lsigma)
 	else:
 		raise ValueError("Unrecognized smoothing '%s'" % str(smooth))
+	N = make_invertible(N, mintol=1e-10, corrtol=0)
 	# Restore the pixwin
 	N = N / data.wy[:,None]**2 / data.wx[None,:]**2
-	enmap.write_map("ps2d_preinv.fits", N)
 	# And invert and kill the lowest modes. This is useful because these can have
 	# artificially low variance due to the tf
 	iN  = np.linalg.inv(N.T).T
 	iN[:,:,data.l<lmin] = 0
-	enmap.write_map("ips2d.fits", iN)
 	return iN
 
 def build_iN_constcov(data, maps, smooth="isotropic", brel=2, lsigma=500, lmin=100):
@@ -423,6 +428,7 @@ class FinderSimple(Finder):
 		cat = cat[np.argsort(cat.snr)[::-1]]
 		return bunch.Bunch(cat=cat, snmin=snmin, snr=snr_tot, snlim=snlim)
 
+moo = 0
 class FinderMulti(Finder):
 	def __init__(self, nmat, beams, scalings, save_snr=False):
 		self.nmat     = nmat
@@ -468,6 +474,7 @@ class FinderMulti(Finder):
 				kappa_tot  = enmap.samewcs(np.where(mask, my_kappa_tot, kappa_tot), map)
 			del my_rho, my_kappa, my_rho_tot, my_kappa_tot, my_snr_tot
 		del cache
+		global moo
 		# Find the effective S/N threshold, taking into account any position-dependent
 		# penalty and the (penalized) maximum value in the map
 		if snrel   is not None: snmin = max(snmin, np.max(snr_tot/penalty)*snrel)
@@ -496,13 +503,26 @@ class FinderMulti(Finder):
 		cat.snr = ndimage.maximum(snr_tot, labels, allofthem)
 		# Interpolating before solving is faster, but inaccurate. So we do the slow thing.
 		flux_tot, dflux_tot = solve_mapsys(kappa_tot, rho_tot)
+		enmap.write_map("flux_tot_%02d.fits" % moo, flux_tot)
+		moo += 1
 		case0    = cases.at(pixs0, unit="pix", order=0)
 		case_com = cases.at(pixs,  unit="pix", order=0)
 		flux0    = flux_tot.at(pixs0, unit="pix", order=0)
 		flux_com = flux_tot.at(pixs,  unit="pix", order=self.order)
 		unsafe   = (case_com != case0) | (np.abs((flux_com-flux0))/np.maximum(np.abs(flux_com),np.abs(flux0)) > 0.2)
+		# Looks like this is still unsafe :(
+		print("FIXME")
+		unsafe[:] = True
 		# Build the total part of the catalog
 		cat.ra, cat.dec = map.pix2sky(np.where(unsafe, pixs0, pixs))[::-1]
+		print("ra", cat.ra/utils.degree)
+		print("dec", cat.dec/utils.degree)
+		print("flux0")
+		print(flux0)
+		print("flux_com")
+		print(flux_com)
+		print("unsafe")
+		print(unsafe)
 		cat.case      = np.where(unsafe, case0, case_com)
 		cat.flux_tot  = np.where(unsafe, flux0, flux_com)
 		cat.dflux_tot = dflux_tot.at(np.where(unsafe, pixs0, pixs), unit="pix", order=0)
@@ -648,6 +668,7 @@ class MeasurerIterative(Measurer):
 		self.snmin    = 0.1 # do everything at once below this
 	def __call__(self, map, icat, verbose=False):
 		cat    = icat.copy()
+		if cat.size == 0: return bunch.Bunch(cat=cat, model=self.modeller(cat))
 		snr    = icat.snr * self.snscale
 		groups = snr_split(snr, sntol=self.sntol, snmin=self.snmin)
 		model  = np.zeros_like(map)
@@ -946,19 +967,32 @@ def search_maps(ifiles, sel=None, pixbox=None, box=None, templates=default_templ
 		verbose=False):
 	# Read in the total intensity data
 	if verbose: print("Reading T from %s" % str(ifiles))
-	data  = read_data(ifiles, sel=sel, pixbox=pixbox, box=box)
+	data   = read_data(ifiles, sel=sel, pixbox=pixbox, box=box, dtype=dtype)
 	data.freq0 = freq0
+	ncomp  = len(mode)
+	nfield = len(data.maps)
+	cat_dtype  = [("ra", "d"), ("dec", "d"), ("snr", "d", (ncomp,)), ("flux_tot", "d", (ncomp,)),
+			("dflux_tot", "d", (ncomp,)), ("flux", "d", (nfield,ncomp)), ("dflux", "d", (nfield,ncomp)),
+			("case", "i"), ("contam", "d", (nfield,))]
 	cases = build_cases(data, templates)
+
+	# Abort if we have no data to process
+	if np.all(data.ivars == 0):
+		map_tot = enmap.zeros((nfield,ncomp)+data.maps.shape[-2:], data.maps.wcs, dtype)
+		cat     = np.zeros(0, cat_dtype)
+		return bunch.Bunch(cat=cat, maps=map_tot, model=map_tot, snr=map_tot[0,0],
+			resid_snr=map_tot[0,0], hits=map_tot[0,0], fconvs=data.fconvs)
+
 	cmb   = build_cmb_2d(*data.maps.geometry, cl_cmb, dtype=data.maps.dtype) if cl_cmb is not None else None
 
 	# Total intensity
 	if verbose: print("1st pass T find")
 	nmat   = build_nmat_prior(data, type=nmat1, cmb=cmb[0,0] if cmb is not None else None)
-	res_t  = find_objects(data, cases, nmat, snmin=snr1, verbose=verbose)
-	if verbose: print("2nd pass T find")
-	nmat   = build_nmat_empirical(data, data.maps-res_t.model, type=nmat2)
-	res_t  = find_objects(data, cases, nmat, snmin=snr2, resid=True, verbose=verbose)
-	del data
+	res_t  = find_objects(data, cases, nmat, snmin=snr1, resid=nmat2=="none", verbose=verbose)
+	if nmat2 != "none":
+		if verbose: print("2nd pass T find")
+		nmat   = build_nmat_empirical(data, data.maps-res_t.model, type=nmat2)
+		res_t  = find_objects(data, cases, nmat, snmin=snr2, resid=True, verbose=verbose)
 
 	res = [res_t]
 	if mode == "T":
@@ -972,18 +1006,13 @@ def search_maps(ifiles, sel=None, pixbox=None, box=None, templates=default_templ
 			if verbose: print("1st pass %s measure" % mode[comp])
 			nmat  = build_nmat_prior(data, type=nmat1, pol=True, cmb=cmb[comp,comp] if cmb is None else None)
 			res_p = measure_objects(data, cases, nmat, res_t.cat, verbose=verbose)
-			if verbose: print("2nd pass %s measure" % mode[comp])
-			nmat  = build_nmat_empirical(data, noise_map=data.maps-res_p.model, type=nmat2)
-			res_p = measure_objects(data, cases, nmat, res_t.cat, verbose=verbose)
+			if nmat2 != "none":
+				if verbose: print("2nd pass %s measure" % mode[comp])
+				nmat  = build_nmat_empirical(data, noise_map=data.maps-res_p.model, type=nmat2)
+				res_p = measure_objects(data, cases, nmat, res_t.cat, verbose=verbose)
 			res.append(res_p)
-	# Merge into a single result object
-	ncomp  = len(res)
-	nfield = len(data.maps)
 	# First the catalog
-	dtype = [("ra", "d"), ("dec", "d"), ("snr", "d", (ncomp,)), ("flux_tot", "d", (ncomp,)),
-			("dflux_tot", "d", (ncomp,)), ("flux", "d", (nfield,ncomp)), ("dflux", "d", (nfield,ncomp)),
-			("case", "i"), ("contam", "d", (nfield,))]
-	cat = np.zeros(len(res_t.cat), dtype).view(np.recarray)
+	cat = np.zeros(len(res_t.cat), cat_dtype).view(np.recarray)
 	cat.ra     = res_t.cat.ra
 	cat.dec    = res_t.cat.dec
 	cat.case   = res_t.cat.case
@@ -1000,13 +1029,14 @@ def search_maps(ifiles, sel=None, pixbox=None, box=None, templates=default_templ
 	return bunch.Bunch(cat=cat, maps=map_tot, model=model_tot, snr=res_t.snr,
 			resid_snr=res_t.resid_snr, hits=res_t.hits, fconvs=data.fconvs)
 
-def search_maps_tiled(ifiles, odir, tshape=(1000,2000), margin=100, padding=100,
+def search_maps_tiled(ifiles, odir, tshape=(1000,1000), margin=100, padding=100,
 		box=None, pixbox=None, sel=None,
 		templates=default_templates, cl_cmb=None, freq0=98.0, nmat1="constcorr",
-		nmat2="constcorr", snr1=5, snr2=4, mode="TQU", dtype=np.float32, rank=0, size=1,
+		nmat2="constcorr", snr1=5, snr2=4, mode="TQU", dtype=np.float32, comm=None,
 		cont=False, verbose=False):
 	wdir = odir + "/work"
 	utils.mkdir(wdir)
+	if comm is None: comm = bunch.Bunch(rank=0, size=1)
 	tshape = np.zeros(2,int)+tshape
 	meta   = mapdata.read_meta(ifiles[0])
 	# Allow us to slice the map that will be tiled
@@ -1018,10 +1048,10 @@ def search_maps_tiled(ifiles, odir, tshape=(1000,2000), margin=100, padding=100,
 	ny,nx  = (shape+tshape-1)//tshape
 	def is_done(ty,tx): return os.path.isfile("%s/cat_%03d_%03d.fits" % (wdir, ty,tx))
 	tyxs   = [(ty,tx) for ty in range(ny) for tx in range(nx) if (not cont or not is_done(ty,tx))]
-	for ind in range(rank, len(tyxs), size):
+	for ind in range(comm.rank, len(tyxs), comm.size):
 		# Get basic area of this tile
 		tyx = np.array(tyxs[ind])
-		if verbose: print("%2d Processing tile %2d %2d of %2d %2d" % (rank, tyx[0], tyx[1], ny, nx))
+		if verbose: print("%2d Processing tile %2d %2d of %2d %2d" % (comm.rank, tyx[0], tyx[1], ny, nx))
 		yx1 = tyx*tshape
 		yx2 = np.minimum((tyx+1)*tshape, shape)
 		# Apply padding
@@ -1042,7 +1072,7 @@ def search_maps_tiled(ifiles, odir, tshape=(1000,2000), margin=100, padding=100,
 		enmap.write_map("%s/resid_snr_%03d_%03d.fits" % (wdir,*tyx), unpad(res.resid_snr))
 		write_catalog("%s/cat_%03d_%03d.fits"     % (wdir,*tyx), res.cat)
 	# When everything's done, merge things into single files
-	if rank == 0:
+	if comm.rank == 0:
 		# Get the tile catalogs and their area of responsibility
 		cats = []; boxes = []
 		for ty in range(ny):
@@ -1140,8 +1170,8 @@ sel    = parse_slice(args.slice)
 box    = utils.parse_box(args.box)*utils.degree if args.box else None
 cl_cmb = powspec.read_spectrum(args.cmb) if args.cmb else None
 
-if False:
-	res    = search_maps(args.ifiles, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True)
+if True:
+	res    = search_maps(args.ifiles, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, mode=args.comps)
 
 	write_catalog(args.odir + "/cat.fits", res.cat)
 	write_catalog(args.odir + "/cat.txt",  res.cat)
@@ -1152,7 +1182,7 @@ if False:
 	enmap.write_map(args.odir + "/resid_snr.fits", res.resid_snr)
 	enmap.write_map(args.odir + "/hits.fits", res.hits)
 else:
-	search_maps_tiled(args.ifiles, args.odir, tshape=500, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, cont=args.cont)
+	search_maps_tiled(args.ifiles, args.odir, tshape=tshape, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, cont=args.cont, comm=comm, mode=args.comps)
 
 #data   = read_data(args.ifiles, sel=sel, box=box)
 #data.freq0 = 98.0

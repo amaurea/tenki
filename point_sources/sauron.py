@@ -1270,7 +1270,7 @@ def merge_tiles(shape, wcs, paths, margin=100, dtype=np.float32):
 		for tx in range(nx):
 			fname = paths[ty][tx]
 			imap  = enmap.read_map(fname)
-			w, h  = imap.shape[-2:]
+			h, w  = imap.shape[-2:]
 			wy    = make_edge_interp(h-2*margin, margin, ty>0, ty<ny-1, dtype=imap.dtype)
 			wx    = make_edge_interp(w-2*margin, margin, tx>0, tx<nx-1, dtype=imap.dtype)
 			imap  = imap * wy[:,None] * wx[None,:]

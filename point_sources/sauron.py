@@ -11,10 +11,11 @@ parser.add_argument("--cmb",   type=str, default=None)
 parser.add_argument("--slice", type=str, default=None)
 parser.add_argument("--box",   type=str, default=None)
 parser.add_argument("-c", "--cont",   action="store_true")
-parser.add_argument("-t", "--tshape", type=str, default="1000")
+parser.add_argument("-t", "--tshape", type=str, default="500,2000")
 parser.add_argument("-C", "--comps",  type=str, default="TQU")
+parser.add_argument("-s", "--sim",    type=str, default=None)
 args = parser.parse_args()
-import numpy as np
+import numpy as np, time
 from numpy.lib import recfunctions
 from pixell import enmap, utils, bunch, analysis, uharm, powspec, pointsrcs, curvedsky, mpi
 from enlib import mapdata, array_ops, wavelets, multimap
@@ -172,7 +173,7 @@ def snr_split(snrs, sntol=0.25, snmin=5):
 	v  = utils.floor(v)
 	return utils.find_equal_groups(v)[::-1]
 
-def make_invertible(N, mintol=1e-2, corrtol=0.99, inplace=False):
+def make_invertible(N, mintol=1e-3, corrtol=0.99, inplace=False):
 	if not inplace: N = N.copy()
 	v     = np.einsum("aa...->a...", N)
 	# Get the typical values in the map
@@ -220,7 +221,7 @@ def build_iN_constcorr_prior(data, cmb=None, lknee0=2000, constcov=False):
 	return iN
 
 def build_iN_constcov_prior(data, cmb=None, lknee0=2000):
-	return build_iN_constcorr_prior(data, cmb=cmb, lknee=lknee, constcov=True)
+	return build_iN_constcorr_prior(data, cmb=cmb, lknee0=lknee0, constcov=True)
 
 def build_iN_constcorr(data, maps, smooth="angular", brel=2, lsigma=500, lmin=100, constcov=False):
 	if not constcov: maps = maps*data.ivars**0.5
@@ -279,6 +280,9 @@ def build_wiN_ivar(maps, ivars, wt, smooth=5, tol=1e-4):
 		wiN.maps[i] = np.linalg.inv(Nmap.T).T
 	return wiN
 
+def get_flat_sky_correction(pixratio):
+		return (0.5*(1+pixratio**2))**-0.5, 1/pixratio
+
 # Implemented independently of pixell.analysis for now. May backport later.
 # Here we only care about flat sky
 class NmatConstcov(Nmat):
@@ -290,7 +294,8 @@ class NmatConstcov(Nmat):
 		self.iN      = iN
 		self.apod    = apod
 		assert self.iN.ndim == 4, "iN   must be an enmap with 4 dims"
-		self.pixarea = enmap.pixsizemap(self.iN.shape, self.iN.wcs, broadcastable=True)
+		self.pixsize  = enmap.pixsize(self.iN.shape, self.iN.wcs)
+		self.pixratio = enmap.pixsizemap(self.iN.shape, self.iN.wcs, broadcastable=True)/self.pixsize
 		self.fsky    = enmap.area(self.iN.shape, self.iN.wcs)/(4*np.pi)
 	def matched_filter(self, map, beam, cache=None):
 		"""Apply a matched filter to the given map [n,ny,nx], which must agree in shape
@@ -301,13 +306,53 @@ class NmatConstcov(Nmat):
 		assert map .ndim  == 3, "Map must be an enmap with 3 dims"
 		assert beam.ndim  == 3, "Beam must be an enmap with 3 dims"
 		assert map .shape == beam.shape, "Map and beam shape must agree"
-		rho = cache_get(cache, "rho_pre", lambda: enmap.map_mul(self.iN,enmap.map2harm(map*self.apod, spin=0, normalize="phys"))/self.pixarea)
-		rho = enmap.map2harm_adjoint(beam*rho, spin=0, normalize="phys")
+		# Flat sky corrections. Don't work that well here. Without them
+		# we have an up to 2% error with a 10° tall patch. With them this
+		# is reduced to 1%. I don't understand why they don't work better here.
+		flatcorr_rho, flatcorr_kappa = get_flat_sky_correction(self.pixratio)
+		rho = cache_get(cache, "rho_pre", lambda: enmap.map_mul(self.iN,enmap.map2harm(map*self.apod, spin=0, normalize="phys"))/self.pixsize)
+		rho = enmap.map2harm_adjoint(beam*rho, spin=0, normalize="phys")*flatcorr_rho
 		kappa0 = np.sum(beam[:,None]*self.iN[:,:]*beam[None,:],(-2,-1))/(4*np.pi*self.fsky)
 		kappa  = np.empty_like(rho, shape=kappa0.shape+rho.shape[-2:])
-		kappa[:] = kappa0[:,:,None,None]
+		kappa[:] = kappa0[:,:,None,None]*flatcorr_kappa
 		# Done! What we return will always be [n,ny,nx], [n,n,ny,nx]
 		return rho, kappa
+
+#class NmatConstcorr_old(Nmat):
+#	def __init__(self, iN, ivar):
+#		"""Initialize a Constcov noise model from an inverse noise power spectrum
+#		enmap. iN must have shape [n,n,ny,nx]. For a simple scalar filter just
+#		insert scalar dimensions with None before constructing, e.g.
+#		iN[None,None]."""
+#		self.iN      = iN
+#		self.ivar    = ivar
+#		assert self.iN  .ndim == 4, "iN   must be an enmap with 4 dims"
+#		assert self.ivar.ndim == 3, "ivar must be an enmap with 3 dims"
+#		self.pixarea = enmap.pixsizemap(self.iN.shape, self.iN.wcs, broadcastable=True)
+#		#self.pixarea = enmap.pixsize(self.iN.shape, self.iN.wcs)
+#	def matched_filter(self, map, beam, beam2=None, cache=None):
+#		"""Apply a matched filter to the given map [n,ny,nx], which must agree in shape
+#		with the beam transform beam [n,ny,nx]. Returns rho[n,ny,nx], kappa[n,n,ny,nx].
+#		From these the best-fit fluxes in pixel y,x can be recovered as
+#		np.linalg.solve(kappa[:,:,y,x],rho[:,y,x]), and the combined flux as
+#		rho_tot = np.sum(rho,0); kappa_tot = np.sum(kappa,(0,1)); flux_tot = rho_tot[y,x]/kappa_tot[y,x]"""
+#		assert map.ndim == 3, "Map must be an enmap with 3 dims"
+#		assert beam.ndim == 3, "Beam must be an enmap with 3 dims"
+#		assert map.shape == beam.shape, "Map and beam shape must agree"
+#		V    = self.ivar**0.5
+#		# Square the beam in real space if not provided
+#		if beam2 is None: beam2 = rpow(beam, 2)
+#		# Find a white approximation for iN. Is doing this element-wise correct?
+#		iN_white = np.sum(beam[:,None]*self.iN*beam[None,:],(-2,-1))/np.sum(beam[:,None]*beam[None,:],(-2,-1))
+#		# The actual filter
+#		rho   = cache_get(cache, "rho_pre", lambda: enmap.harm2map_adjoint(V*enmap.map2harm_adjoint(enmap.map_mul(self.iN, enmap.map2harm(V*map, spin=0, normalize="phys")), spin=0, normalize="phys"), spin=0, normalize="phys")/self.pixarea)
+#		rho   = enmap.harm2map(beam*rho, spin=0, normalize="phys")
+#
+#		kappa = enmap.map2harm_adjoint(enmap.map_mul(beam2,enmap.harm2map_adjoint(self.ivar+0j, spin=0, normalize="phys")), spin=0, normalize="phys")/self.pixarea
+#		kappa = np.maximum(kappa,0)**0.5
+#		kappa = kappa[:,None]*iN_white[:,:,None,None]*kappa[None,:]
+#		# Done! What we return will always be [n,ny,nx], [n,n,ny,nx]
+#		return rho, kappa
 
 class NmatConstcorr(Nmat):
 	def __init__(self, iN, ivar):
@@ -319,7 +364,9 @@ class NmatConstcorr(Nmat):
 		self.ivar    = ivar
 		assert self.iN  .ndim == 4, "iN   must be an enmap with 4 dims"
 		assert self.ivar.ndim == 3, "ivar must be an enmap with 3 dims"
-		self.pixarea = enmap.pixsizemap(self.iN.shape, self.iN.wcs, broadcastable=True)
+		self.pixsize  = enmap.pixsize(self.iN.shape, self.iN.wcs)
+		self.pixratio = enmap.pixsizemap(self.iN.shape, self.iN.wcs, broadcastable=True)/self.pixsize
+		#self.pixarea = enmap.pixsize(self.iN.shape, self.iN.wcs)
 	def matched_filter(self, map, beam, beam2=None, cache=None):
 		"""Apply a matched filter to the given map [n,ny,nx], which must agree in shape
 		with the beam transform beam [n,ny,nx]. Returns rho[n,ny,nx], kappa[n,n,ny,nx].
@@ -329,17 +376,87 @@ class NmatConstcorr(Nmat):
 		assert map.ndim == 3, "Map must be an enmap with 3 dims"
 		assert beam.ndim == 3, "Beam must be an enmap with 3 dims"
 		assert map.shape == beam.shape, "Map and beam shape must agree"
-		fmap = cache_get(cache, "fmap", lambda: enmap.map2harm(map, spin=0, normalize="phys"))
 		V    = self.ivar**0.5
 		# Square the beam in real space if not provided
 		if beam2 is None: beam2 = rpow(beam, 2)
 		# Find a white approximation for iN. Is doing this element-wise correct?
 		iN_white = np.sum(beam[:,None]*self.iN*beam[None,:],(-2,-1))/np.sum(beam[:,None]*beam[None,:],(-2,-1))
-		# The actual filter
-		rho   = cache_get(cache, "rho_pre", lambda: enmap.harm2map_adjoint(V*enmap.map2harm_adjoint(enmap.map_mul(self.iN, enmap.map2harm(V*map, spin=0, normalize="phys")), spin=0, normalize="phys"), spin=0, normalize="phys")/self.pixarea)
+		# Our model that our map contains a single point source + noise,
+		#  m = BPa+n
+		# where a is the total flux in that pixel, P is something that puts all that flux in the correct
+		# pixel, and B is our beam, which preserves total flux but smears it out. So B[l=0] = 1. This means
+		# that P should have units of 1/pixarea so that Pa has units of flux per steradian.
+		#
+		# Our ML estimate of a is then
+		#  a = (P'B'N"BP)"P'B'N"m = rhs/kappa
+		#  rhs = P'B'N"m, kappa = P'B'N"BP
+		# In real space, each column of B would be a set of numbers that sum to 1. Near the equator
+		# these would be more concentrated, further away they would be broader. The peak height would
+		# be position-independent. The pixel size wouldn't enter here (aside from deciding how many
+		# pixels are hit) since the flux density is an intensive quantity.
+		#
+		# Regardless of projection B(x,y) would look like b(dist(x,y)), which is symmetric.
+		#
+		# How does the flat sky approximation enter here? Affects both B and N, but N doesn't affect
+		# the flux expectation value, so let's ignore it for now. Flat sky means that we replace B
+		# with B2(x,y) = b(dist0(x,y)), dist0(x,y) = ((x.ra-y.ra)**2*cos_dec + (x.dec-y.dec)**2)**0.5.
+		#
+		# What is (P'B2'B2P)"P'B2'BP? 
+		#
+		# BP  = a beam map centered on some location dec with total flux of 1. In car it's stretched hor by 1/cos(dec)
+		# B2P = similar, but stretched hor by 1/cos(dec0).
+		# (B2P)'(BP) is the dot product of these. Let's try for a gaussian:
+		# int 1/sqrt(2pi s1**2) 1/sqrt(2pi s2**2) exp(-(x*s1)**2) exp(-(x*s2)**2) dx =
+		# int 1/... exp(-(x*(s1**2+s2**2))) dx = sqrt(2 pi (s1**2+s2**2))/sqrt(2 pi s1**2)/sqrt(2 pi s2**2)
+		# = 1/sqrt(2 pi) * sqrt(s1**-2+s2**-2)
+		# What it should have been:
+		# 1/sqrt(2 pi) * sqrt(2 s1**-2)
+		#
+		# So (P'B2'B2P)"P'B2'BP = sqrt(s1**-2+s2**-2)/sqrt(s2**-2+s2**-2)
+		# where it should have been 1 if B2 were B. So we're off by a factor
+		# sqrt(cos(dec)**-2 + cos(dec0)**-2)/(2 cos(dec0)**-2)
+		#
+		# Hm, here I assumed that the normalization was different for the two cases,
+		# but is it? No, we have the same peak in all cases. The flat sky approximation
+		# only affects how we compute distances. So let's try again:
+		#
+		#   int exp(-0.5*(x*s1)**2)*exp(-0.5*(x*s2)**2) dx
+		# = int exp(-0.5*x**2*(s1**2+s2**2))
+		# = sqrt(2*pi*(s1**2+s2**2))
+		#
+		# (P'B2'B2P)"P'B2'P = sqrt(s1**2+s2**2)/sqrt(s2**2+s2**2)
+		# For my case that means we make a flux error of
+		# sqrt(cos(dec)**2+cos(dec0))/sqrt(2 cos(dec0)**2)
+		# = sqrt(0.5*(1+cos(dec)**2/cos(dec0)**2))
+		#
+		# This depends on it being gaussian, but let's just use it for now.
+		# What happens to rho and kappa separately?
+		# rho is wrong by sqrt(s1**2+s2**2)/sqrt(2*s1**2)
+		# = sqrt(cos(dec)**2+cos(dec0)**2)/sqrt(2*cos(dec)**2)
+		# = sqrt(0.5*(1+(cos(dec)/cos(dec0))**-2))
+		# kappa is wrong by sqrt(2 s2**2)/sqrt(2 s1**2) = (cos(dec)/cos(dec0))**-1
+		#
+		# But wait! We've forgotten about P! P should go as 1/pixsizemap, but
+		# in the flat sky it goes as pixsize. So we should keep P and P2 separate.
+		#
+		# Let's try again:
+		#
+		# rho error is:
+		#  rho2/rho = P2'B2'BP/(P'B'BP) = sqrt(0.5*(1+(cos(dec)/cos(dec0))**-2)) * area/area0
+		#           = sqrt(0.5*(1+(area/area0)**-2)) * (area/area0)
+		#           = sqrt(0.5*(1+(area/area0)**2))
+		# kappa error is
+		#  kappa2/kappa = (P2'B2'B2P2)'/(P'B'BP) = (cos(dec)/cos(dec0))**-1 * (area0/area)**-2
+		#           = area/area0
+		# Flat-sky correction factors. For a 10° tall patch we get up to 2% errors in flux without
+		# them. This is reduced to 1% with them. Not sure why it doesn't do better - is the
+		# gaussian approximation too limiting? Or do I have a bug?
+		flatcorr_rho, flatcorr_kappa = get_flat_sky_correction(self.pixratio)
+		# Numerator
+		rho   = cache_get(cache, "rho_pre", lambda: enmap.map2harm(flatcorr_rho*V*enmap.harm2map(enmap.map_mul(self.iN, enmap.map2harm(V*map, spin=0, normalize="phys")), spin=0, normalize="phys"), spin=0, normalize="phys")/self.pixsize)
 		rho   = enmap.harm2map(beam*rho, spin=0, normalize="phys")
-
-		kappa = enmap.map2harm_adjoint(enmap.map_mul(beam2,enmap.harm2map_adjoint(self.ivar+0j, spin=0, normalize="phys")), spin=0, normalize="phys")/self.pixarea
+		# Denominator
+		kappa = enmap.harm2map(enmap.map_mul(beam2,enmap.map2harm(self.ivar+0j, spin=0, normalize="phys")), spin=0, normalize="phys")/self.pixsize * flatcorr_kappa
 		kappa = np.maximum(kappa,0)**0.5
 		kappa = kappa[:,None]*iN_white[:,:,None,None]*kappa[None,:]
 		# Done! What we return will always be [n,ny,nx], [n,n,ny,nx]
@@ -352,10 +469,13 @@ class NmatWavelet(Nmat):
 		self.wt   = wt
 		self.wiN  = wiN
 	def matched_filter(self, map, beam, cache=None):
+		# We get 2% flat-sky errors with a 10° tall patch without corrections, and 1% with the corrections.
+		pixsize  = enmap.pixsize(map.shape, map.wcs)
+		pixratio = enmap.pixsizemap(map.shape, map.wcs, broadcastable=True)/pixsize
+		flatcorr_rho, flatcorr_kappa = get_flat_sky_correction(pixratio)
 		# Get rho
-		pixarea = enmap.pixsizemap(map.shape, map.wcs, broadcastable=True)
-		rho = cache_get(cache, "rho_pre", lambda: enmap.map2harm(self.wt.wave2map(multimap.map_mul(self.wiN, self.wt.map2wave(map))), spin=0, normalize="phys")/pixarea)
-		rho = enmap.harm2map(beam*rho, spin=0, normalize="phys")
+		rho = cache_get(cache, "rho_pre", lambda: enmap.map2harm(self.wt.wave2map(multimap.map_mul(self.wiN, self.wt.map2wave(map))), spin=0, normalize="phys")/pixsize)
+		rho = enmap.harm2map(beam*rho, spin=0, normalize="phys")*flatcorr_rho
 		# Then get kappa
 		fkappa = enmap.zeros(self.wiN.pre + map.shape[-2:], map.wcs, utils.complex_dtype(map.dtype))
 		for i in range(self.wt.nlevel):
@@ -364,7 +484,7 @@ class NmatWavelet(Nmat):
 			sub_Q2 = rop(sub_Q, op=lambda a: a[:,None]*a[None,:])
 			fsmall = sub_Q2*enmap.fft(self.wiN.maps[i], normalize=False)/self.wiN.npixs[i]
 			enmap.resample_fft(fsmall, map.shape, fomap=fkappa, norm=None, corner=True, op=np.add)
-		kappa = enmap.ifft(fkappa, normalize=False).real/pixarea
+		kappa = enmap.ifft(fkappa, normalize=False).real/pixsize*flatcorr_kappa
 		return rho, kappa
 
 class FinderSimple(Finder):
@@ -428,7 +548,6 @@ class FinderSimple(Finder):
 		cat = cat[np.argsort(cat.snr)[::-1]]
 		return bunch.Bunch(cat=cat, snmin=snmin, snr=snr_tot, snlim=snlim)
 
-moo = 0
 class FinderMulti(Finder):
 	def __init__(self, nmat, beams, scalings, save_snr=False):
 		self.nmat     = nmat
@@ -474,7 +593,6 @@ class FinderMulti(Finder):
 				kappa_tot  = enmap.samewcs(np.where(mask, my_kappa_tot, kappa_tot), map)
 			del my_rho, my_kappa, my_rho_tot, my_kappa_tot, my_snr_tot
 		del cache
-		global moo
 		# Find the effective S/N threshold, taking into account any position-dependent
 		# penalty and the (penalized) maximum value in the map
 		if snrel   is not None: snmin = max(snmin, np.max(snr_tot/penalty)*snrel)
@@ -503,26 +621,13 @@ class FinderMulti(Finder):
 		cat.snr = ndimage.maximum(snr_tot, labels, allofthem)
 		# Interpolating before solving is faster, but inaccurate. So we do the slow thing.
 		flux_tot, dflux_tot = solve_mapsys(kappa_tot, rho_tot)
-		enmap.write_map("flux_tot_%02d.fits" % moo, flux_tot)
-		moo += 1
 		case0    = cases.at(pixs0, unit="pix", order=0)
 		case_com = cases.at(pixs,  unit="pix", order=0)
 		flux0    = flux_tot.at(pixs0, unit="pix", order=0)
 		flux_com = flux_tot.at(pixs,  unit="pix", order=self.order)
 		unsafe   = (case_com != case0) | (np.abs((flux_com-flux0))/np.maximum(np.abs(flux_com),np.abs(flux0)) > 0.2)
-		# Looks like this is still unsafe :(
-		print("FIXME")
-		unsafe[:] = True
 		# Build the total part of the catalog
 		cat.ra, cat.dec = map.pix2sky(np.where(unsafe, pixs0, pixs))[::-1]
-		print("ra", cat.ra/utils.degree)
-		print("dec", cat.dec/utils.degree)
-		print("flux0")
-		print(flux0)
-		print("flux_com")
-		print(flux_com)
-		print("unsafe")
-		print(unsafe)
 		cat.case      = np.where(unsafe, case0, case_com)
 		cat.flux_tot  = np.where(unsafe, flux0, flux_com)
 		cat.dflux_tot = dflux_tot.at(np.where(unsafe, pixs0, pixs), unit="pix", order=0)
@@ -540,7 +645,7 @@ class FinderMulti(Finder):
 		return bunch.Bunch(cat=cat, snmin=snmin, snr=snr_tot, snlim=snlim)
 
 class FinderIterative(Finder):
-	def __init__(self, finder, modeller, maxiter=10, sntol=0.25,
+	def __init__(self, finder, modeller, maxiter=10, sntol=0.50,
 			grid_max=4, grid_res=0.1*utils.degree, grid_dominance=10):
 		self.finder   = finder
 		self.modeller = modeller
@@ -753,7 +858,7 @@ def format_cat(cat):
 	header += "\n"
 	res = ""
 	for i in range(len(cat)):
-		res += "%8.4f %4.8f" % (cat.ra[i]/utils.degree, cat.dec[i]/utils.degree)
+		res += "%8.4f %8.4f" % (cat.ra[i]/utils.degree, cat.dec[i]/utils.degree)
 		snr  = cat.snr[i].reshape(-1)
 		res += " %9.2f" % snr[0] + " %6.2f"*(len(snr)-1) % tuple(snr[1:])
 		flux = cat. flux_tot[i].reshape(-1)
@@ -883,7 +988,7 @@ def build_case_tsz(data, size=1):
 def build_nmat_prior(data, type="constcorr", cmb=None, pol=False):
 	if type == "constcov":
 		iN    = build_iN_constcov_prior(data, cmb=cmb, lknee0=800 if pol else 2000)
-		nmat  = NmatConstcov(iN)
+		nmat  = NmatConstcov(iN, data.apod)
 	elif type == "constcorr":
 		iN    = build_iN_constcorr_prior(data, cmb=cmb, lknee0=800 if pol else 2000)
 		nmat  = NmatConstcorr(iN, data.ivars)
@@ -960,11 +1065,15 @@ def build_cases(data, templates):
 	cases = bunch.concatenate(cases)
 	return cases
 
+def inject_objects(data, cases, cat):
+	modeller = ModellerMulti(cases.modeller)
+	data.maps += modeller(cat)
+
 default_templates = [("ptsrc",-0.66), ("ptsrc",0),("graysrc",10), ("tsz",0.1),
 		("tsz",2), ("tsz",4), ("tsz",6), ("tsz",8)]
 def search_maps(ifiles, sel=None, pixbox=None, box=None, templates=default_templates, cl_cmb=None, freq0=98.0,
 		nmat1="constcorr", nmat2="constcorr", snr1=5, snr2=4, mode="TQU", dtype=np.float32,
-		verbose=False):
+		verbose=False, sim_cat=None):
 	# Read in the total intensity data
 	if verbose: print("Reading T from %s" % str(ifiles))
 	data   = read_data(ifiles, sel=sel, pixbox=pixbox, box=box, dtype=dtype)
@@ -984,6 +1093,9 @@ def search_maps(ifiles, sel=None, pixbox=None, box=None, templates=default_templ
 			resid_snr=map_tot[0,0], hits=map_tot[0,0], fconvs=data.fconvs)
 
 	cmb   = build_cmb_2d(*data.maps.geometry, cl_cmb, dtype=data.maps.dtype) if cl_cmb is not None else None
+
+	# Optionally inject signal
+	if sim_cat is not None: inject_objects(data, cases, sim_cat)
 
 	# Total intensity
 	if verbose: print("1st pass T find")
@@ -1169,9 +1281,10 @@ dtype  = np.float32
 sel    = parse_slice(args.slice)
 box    = utils.parse_box(args.box)*utils.degree if args.box else None
 cl_cmb = powspec.read_spectrum(args.cmb) if args.cmb else None
+sim_cat= read_catalog(args.sim) if args.sim else None
 
-if True:
-	res    = search_maps(args.ifiles, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, mode=args.comps)
+if False:
+	res    = search_maps(args.ifiles, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, mode=args.comps, sim_cat=sim_cat)
 
 	write_catalog(args.odir + "/cat.fits", res.cat)
 	write_catalog(args.odir + "/cat.txt",  res.cat)

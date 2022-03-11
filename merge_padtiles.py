@@ -8,6 +8,7 @@ parser.add_argument("-p", "--pad",  type=int, default=240, help="Number of pixel
 parser.add_argument("-E", "--edge", type=int, default=120, help="Specifies the number of pixels at the edge of the padding to ignore. The rest of the padding will be used to avoid tile discontinuities.")
 parser.add_argument("-N", "--ncomp", type=int, default=None, help="Force the map to have this number of components by inserting blank ones as required")
 parser.add_argument("-c", "--cont", action="store_true")
+parser.add_argument("-s", "--slice", type=str, default=None)
 args = parser.parse_args()
 
 utils.mkdir(args.odir)
@@ -82,4 +83,5 @@ for y in range(tile1[0], tile2[0])[comm.rank::comm.size]:
 		print(ofile)
 		tiles = [[reader.read(y+dy,x+dx) for dx in range(-1,2)] for dy in range(-1,2)]
 		map = combine_tiles(tiles, weight)
+		if args.slice: map = eval("map"+args.slice)
 		enmap.write_map(ofile, map)

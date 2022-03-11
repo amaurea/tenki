@@ -70,7 +70,7 @@ def unpack(imap):
 def get_num_digits(n): return int(np.log10(n))+1
 
 comm   = mpi.COMM_WORLD
-ifiles = sum([sorted(glob.glob(ifile)) for ifile in args.ifiles],[])
+ifiles = sum([sorted(utils.glob(ifile)) for ifile in args.ifiles],[])
 
 for ind in range(comm.rank, len(ifiles), comm.size):
 	ifile = ifiles[ind]

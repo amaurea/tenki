@@ -8,10 +8,11 @@ import numpy as np, os, glob
 from pixell import enmap, utils
 
 ifiles = sum([sorted(glob.glob(ifile)) for ifile in args.ifiles],[])
+kwargs = {}
 try:
-	kwargs = {"box":utils.parse_box(args.box_or_template)*utils.degree}
+	kwargs["box"] = utils.parse_box(args.box_or_template)*utils.degree
 except ValueError:
-	kwargs = {"geometry":enmap.read_map_geometry(args.box_or_template)}
+	kwargs["geometry"] = enmap.read_map_geometry(args.box_or_template)
 
 for fi, ifile in enumerate(ifiles):
 	if len(ifiles) == 1: ofile = args.out

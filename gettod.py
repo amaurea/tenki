@@ -62,6 +62,7 @@ for id in ids:
 	with h5py.File(oname, "w") as hfile:
 		if "tod" in d: hfile["tod"] = d.tod
 		if "boresight" in d:
+			hfile["t"]   = d.boresight[0]-d.boresight[0,0]
 			hfile["az"]  = d.boresight[1]
 			hfile["el"]  = d.boresight[2]
 		hfile["dets"] = np.char.encode(d.dets)

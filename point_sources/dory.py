@@ -58,6 +58,9 @@ parser.add_argument(      "--split",   action="store_true")
 parser.add_argument(      "--split-nimage", type=int,   default=16)
 parser.add_argument(      "--split-dist",   type=float, default=1)
 parser.add_argument(      "--split-minflux",type=float, default=300)
+parser.add_argument(      "--rmax",    type=float, default=None)
+parser.add_argument(      "--lknee",   type=float, default=None)
+parser.add_argument(      "--npass",   type=int,   default=2)
 parser.add_argument("-c", "--cont",    action="store_true")
 
 args = parser.parse_args()
@@ -68,6 +71,7 @@ from enlib import enmap, utils, bunch, mpi, fft, pointsrcs
 comm       = mpi.COMM_WORLD
 shape, wcs = enmap.read_map_geometry(args.imap)
 beam       = dory.get_beam(args.beam)
+beam       = utils.regularize_beam(beam, nl=40000)
 regions    = dory.get_regions(args.regions, shape, wcs)
 if args.rsplit:
 	regions = dory.split_regions(regions, args.rsplit)
@@ -209,7 +213,7 @@ elif args.mode == "fit":
 				try:
 					fit_inds, amp, icov, lamps = dory.fit_src_amps(imap[ci], get_div(idiv,ci), src_pos, beam, prior=prior,
 							apod=args.apod, apod_margin=args.apod_margin, verbose=args.verbose, dump=dump_prefix, hack=args.hack,
-							region=ri)
+							region=ri, lknee=args.lknee, npass=args.npass)
 				except dory.FitError as e:
 					fit_inds, amp, icov, lamps = np.zeros([0],int), np.zeros([0]), np.zeros([0,0]), np.zeros([0])
 				if reg_cat is None:
@@ -257,6 +261,7 @@ elif args.mode == "subtract":
 		icat  = icat[icat.flux[:,0] >= icat.dflux[:,0]*args.nsigma]
 	beam_prof = dory.get_beam_profile(beam)
 	barea     = dory.calc_beam_profile_area(beam_prof)
+	rmax      = args.rmax*utils.arcmin if args.rmax is not None else None
 	#print "subtract barea: %8.3f" % (barea*1e9)
 	fluxconv  = utils.flux_factor(barea, args.freq*1e9)/1e6
 	# Reformat the catalog to the format sim_srcs takes
@@ -271,7 +276,7 @@ elif args.mode == "subtract":
 		print("%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1]))
 		map    = enmap.read_map(args.imap, pixbox=reg_pad)
 		map    = work_around_stupid_mpi4py_bug(map)
-		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True,verbose=args.verbose)
+		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True,verbose=args.verbose, rmax=rmax)
 		model[map==0] = 0
 		omaps.append(map-model)
 		if args.omodel: models.append(model)

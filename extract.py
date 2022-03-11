@@ -4,10 +4,10 @@ parser.add_argument("box_or_template")
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("out")
 args = parser.parse_args()
-import numpy as np, os, glob
+import numpy as np, os
 from pixell import enmap, utils
 
-ifiles = sum([sorted(glob.glob(ifile)) for ifile in args.ifiles],[])
+ifiles = sum([sorted(utils.glob(ifile)) for ifile in args.ifiles],[])
 kwargs = {}
 try:
 	kwargs["box"] = utils.parse_box(args.box_or_template)*utils.degree

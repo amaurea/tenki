@@ -13,8 +13,8 @@ args = parser.parse_args()
 from enlib import mapdata
 
 mode  = "copy" if args.copy else "link"
-maps  = args.maps .split(",") if args.maps  else None
-ivars = args.ivars.split(",") if args.ivars else None
+maps  = args.maps .rstrip(",").split(",") if args.maps  else None
+ivars = args.ivars.rstrip(",").split(",") if args.ivars else None
 
 mapinfo = mapdata.build_mapinfo(mapfiles=maps, ivarfiles=ivars,
 		beamfile=args.beam, infofile=args.info, gain=args.gain, freq=args.freq,

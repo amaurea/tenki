@@ -4,7 +4,7 @@ parser.add_argument("ifile")
 parser.add_argument("ofile")
 parser.add_argument("-r", "--res",  type=int,   default=15)
 parser.add_argument("-l", "--lmax", type=int,   default=15000)
-parser.add_argument(      "--vmax", type=float, default=1e6)
+parser.add_argument(      "--vmax", type=float, default=1e5)
 parser.add_argument(      "--off",  type=str,   default="-0.5,-0.5")
 args = parser.parse_args()
 import numpy as np
@@ -21,6 +21,9 @@ shape = (npix, npix)
 off   = utils.parse_floats(args.off)
 wcs   = wcsutils.explicit(ctype=["RA---MER", "DEC--MER"], cdelt=[-res,res], crval=[0,0], crpix=[npix//2+1+off[1],npix//2+1+off[0]])
 
+def logify(x, x0): return np.arcsinh(x/x0)
+def unlogify(x, x0): return np.sinh(x)*x0
+
 # Read in map
 with bench.show("read"):
 	imap  = enmap.read_map(args.ifile)
@@ -28,10 +31,7 @@ shape = imap.shape[:-2]+shape
 dtype = imap.dtype
 
 # Get rid of too high values, to avoid ringing
-with bench.show("inpaint"):
-	mask = np.abs(imap)>args.vmax
-	if np.any(mask): imap[mask] = 0
-	del mask
+imap = logify(imap, args.vmax)
 
 # Build a mask of exposed areas
 with bench.show("build mask"):
@@ -49,6 +49,9 @@ del imap
 omap  = enmap.zeros(shape, wcs, dtype)
 with bench.show("alm2map"):
 	omap  = curvedsky.alm2map_cyl(alms, omap)
+
+# Restore the map to linear scale
+omap = unlogify(omap, args.vmax)
 
 # Apply the mask
 with bench.show("apply mask"):

@@ -80,7 +80,7 @@ for i, (mapfile, hitfile) in enumerate(zip(mapfiles[1:], hitfiles[1:])):
 	ratio *= get_bias(bs)**2
 	ratios.append(ratio)
 	sens = (ratio*args.srate)**-0.5
-	print("%d-%d  %7.2f" % (i+1,i, sens))
+	print("%d-%d %7.2f %7.2f" % (i+1,i, ratio, sens))
 	map, hit = map2, hit2
 
 # Ratio has units 1/(uK^2*sample), and gives us the conversion

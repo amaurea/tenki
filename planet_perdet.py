@@ -185,13 +185,9 @@ for ind in range(comm.rank, len(ids), comm.size):
 		tod  = tod.astype(dtype, copy=False)
 	# Should now be reasonably clean of correlated noise, so we can from now on use
 	# a white noise model.
-	with bench.show("pmat"):
-		P = PmatTot(scan, srcpos, sys=sys)
-		N = NmatWhite(ivar)
-
-
-
-
+	#with bench.show("pmat"):
+	#	P = PmatTot(scan, srcpos, sys=sys)
+	#	N = NmatWhite(ivar)
 	with bench.show("pmat"):
 		pmap = pmat.PmatMap(scan, area, sys=sys)
 		pcut = pmat.PmatCut(scan)

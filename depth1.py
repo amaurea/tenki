@@ -20,13 +20,18 @@ parser.add_argument("-g", "--tasks-per-group", type=int,   default=1)
 parser.add_argument("-c", "--cont",            action="store_true")
 parser.add_argument(      "--niter",           type=int,   default=100)
 parser.add_argument(      "--dets",            type=str,   default=None)
+parser.add_argument("-M", "--meta-only",       action="store_true")
 args = parser.parse_args()
 
 # We default to niter = 100 due to the the cuts causing strong local artifacts
 # when the gapfilling doesn't work well enough. These go away during the solution
 # process, but this takes around 100 cg steps, sadly.
-#
 # I've experimented with different gapfilling, but it didn't really help.
+
+# Each depth-1 map will have a well-defined scanning direction. If this is available
+# to the user, then it owuld be much easier for them to describe the noise.
+# Should measure the scanning profile as (az_min:az_max,el,t) -> cel, and then
+# store it as (delta_ra(el))
 
 comm       = mpi.COMM_WORLD
 comm_intra = comm.Split(comm.rank // args.tasks_per_group, comm.rank  % args.tasks_per_group)
@@ -119,6 +124,27 @@ def find_bounding_box(scandb, entrydb, sys="cel"):
 	box[:,1]= box[::-1,1] # descending ra
 	return box
 
+def find_scan_profile(scandb, entrydb, sys="cel",npoint=100):
+	# This is a bit redundant with find_bounding_box...
+	# all tods in group have same site. We also assume the same detector layout
+	entry    = entrydb[scandb.ids[0]]
+	site     = files.read_site(entry.site)
+	detpos   = actdata.read_point_offsets(entry).point_offset
+	# Array center and radius in focalplane coordinates
+	acenter  = np.mean(detpos,0)
+	arad     = np.max(np.sum((detpos-acenter)**2,1)**0.5)
+	# Find the center point of this group. We do this by transforming the array center to
+	# celestial coordinates at the mid-point time of the group.
+	t = scandb.data["t"][0]
+	baz, bel, waz = [scandb.data[x][0]*utils.degree for x in ["baz", "bel", "waz"]]
+	# This az range won't necessarily cover all decs in the map. In fact, some decs
+	# might not even be reaachable by the boresight. I'll leave those complications to the
+	# user. Just continuing the slope from the end points should be good enough.
+	iaz  = np.linspace(baz-waz,baz+waz,npoint)
+	zero = iaz*0
+	opoints = coordinates.transform("bore", sys, zero+acenter[:,None], time=utils.ctime2mjd(t), bore=[iaz,zero+bel,zero,zero], site=site)[::-1] # dec,ra
+	return opoints
+
 def build_time_rhs(scans, signal_sky, signal_cut, window, tref=0):
 	# We also a time-hit map
 	trhs  = signal_sky.zeros()
@@ -195,6 +221,10 @@ def write_maps(prefix, data):
 	data.signal.write(prefix, "ivar", data.ivar)
 	data.signal.write(prefix, "time", data.tmap)
 
+def write_info(oname, info):
+	utils.mkdir(os.path.dirname(oname))
+	bunch.write(oname, info)
+
 shape_full, wcs_full = enmap.read_map_geometry(args.template)
 shape_full = (ncomp,)+shape_full[-2:]
 distributed = True
@@ -229,20 +259,29 @@ for gi in range(comm_inter.rank, len(gvals), comm_inter.size):
 	tag      = "%4d/%d" % (gi+1, len(gvals))
 	# Build our output prefix. Will use sub-directories to make things like ls faster
 	t        = utils.floor(periods[pid,0])
-	if t != 1494583498: continue
 	t5       = ("%05d" % t)[:5]
 	prefix   = "%s/%s/depth1_%010d_%s" % (args.odir, t5, t, arrays[aid])
-	if args.cont and (os.path.isfile(prefix + ".empty") or (
+	meta_done = os.path.isfile(prefix + "_info.hdf")
+	maps_done = os.path.isfile(prefix + ".empty") or (
 		os.path.isfile(prefix + "_time.fits") and
 		os.path.isfile(prefix + "_map.fits") and
-		os.path.isfile(prefix + "_ivar.fits"))):
-		continue
-	L.info("%3d Processing %4d/%d period %4d arr %s @%.0f dur %4.2f h with %2d tods" % (comm_inter.rank, gi+1, len(gvals), pid, arrays[aid], t, (periods[pid,1]-periods[pid,0])/3600, len(inds)))
+		os.path.isfile(prefix + "_ivar.fits"))
+	if args.cont and meta_done and (maps_done or args.meta_only): continue
+	L.info("Processing %4d/%d period %4d arr %s @%.0f dur %4.2f h with %2d tods" % (gi+1, len(gvals), pid, arrays[aid], t, (periods[pid,1]-periods[pid,0])/3600, len(inds)))
 	# Find the bounding box for this group, as well as this task's part of it
 	box = find_bounding_box(db.select(inds), filedb.data, sys=sys)
 	box = utils.widen_box(box, widen, relative=False)
 	# Build our geometry
 	shape, wcs = enmap.Geometry(shape_full, wcs_full).submap(box=box)
+	# Find the scanning profile. This is useful for understanding the
+	# noise properties of the maps
+	profile = find_scan_profile(db.select(inds), filedb.data, sys=sys)
+	# Write out our metadata
+	if comm_intra.rank == 0:
+		info = bunch.Bunch(profile=profile, pid=pid, period=periods[pid],
+				ids=np.char.encode(db.select(inds).ids), box=box, array=arrays[aid].encode(), t=t)
+		write_info(prefix + "_info.hdf", info)
+	if args.meta_only or maps_done: continue
 	# Decide which scans we should own. We do them consecutively to give each
 	# task a compact area
 	i1 = comm_intra.rank*ntod//comm_intra.size
@@ -256,7 +295,7 @@ for gi in range(comm_inter.rank, len(gvals), comm_inter.size):
 	if nread == 0:
 		# No valid tods! Make a placeholder file so we can skip past this when resuming
 		if comm_intra.rank == 0:
-			L.debug("%3d Skipping %4d/%d: No readable tods" % (comm_inter.rank, gi+1, len(gvals)))
+			L.debug("Skipping %4d/%d: No readable tods" % (gi+1, len(gvals)))
 			utils.mkdir(os.path.dirname(prefix))
 			with open(prefix + ".empty", "w") as ofile:
 				ofile.write("\n")

@@ -143,7 +143,7 @@ block_size = np.zeros(nblock,int)
 for i, bi in enumerate(bid):
 	block_inds[bi][ais[i]].append(i)
 	block_size[bi] += 1
-block_inds = np.array(block_inds)
+block_inds = np.array(block_inds, object)
 # Sort from biggest to smallest, to aid greedy algorithm
 block_order = np.argsort(block_size)[::-1]  # [nblock]
 block_inds  = block_inds[block_order]       # [nblock,narr][{tod_indices}]

@@ -93,6 +93,8 @@ for bi in range(comm.rank, nblock, comm.size):
 		comm.rank, bi+1, nblock, ntot/1e3, tget/ngood*1e3, tprof/ngood*1e3, tpaint/ngood*1e3,
 		(tget+tprof+tpaint)/ngood*1e3, np.max(np.abs(amps))))
 
+print("%4d Reducing" % comm.rank)
+
 if comm.size > 1:
 	comm.Barrier()
 	if comm.rank == 0:

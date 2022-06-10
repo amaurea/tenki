@@ -8,7 +8,7 @@ parser.add_argument("-b", "--beam",  type=str, default=None)
 parser.add_argument("-i", "--info",  type=str, default=None)
 parser.add_argument("-g", "--gain",  type=float, default=None)
 parser.add_argument("-f", "--freq",  type=str, default=None, help="Frequency (GHz) or act band tag")
-parser.add_argument("-c", "--copy",  action="store_true")
+parser.add_argument("-c", "--copy",  action="store_true", help="Store a full copy of the data instead of just links")
 args = parser.parse_args()
 from enlib import mapdata
 

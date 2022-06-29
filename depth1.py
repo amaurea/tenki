@@ -140,7 +140,7 @@ def find_scan_profile(scandb, entrydb, sys="cel",npoint=100):
 	# This az range won't necessarily cover all decs in the map. In fact, some decs
 	# might not even be reaachable by the boresight. I'll leave those complications to the
 	# user. Just continuing the slope from the end points should be good enough.
-	iaz  = np.linspace(baz-waz,baz+waz,npoint)
+	iaz  = np.linspace(baz-waz/2,baz+waz/2,npoint)
 	zero = iaz*0
 	opoints = coordinates.transform("bore", sys, zero+acenter[:,None], time=utils.ctime2mjd(t), bore=[iaz,zero+bel,zero,zero], site=site)[::-1] # dec,ra
 	return opoints

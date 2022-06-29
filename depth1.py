@@ -21,6 +21,7 @@ parser.add_argument("-c", "--cont",            action="store_true")
 parser.add_argument(      "--niter",           type=int,   default=100)
 parser.add_argument(      "--dets",            type=str,   default=None)
 parser.add_argument("-M", "--meta-only",       action="store_true")
+parser.add_argument("-D", "--distributed",     type=int,   default=1)
 args = parser.parse_args()
 
 # We default to niter = 100 due to the the cuts causing strong local artifacts
@@ -227,7 +228,7 @@ def write_info(oname, info):
 
 shape_full, wcs_full = enmap.read_map_geometry(args.template)
 shape_full = (ncomp,)+shape_full[-2:]
-distributed = True
+distributed = args.distributed>0
 
 filedb.init()
 # Reject tods with missing metadata

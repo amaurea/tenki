@@ -7,7 +7,7 @@ config.default("dmap_format", "merged")
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
 config.default("downsample", 1, "Factor with which to downsample the TOD")
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
-config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
+config.default("tod_window", 5.0, "Number of seconds to window the tod by on each end")
 config.default("eig_limit", 0.1, "Pixel condition number below which polarization is dropped to make total intensity more stable. Should be a high value for single-tod maps to avoid thin stripes with really high noise")
 config.default("map_sys", "cel", "Map coordinate system")
 
@@ -282,7 +282,7 @@ for gi in range(comm_inter.rank, len(gvals), comm_inter.size):
 		info = bunch.Bunch(profile=profile, pid=pid, period=periods[pid],
 				ids=np.char.encode(db.select(inds).ids), box=box, array=arrays[aid].encode(), t=t)
 		write_info(prefix + "_info.hdf", info)
-	if args.meta_only or maps_done: continue
+	if args.cont and (args.meta_only or maps_done): continue
 	# Decide which scans we should own. We do them consecutively to give each
 	# task a compact area
 	i1 = comm_intra.rank*ntod//comm_intra.size

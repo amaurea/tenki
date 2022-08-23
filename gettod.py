@@ -30,12 +30,15 @@ for id in ids:
 	elif args.dets is not None:
 		subdets = [int(w) for w in args.dets.split(",")]
 
-	fields = ["gain","tconst","cut","tod","boresight"]
+	fields = ["array_info","tags","gain","mce_filter","tconst","cut","boresight","tod"]
 	if args.fields: fields = args.fields.split(",")
 	d = actdata.read(entry, fields=fields)
 	if absdets: d.restrict(dets=absdets)
 	if subdets: d.restrict(dets=d.dets[subdets])
-	if args.calib: d = actdata.calibrate(d, exclude=["autocut"])
+	if args.calib:
+		print(d.tod[0,1000])
+		d = actdata.calibrate(d, exclude=["autocut"])
+		print(d.tod[0,1000])
 	elif args.manual_calib:
 		ops = args.manual_calib.split(",")
 		if "safe" in ops: d.boresight[1:] = utils.unwind(d.boresight[1:], period=360)

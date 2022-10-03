@@ -913,7 +913,7 @@ class FitMultiModalError(Exception): pass
 class FitNonDetectionError(Exception): pass
 class FitUnexpectedFluxError(Exception): pass
 
-def fit_group(gdata, inds, bounds=None, snmin=None):
+def fit_group(gdata, inds, bounds=None, snmin=None, tol=0.2, use_brightest=False):
 	"""Fit the source offset (the negative of the pointing offset) and the
 	source flux for each source in the time-group given by tgroups. Returns
 	a bunch with members pos, dpos, snr, ctime, fluxes[nsrc,TQU], dfluxes[nsrc,TQU]"""
@@ -934,9 +934,13 @@ def fit_group(gdata, inds, bounds=None, snmin=None):
 	peaks     = find_peaks(snr_tot, bounds=bounds, snlim=snmin, fwhm=fwhm_eff)
 	# Disqualify any unreasonably weak peaks
 	tot_snr = np.sum(model_snr**2)**0.5
-	peaks   = peaks[peaks.snr > tot_snr * 0.2]
 	if len(peaks) == 0: raise FitNonDetectionError()
-	if len(peaks)  > 1: raise FitMultiModalError()
+	if use_brightest:
+		peaks = peaks[[np.argmax(peaks.snr)]]
+	else:
+		peaks = peaks[peaks.snr > tot_snr * tol]
+		if len(peaks) == 0: raise FitNonDetectionError()
+		if len(peaks)  > 1: raise FitMultiModalError()
 	# Ok, we have a good fit
 	fit = bunch.Bunch(pos=peaks[0].pos, dpos=peaks[0].dpos, snr=peaks[0].snr, model_snr=tot_snr, snr_map=snr_tot)
 	# Measure the properties of individual srcs
@@ -1025,8 +1029,9 @@ if mode == "build":
 	parser.add_argument("-n", "--niter",  type=int,   default=10)
 	parser.add_argument("-c", "--cont",   action="store_true")
 	parser.add_argument("-M", "--maps",   type=int,   default=0, help="0: no debug map output. N: Output debug maps downgraded by this factor")
-	parser.add_argument("-F", "--fix",       type=str,   default=None)
+	parser.add_argument("-F", "--fix",       type=str, default=None)
 	parser.add_argument(      "--freq-cats", type=str, default=None)
+	parser.add_argument(      "--isys",      type=str, default="cel")
 	args = parser.parse_args()
 
 	utils.mkdir(args.odir)
@@ -1048,7 +1053,7 @@ if mode == "build":
 	# These sources will be used for all arrays and frequencies, with the assumption that all have the
 	# same amplitude. May improve this later, but that's what it is for now.
 	srcs     = pointsrcs.read(args.srcs)
-	spos_cel = np.array([srcs.ra, srcs.dec])*utils.degree
+	spos_raw = np.array([srcs.ra, srcs.dec])*utils.degree
 
 	# Set up our fluxes. This is a bit inelegant. But it works.
 	if args.freq_cats:
@@ -1094,6 +1099,8 @@ if mode == "build":
 		info = build_geometry(db.select(inds), filedb.data, res=args.res*utils.arcmin)
 		if maybe_skip(info.shape[-2]*info.shape[-1] > 50e6, tag + " Unreasonably large area covered", ename): continue
 		# Get the output coordinates for our sources, and find those that hit our rough area
+		tmid      = np.mean(info.trange)
+		spos_cel  = coordinates.transform(args.isys, "cel", spos_raw, time=[utils.ctime2mjd(tmid)], site=info.site)
 		spos_flat = coordinates.transform("cel", info.sys, spos_cel, site=info.site)
 		polrot    = get_polrot("cel", info.sys, spos_cel, site=info.site)
 		spix      = enmap.sky2pix(info.shape, info.wcs, spos_flat[::-1])
@@ -1204,9 +1211,11 @@ elif mode == "analyse":
 	parser.add_argument(      "--snmin-individual", type=float, default=6)
 	parser.add_argument("-S", "--sngroup",          type=float, default=8)
 	parser.add_argument("-F", "--sngroup-flux",     type=float, default=15)
+	parser.add_argument(      "--multi-tol",        type=float, default=0.2)
 	parser.add_argument("-B", "--bounds",           type=str,   default="-6:6,-6:6",
 			help="Search area bounds in arcmins. Must be at leasta beam bigger than the exlusion area used for the blacklist")
 	parser.add_argument("-d", "--debug-outlier", type=str, default=None)
+	parser.add_argument(      "--use-brightest", action="store_true")
 	#parser.add_argument(      "--median-filter", type=str, default=None)
 	args = parser.parse_args()
 
@@ -1271,7 +1280,8 @@ elif mode == "analyse":
 		for i, data in enumerate(gdata):
 			for sind in range(len(data.table)):
 				try:
-					fit = fit_group(gdata, [(i,sind)], bounds=bounds, snmin=args.snmin_individual)
+					fit = fit_group(gdata, [(i,sind)], bounds=bounds, snmin=args.snmin_individual, tol=args.multi_tol,
+							use_brightest=args.use_brightest)
 					# Try to prevent some outliers. I used to have no outliers, but some came back
 					# after I relaxed the masking.
 					weird_snr  = fit.snr > fit.model_snr * flux_tol
@@ -1304,13 +1314,17 @@ elif mode == "analyse":
 				except FitNonDetectionError: pass
 				good_inds.append((i,sind))
 		indfile.flush()
+		if len(good_inds) == 0:
+			sys.stderr.write("No usable fits in group %d file %d %s. Skipping\n" % (
+				gind, i, data.fname))
+			continue
 		# 5. Group sources into groups with decent S/N while keeping strong sources separate
 		src_groups = group_srcs_snmin(gdata, good_inds, snmin=args.sngroup)
 		if args.debug_outlier: debug_outlier(gdata, src_groups[debug[1]], bounds=bounds)
 		# 6. Fit each of these groups
 		for sgi, src_group in enumerate(src_groups):
 			try:
-				fit = fit_group(gdata, src_group, bounds=bounds, snmin=args.snmin)
+				fit = fit_group(gdata, src_group, bounds=bounds, snmin=args.snmin, use_brightest=args.use_brightest)
 				# Write group fits to file. Two different outputs: Positions, which are per-group,
 				# and fluxes, which are per-source. First the per-group stuff. This is similar to the
 				# individual fit format, but without the fluxes.
@@ -1376,6 +1390,7 @@ elif mode == "model":
 	parser.add_argument("gfit_pos")
 	parser.add_argument("odir")
 	parser.add_argument("-e", "--minerr",    type=float, default=0.01)
+	parser.add_argument(      "--maxdur",    type=float, default=10)
 	args = parser.parse_args()
 	import numpy as np
 	from pixell import enmap, utils, mpi, bunch
@@ -1384,7 +1399,7 @@ elif mode == "model":
 	comm = mpi.COMM_WORLD
 	utils.mkdir(args.odir)
 	maxgap = 360**2
-	maxdur = 3600*10
+	maxdur = 3600*args.maxdur
 	outlier_sigma = 8
 
 	# Read in the analysis result.
@@ -1399,6 +1414,7 @@ elif mode == "model":
 
 	# Split into groups with edges where ctime, baz, waz or bel change too much
 	groups = build_groups(data[[0,7,8,9]], [maxgap,1,1,1])
+	groups = split_long_groups(groups, data[0], maxdur=maxdur)
 
 	# Add a minimum error value to each point to avoid having individual points
 	# completely dominating. This represents the sort of model error we expect.

@@ -584,7 +584,15 @@ for out_ind in range(nouter):
 			if gainerr:
 				mul = mul * (1+gainerr*np.random.standard_normal(len(myscans)))
 			if deterr:
-				det_muls = [1+deterr*np.random.standard_normal(scan.ndet) for scan in myscans]
+				# random det errs. This didn't seem to do much
+				# det_muls = [1+deterr*np.random.standard_normal(scan.ndet) for scan in myscans]
+				# radial det errs
+				det_muls = []
+				for scan in myscans:
+					det_r = np.sum((scan.offsets[:,1:]-np.mean(scan.offsets[:,1:],0))**2,1)**0.5
+					det_g = utils.rescale(-det_r, [-deterr, deterr])
+					det_g+= 1 - np.mean(det_g)
+					det_muls.append(det_g)
 			else: det_muls = None
 
 			if mode == 0: continue

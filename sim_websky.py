@@ -45,6 +45,7 @@ try:
 	lbeam = np.exp(-0.5*rht.l**2*sigma**2)
 except ValueError:
 	l, bl = np.loadtxt(args.beam, usecols=(0,1), ndmin=2).T
+	bl   /= np.max(bl)
 	lbeam = np.interp(rht.l, l, bl)
 prof_builder= clusters.ProfileBattagliaFast(cosmology=cosmology, beta_range=beta_range)
 mass_interp = clusters.MdeltaTranslator(cosmology)

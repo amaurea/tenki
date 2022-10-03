@@ -21,7 +21,7 @@ if len(sys.argv) < 2:
 mode = sys.argv[1]
 
 parser = argparse.ArgumentParser(description=help_general)
-parser.add_argument("mode", choices=["find","fit","subtract"])
+parser.add_argument("mode", choices=["find","fit","subtract","subtract_nompi"])
 if mode == "find":
 	parser.add_argument("imap", help="The map to find sources in. Should be enmap-compatible.")
 	parser.add_argument("idiv", help="The inverse variance per pixel of imap.")
@@ -31,7 +31,7 @@ elif mode == "fit":
 	parser.add_argument("idiv", help="The inverse variance per pixel of imap.")
 	parser.add_argument("icat", help="The input point source catalog for amplitude fitting.")
 	parser.add_argument("odir", help="The directory to write the output to. Will be crated if necessary.")
-elif mode == "subtract":
+elif mode == "subtract" or mode == "subtract_nompi":
 	parser.add_argument("imap", help="The map to subtract sources from. Should be enmap-compatible.")
 	parser.add_argument("icat", help="The catalog of sources to be subtracted.")
 	parser.add_argument("omap", help="The resulting source-subtracted map")
@@ -61,6 +61,7 @@ parser.add_argument(      "--split-minflux",type=float, default=300)
 parser.add_argument(      "--rmax",    type=float, default=None)
 parser.add_argument(      "--lknee",   type=float, default=None)
 parser.add_argument(      "--npass",   type=int,   default=2)
+parser.add_argument(      "--vmin",    type=float, default=0.01, help="Only simulate srcs out to this value in uK")
 parser.add_argument("-c", "--cont",    action="store_true")
 
 args = parser.parse_args()
@@ -276,7 +277,7 @@ elif args.mode == "subtract":
 		print("%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1]))
 		map    = enmap.read_map(args.imap, pixbox=reg_pad)
 		map    = work_around_stupid_mpi4py_bug(map)
-		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True,verbose=args.verbose, rmax=rmax)
+		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True,verbose=args.verbose, rmax=rmax, vmin=args.vmin)
 		model[map==0] = 0
 		omaps.append(map-model)
 		if args.omodel: models.append(model)
@@ -293,4 +294,29 @@ elif args.mode == "subtract":
 		del models
 		if comm.rank == 0: print("Writing model")
 		if comm.rank == 0: enmap.write_map(args.omodel, model)
+		del model
+elif args.mode == "subtract_nompi":
+	icat      = dory.read_catalog(args.icat)
+	if args.status is not None:
+		icat = icat[icat.status == args.status]
+	if args.nsigma is not None:
+		icat  = icat[icat.flux[:,0] >= icat.dflux[:,0]*args.nsigma]
+	beam_prof = dory.get_beam_profile(beam)
+	barea     = dory.calc_beam_profile_area(beam_prof)
+	print("barea: %15.7e" % barea)
+	rmax      = args.rmax*utils.arcmin if args.rmax is not None else None
+	fluxconv  = utils.flux_factor(barea, args.freq*1e9)/1e6
+	# Reformat the catalog to the format sim_srcs takes
+	srcs   = np.concatenate([[icat.dec, icat.ra], icat.flux.T/fluxconv],0).T
+	print("Reading %s" % args.imap)
+	map    = enmap.read_map(args.imap)
+	print("Subtracting")
+	model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True, verbose=args.verbose, rmax=rmax, vmin=args.vmin)
+	map   -= model
+	print("Writing map")
+	enmap.write_map(args.omap, map)
+	del map
+	if args.omodel:
+		print("Writing model")
+		enmap.write_map(args.omodel, model)
 		del model

@@ -385,11 +385,18 @@ def names2uinds(names, return_unique=False):
 	uinds[order] = inverse
 	return uinds if not return_unique else (uinds, uvals)
 
+def remove_pointmodel_azslope(scans):
+	"""Remove the azimuth slope from the pointing model of scans.
+	Modifies scans in-place"""
+	for scan in scans:
+		scan.site.azslope_daz = 0
+		scan.site.azslope_del = 0
+
 def build_geometry(scandb, entrydb, res=0.5*utils.arcmin, margin=0.5*utils.degree):
 	# all tods in group have same site. We also assume the same detector layout
 	entry    = entrydb[scandb.ids[0]]
 	site     = files.read_site(entry.site)
-	detpos   = actdata.read_point_offsets(entry).point_offset
+	detpos   = actdata.read_point_offsets(entry).point_template
 	# Array center and radius in focalplane coordinates
 	acenter  = np.mean(detpos,0)
 	arad     = np.max(np.sum((detpos-acenter)**2,1)**0.5)
@@ -507,6 +514,10 @@ def build_src_jacobi(info, spos_cel, stimes, delta=1*utils.arcmin):
 	"""Compute the [{ora,ocde},{x,y},nsrc] jacobian for the sources with celestial coordinates
 	spos_cel[{ra,dec},nsrc] that hit the array center at times stimes[nsrc]. ora, odec
 	refer to the "ra" and "dec" of the rotated output coordinate system desribed by info.sys."""
+	# Why did I get acenter_el separately? As long as our stimes are correct,
+	# the transform should give us both. In my tests it [1] of the trans is
+	# identical to acenter_el to at least 10 digits. So what I have here isn't
+	# wrong, but it's unnecessarily complicated
 	acenter_el = coordinates.recenter(info.acenter, [0,0,0,info.bel])[1]
 	acenter_az = coordinates.transform("cel","tele", spos_cel, time=utils.ctime2mjd(stimes), site=info.site)[0]
 	spos_tele  = np.array([acenter_az, acenter_az*0+acenter_el])
@@ -601,12 +612,46 @@ def build_noise_model_simple(map, ivar, tsize=30):
 	# Whitened and mask-corrected map
 	wmap = map * ivar**0.5 / np.mean(ivar > 0)**0.5
 	ps2d = np.abs(enmap.fft(wmap))**2
+	ps2d = symcap_ps2d_med(ps2d)
 	thumb_ps2d = enmap.downgrade(ps2d, [nby,nbx])
 	return thumb_ps2d
 
+def symcap_ps2d(ps2d):
+	ps1d, l1d = ps2d.lbin()
+	l = ps2d.modlmap()
+	ps2d = enmap.samewcs(np.maximum(ps2d, utils.interp(l, l1d, ps1d)))
+	return ps2d
+
+def symcap_ps2d_med(ps2d):
+	ps2d = ps2d.copy()
+	l    = ps2d.modlmap()
+	dl   = max(abs(l[1,0]),abs(l[0,1]))
+	reg  = (l/dl).astype(int)+1
+	inds = np.arange(1,np.max(reg)+1)
+	for I in utils.nditer(ps2d.shape[:-2]):
+		ps1d_med = ndimage.median(ps2d[I], reg, inds)
+		ps2d_med = ps1d_med[reg-1]
+		ps2d[I]  = np.maximum(ps2d[I], ps2d_med)
+	return ps2d
+
+def build_noise_model_dummy(map, ivar, tsize=30):
+	"""Build a simple noise model consisting of a single 2d power spectrum for the whitened map,
+	scaled down to a single tile's size. This ignores sky curvature and any weather etc. changes
+	during the scan, but will probably be pretty good. We will also ignore QU correlations, so the
+	result will just be TT,QQ,UU."""
+	# Start by making the maps whole multiples of the tile size. This will
+	# make the final downgrade of the 2d power spectrum clean and robust
+	(nby, nbx), (ey, ex) = np.divmod(map.shape[-2:], tsize)
+	map, ivar = [a[...,ey//2:ey//2+nby*tsize, ex//2:ex//2+nbx*tsize] for a in [map, ivar]]
+	# Whitened and mask-corrected map
+	wmap = map * ivar**0.5 / np.mean(ivar > 0)**0.5
+	ps2d = (1 + ((map.modlmap()+10)/3000)**-3.5)
+	thumb_ps2d = enmap.downgrade(ps2d, [nby,nbx])
+	return np.repeat(thumb_ps2d[None], 3, 0)
+
 def mask_bright_srcs(shape, wcs, spos, samp, amp_lim=10e3, rmask=7*utils.arcmin):
 	spos_bright = spos[:,samp>amp_lim]
-	r = enmap.distance_from(shape, wcs, spos[:,samp>amp_lim], rmax=rmask)
+	r = enmap.distance_from(shape, wcs, spos[::-1,samp>amp_lim], rmax=rmask)
 	return r >= rmask
 
 def write_bunch(fname, bunch):
@@ -926,8 +971,9 @@ def fit_group(gdata, inds, bounds=None, snmin=None, tol=0.2, use_brightest=False
 	model_ivar = kappa[:,0].at([0,0],order=1)
 	model_snr  = model_flux * model_ivar**0.5
 	# Build the optimally weighted combined map
-	rho_tot   = np.sum(rho[:,0]  *model_flux[:,None,None],0)
-	kappa_tot = np.sum(kappa[:,0]*model_flux[:,None,None]**2,0)
+	rel_flux  = model_flux / np.max(model_flux)
+	rho_tot   = np.sum(rho[:,0]  *rel_flux[:,None,None],0)
+	kappa_tot = np.sum(kappa[:,0]*rel_flux[:,None,None]**2,0)
 	snr_tot   = solve(rho_tot, kappa_tot)[2]
 	# Find the (hopefully) single significant peak in the result
 	fwhm_eff  = np.sum(fwhms * model_snr**2)/np.sum(model_snr**2)
@@ -1117,6 +1163,12 @@ if mode == "build":
 		jac_flat, jac_pix = build_src_jacobi(info, spos_cel[:,sinds], times)
 		# ok, we have all the source geometry stuff we need. Build our map
 		inds, scans = scanutils.read_scans(db.ids, inds, actscan.ACTScan, db=filedb.data, downsample=down)
+		# Remove any azimuth slope from the input model, as we don't handle it here.
+		# It is safe to do this because we'll measure it ourself anyway. Using a less accurate
+		# input model just affects how far away we need to search, and the az slope is just a
+		# 1-arcmin effect, so it won't bring them outside our search window. The standard baseline
+		# pointing model doesn't have azimuth slopes anyway.
+		remove_pointmodel_azslope(scans)
 		if maybe_skip(len(scans)==0, tag + " Could not read any scans", ename): continue
 		if args.fix:
 			# Instead of actually building the map, we read in an existing thumb file, and replace
@@ -1216,6 +1268,8 @@ elif mode == "analyse":
 			help="Search area bounds in arcmins. Must be at leasta beam bigger than the exlusion area used for the blacklist")
 	parser.add_argument("-d", "--debug-outlier", type=str, default=None)
 	parser.add_argument(      "--use-brightest", action="store_true")
+	parser.add_argument(      "--flux-tol",      type=float, default=10)
+	parser.add_argument(      "--dflux-tol",     type=float, default=3)
 	#parser.add_argument(      "--median-filter", type=str, default=None)
 	args = parser.parse_args()
 
@@ -1233,8 +1287,8 @@ elif mode == "analyse":
 	#print(blacklist)
 	# And the bounding box for our fit
 	bounds = np.array([[float(w) for w in word.split(":")] for word in args.bounds.split(",")]).T*utils.arcmin
-	flux_tol  = 10
-	dflux_tol =  3
+	flux_tol  = args.flux_tol
+	dflux_tol = args.dflux_tol
 
 	# Read in the first file to set up the output geometry
 	data = bunch.read(ifiles[0])
@@ -1272,8 +1326,14 @@ elif mode == "analyse":
 		# 3. Compute the matched filter for each
 		for i, data in enumerate(gdata):
 			data.rho, data.kappa = analysis.matched_filter_constcorr_lowcorr(data.maps, data.lbeam, data.ivars[:,None], 1/data.ps2d, uht, B2=data.lbeam2, high_acc=True)
+			#ivars3 = np.repeat(data.ivars[:,None],3,1)
+			#ips2d  = 1/np.maximum(data.ps2d, np.max(data.ps2d)/1e20)
+			#data.rho, data.kappa = analysis.matched_filter_constcorr_dual(data.maps, data.lbeam, ivars3, ips2d, uht)
 			data.flux_map, data.dflux_map, data.snr_map = solve(data.rho, data.kappa)
 			data.ref_dflux = data.dflux_map[:,0].at([0,0], order=1)
+			#enmap.write_map("flux_map.fits", data.flux_map)
+			#enmap.write_map("snr_map.fits", data.snr_map)
+			#1/0
 
 		# 4. Fit each individual source
 		good_inds = []
@@ -1287,13 +1347,16 @@ elif mode == "analyse":
 					weird_snr  = fit.snr > fit.model_snr * flux_tol
 					weird_flux = fit.flux[0,0] > fit.table["ref_flux"][0] * flux_tol
 					weird_dflux= fit.dflux[0,0] > fit.ref_dflux * dflux_tol
-					#print(fit.table["sid"][0], fit.snr, fit.model_snr, fit.flux[0,0], fit.table["ref_flux"][0], fit.dflux[0,0])
+					#print("weird_snr   %d fit.snr   %10.4f model_snr %10.4f tol %8.5f" % (weird_snr, fit.snr, fit.model_snr, flux_tol))
+					#print("weird_flux  %d fit.flux  %10.4f ref_flux  %10.4f tol %8.4f" % (weird_flux, fit.flux[0,0], fit.table["ref_flux"][0], flux_tol))
+					#print("weird_dflux %d fit.dflux %10.4f ref_dflux %10.4f tol %8.4f" % (weird_dflux, fit.dflux[0,0], fit.ref_dflux, dflux_tol))
+
 					if (weird_snr or weird_flux) and weird_dflux:
 						raise FitUnexpectedFluxError()
 					# Write individual fit to file
 					flux, dflux = fit.flux[0], fit.dflux[0]
 					msg  = "%.0f %5d %4s" % (fit.ctime, fit.table["sid"][0], fit.ftags[0])
-					msg += "  %7.2f  %6.3f %6.3f  %6.3f %6.3f" % (fit.snr, *-fit.pos/utils.arcmin, *fit.dpos/utils.arcmin)
+					msg += "  %7.2f  %7.4f %7.4f  %6.4f %6.4f" % (fit.snr, *-fit.pos/utils.arcmin, *fit.dpos/utils.arcmin)
 					msg += "  %8.2f  %8.2f %7.2f %8.2f %7.2f %8.2f %7.2f" % (fit.table["model_flux"][0],
 							flux[0], dflux[0], flux[1], dflux[1], flux[2], dflux[2])
 					msg += "  %7.2f %6.2f %7.2f  %7.2f %7.2f %7.2f" % (fit.baz/utils.degree, fit.waz/utils.degree, fit.bel/utils.degree,
@@ -1349,7 +1412,7 @@ elif mode == "analyse":
 		src_groups = group_srcs_snmin(gdata, good_inds, snmin=args.sngroup_flux)
 		for sgi, src_group in enumerate(src_groups):
 			try:
-				fit = fit_group(gdata, src_group, bounds=bounds, snmin=args.snmin)
+				fit = fit_group(gdata, src_group, bounds=bounds, snmin=args.snmin, use_brightest=args.use_brightest)
 				for i in range(len(fit.table)):
 					flux, dflux = fit.flux[i], fit.dflux[i]
 					msg  = "%.0f %5d %4s" % (fit.table["ctime"][i], fit.table["sid"][i], fit.ftags[i])
@@ -1914,3 +1977,229 @@ elif mode == "stack":
 				mean(used_fits["baz"]), mean(used_fits["waz"]), mean(used_fits["bel"]),
 				(mean(used_fits["ctime"])/3600)%24,
 				ngood, len(weight)))
+
+elif mode == "debug":
+	import numpy as np, warnings, time, h5py, os, sys
+	from enlib  import config, coordinates, mapmaking, bench, scanutils, log, cg, dory, pmat, array_ops, sampcut
+	from pixell import utils, enmap, pointsrcs, bunch, mpi, uharm, analysis, wcsutils, fft
+	from enact  import filedb, actdata, actscan, files
+	from scipy  import ndimage, optimize, spatial
+
+	config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
+	config.default("downsample", 1, "Factor with which to downsample the TOD")
+	config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
+	config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
+	config.default("eig_limit", 0.1, "Pixel condition number below which polarization is dropped to make total intensity more stable. Should be a high value for single-tod maps to avoid thin stripes with really high noise")
+	config.set("cut_obj", "Saturn:-0.5")
+
+	parser = config.ArgumentParser()
+	parser.add_argument("mode", help="debug")
+	parser.add_argument("odir", help="Output directory")
+	parser.add_argument("-r", "--res",    type=float, default=0.5, help="Resolution in arcmins")
+	parser.add_argument("-R", "--rad",    type=float, default=30,  help="Thumbnail radius in arcmins")
+	parser.add_argument("-B", "--bounds", type=str,   default="-6:6,-6:6")
+	args = parser.parse_args()
+
+	utils.mkdir(args.odir)
+	dtype = np.float32 if config.get("map_bits") == 32 else np.float64
+	ncomp = 3
+	tsize = int(np.ceil(2*args.rad/args.res))
+	root  = args.odir + "/"
+	down  = config.get("downsample")
+	comm  = mpi.COMM_WORLD
+	ftag  = "f090"
+	freq  = 98
+
+	# Set up our simulated src
+	#spos    = np.array([[-73.90014225],[-22.34030722]])*utils.degree
+	#spos    = np.array([[-93.84146271], [-22.01905534]])*utils.degree
+	spos     = np.array([[ -93.66632134],[ -22.02386303]])*utils.degree
+	fluxes = np.array([10e3])
+
+	# We will debug this tod
+	#id = "1565329097.1565340166.ar5:f090"
+	#id = "1494733123.1494748796.ar5:f090"
+	id = "1494470754.1494482280.ar6:f090"
+	filedb.init()
+	db = filedb.scans.select(id)
+
+	simulate  = False
+	sim_error = np.array([2,1])*utils.arcmin
+
+	# Build our output geometry
+	info = build_geometry(db.select(id), filedb.data, res=args.res*utils.arcmin)
+	# Get the output coordinates for our sources, and find those that hit our rough area
+	spos_flat = coordinates.transform("cel", info.sys, spos, site=info.site)
+	polrot    = get_polrot("cel", info.sys, spos, site=info.site)
+	# Find the time when each source was hit
+	acenter_el = coordinates.recenter(info.acenter, [0,0,0,info.bel])[1]
+	times      = find_obs_times(spos, acenter_el, info.t0, info.site)
+	# Get the pointing offset jacobian for each source. It's in terms of ora,odec for now.
+	# Will be converted to pixel units later.
+	jac_flat, jac_pix = build_src_jacobi(info, spos, times)
+	
+	# Set up our true tod, in the case that we're simulating
+	if simulate:
+		print("Sim signal")
+		data_true   = actdata.read(filedb.data[id], exclude=["tod"])
+		data_true.point_correction += sim_error
+		data_true.point_offset[:] = data_true.point_template+data_true.point_correction
+		data_true   = actdata.calibrate(data_true)
+		scan_true   = actscan.ACTScan(filedb.data[id], d=data_true)
+		zero        = amps*0
+		srcs        = np.array([spos[1],spos[0],amps,zero,zero,zero+1,zero+1,zero]).T
+		pmat_srcs   = pmat.PmatPtsrc(scan_true, srcs)
+		tod_sim     = np.zeros((scan_true.ndet,scan_true.nsamp),dtype)
+		pmat_srcs.forward(tod_sim, srcs)
+		del data_true, scan_true, pmat_srcs, srcs
+
+	# The input az slope is not taken into account when making the
+	# new model. This is the source of all the issues. Solutions:
+	# 1. Force the slope to be zero for the input pointing
+	# 2. Find a way to propagate the input slope into the output.
+	# The slope is just O(1 arcmin), so forcing it to zero should not
+	# make things so bad that the sources can't be found. So let's try
+	# #1.
+
+	# We will loop over the analysis twice. First we stard from our
+	# fiducial pointing and measure the pointing error. Then we
+	# use that as the new pointing correction and check what the new
+	# pointing measurement is after applying that
+
+	point_slope = np.zeros(3)
+	point_corr  = np.zeros(2)
+	#point_corr += np.array([-0.00012, -0.01958])*utils.arcmin
+	#point_corr  += np.array([ 0.00039, -0.02376])*utils.arcmin
+	#point_corr += np.array([-0.46876, -0.09063])*utils.arcmin
+
+	for iround in range(2):
+		idata       = actdata.read(filedb.data[id], exclude=["tod"])
+		idata.point_correction += point_corr
+		print("Using full point_corr %8.5f %8.5f" % (idata.point_correction[0]/utils.arcmin, idata.point_correction[1]/utils.arcmin))
+		idata.point_offset[:] = idata.point_template+idata.point_correction
+		# Override point slope
+		if "point_slope" in idata: idata.point_slope[:] = point_slope
+		idata       = actdata.calibrate(idata)
+		scan_fid    = actscan.ACTScan(filedb.data[id], d=idata)
+		barea       = utils.calc_beam_area(scan_fid.beam)
+		flux_factor = utils.flux_factor(barea, freq*1e9)
+		amps        = fluxes/flux_factor
+		if simulate:
+			tod = tod_sim.copy()
+		else:
+			pmat_cut  = pmat.PmatCut(scan_fid)
+			tod       = scan_fid.get_samples()
+			utils.deslope(tod, inplace=True)
+			tod       = tod.astype(dtype)
+			f = (np.arange(tod.shape[1]//2+1)*scan_fid.srate/tod.shape[1]).astype(dtype)
+			print(f)
+			filter = (1+((f+f[1])/1.0)**-3.5)**-1
+			print(filter)
+			ftod = fft.rfft(tod)*filter
+			fft.irfft(ftod, tod)
+			del ftod, filter
+		# Build a noiseless binned map
+		print("Build rhs")
+		area        = enmap.zeros((ncomp,)+info.shape, info.wcs, dtype)
+		print("post_calib %8.5f %8.5f" % (scan_fid.offsets[0,1]/utils.arcmin, scan_fid.offsets[0,2]/utils.arcmin))
+		print("info.sys", info.sys)
+		print("area", area.shape, area.wcs)
+		pmat_map    = pmat.PmatMap(scan_fid, area, sys=info.sys)
+		rhs         = area*0
+		pmat_map.backward(tod, rhs)
+		print("Build div")
+		div         = enmap.zeros((ncomp,ncomp)+info.shape, info.wcs, dtype)
+		for i in range(3):
+			area[:] = 0
+			area[i] = 1
+			tod[:]  = 0
+			pmat_map.forward(tod, area)
+			pmat_map.backward(tod, div[i])
+		print("Build map")
+		idiv = array_ops.eigpow(div, -1, axes=[-4,-3], lim=1e-3, fallback="scalar")
+		map  = enmap.samewcs(array_ops.matmul(idiv, rhs, axes=[-4,-3]),area)
+		ivar = idiv[0,0]
+		# output debug maps
+		enmap.write_map(root + "/debug_map_%d.fits" % iround,  map)
+		enmap.write_map(root + "/debug_ivar_%d.fits" % iround, ivar)
+		print("build table")
+		# And extract our thumbnails
+		tdata = extract_srcs(map, ivar, spos_flat, tsize=tsize)
+		# And the input pointing offsets that were used for building the maps, typically from Matthew
+		input_pointoff = scan_fid.d.point_correction
+		# We have everything we need. Build our source information table
+		table  = np.zeros(len(tdata.inds), [
+			("sid", "i"), ("ctime", "d"), ("pos_cel", "2d"), ("center", "2d"), ("pixshape", "2d"),
+			("polrot", "d"), ("jacobi", "2,2d"), ("ref_flux", "d")
+		]).view(np.recarray)
+		table.sid     = [0]                             # index of srcs in input list
+		print("tdata.inds", tdata.inds)
+		table.ctime   = times[tdata.inds]               # time array center hits each
+		table.pos_cel = spos[:,tdata.inds].T # celestial coords {ra,dec} of srcs
+		table.center  = tdata.centers                   # tile pixel coords of src {y,x}
+		table.pixshape= tdata.pixshapes                 # physical {height,width} of each pixel
+		table.polrot  = polrot[tdata.inds]       # pol angle change from cel to osys
+		print("jac_pix")
+		print(jac_pix*utils.arcmin)
+		print(jac_pix.shape)
+		table.jacobi  = np.moveaxis(jac_pix,2,0)[tdata.inds] # jacobian {y,x},{focx,focy} (note the ordering!)
+		table.ref_flux= fluxes
+		baz, waz, bel = [db.data[name]*utils.degree for name in ["baz", "waz", "bel"]]
+
+		# Build an artificial ps2d
+		ps2d = build_noise_model_dummy(map, ivar, tsize=tsize)
+
+		# And put it in our result data structure
+		data = bunch.Bunch(
+			table = table,
+			maps  = tdata.maps,
+			ps2d  = ps2d,
+			ivars = tdata.ivars,
+			ftag  = ftag.encode(),
+			freq  = freq,
+			beam  = scan_fid.beam,
+			barea = barea,
+			sysinfo = info.sysinfo,
+			input_pointoff = input_pointoff,
+			ids   = np.char.encode(db.ids),
+			baz = baz, waz = waz, bel = bel,
+		)
+		# Debug write
+		write_bunch(root + "/debug_data_%d.hdf" % iround, data)
+
+		# Analyse our simulated data
+		print("prepare data")
+
+		# Set the bounding box for our split
+		bounds = np.array([[float(w) for w in word.split(":")] for word in args.bounds.split(",")]).T*utils.arcmin
+		rmax = np.max(np.abs(np.array(data.maps.shape[-2:])*data.table["pixshape"]/2))
+		res  = np.mean(np.product(data.table["pixshape"],1))**0.5 / 4
+		oshape, owcs = enmap.thumbnail_geometry(r=rmax, res=res)
+		uht  = uharm.UHT(oshape, owcs, mode="flat")
+
+		data = prepare_data(data, oshape, owcs)
+		data.fname = "debug"
+
+		print("matched filter")
+		data.rho, data.kappa = analysis.matched_filter_constcorr_lowcorr(data.maps, data.lbeam, np.repeat(data.ivars[:,None],3,1), 1/data.ps2d, uht, B2=data.lbeam2)
+		data.flux_map, data.dflux_map, data.snr_map = solve(data.rho, data.kappa)
+		data.ref_dflux = data.dflux_map[:,0].at([0,0], order=1)
+		enmap.write_map(root + "/debug_omaps_%d.fits" % iround, data.maps)
+		enmap.write_map(root + "/debug_osnr_%d.fits" % iround, data.snr_map)
+
+		# 4. Fit each individual source
+		print("fit")
+		fit = fit_group([data], [(0,0)], bounds=bounds, snmin=0, use_brightest=True)
+		# Write individual fit to file
+		flux, dflux = fit.flux[0], fit.dflux[0]
+		msg  = "%.0f %5d %4s" % (fit.ctime, fit.table["sid"][0], fit.ftags[0])
+		msg += "  %7.2f  %6.3f %6.3f  %6.3f %6.3f" % (fit.snr, *-fit.pos/utils.arcmin, *fit.dpos/utils.arcmin)
+		msg += "  %8.2f  %8.2f %7.2f %8.2f %7.2f %8.2f %7.2f" % (fit.table["model_flux"][0],
+				flux[0], dflux[0], flux[1], dflux[1], flux[2], dflux[2])
+		msg += "  %7.2f %6.2f %7.2f  %7.2f %7.2f %7.2f" % (fit.baz/utils.degree, fit.waz/utils.degree, fit.bel/utils.degree,
+				fit.az/utils.degree, fit.ra/utils.degree, fit.dec/utils.degree)
+		msg += "  %5.2f %4d %d %4d" % (fit.ctime/3600%24, 0, i, 0)
+		print(msg)
+		point_corr += -fit.pos[::-1]
+		#point_corr += -np.array([1,0])*utils.arcmin
+		print(point_corr/utils.arcmin)

@@ -27,15 +27,15 @@ config.default("src_handling_lim", 10000, "Minimum source amplitude to apply spe
 config.default("src_handling_list", "", "Override source list")
 
 # Default signal parameters
-config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin", "Default parameters for sky map")
-config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin", "Default parameters for ground map")
-config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=sidelobe:Sun,prec=bin,lim_Sun_min_el=0", "Default parameters for sun map")
-config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=sidelobe:Moon,prec=bin,lim_Moon_min_el=0", "Default parameters for moon map")
-config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=sidelobe:Jupiter,prec=bin,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
-config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=sidelobe:Saturn,prec=bin,lim_Saturn_min_el=0", "Default parameters for saturn map")
-config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelobe:Uranus,prec=bin,lim_Uranus_min_el=0", "Default parameters for uranus map")
-config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=sidelobe:Neptune,prec=bin,lim_Neptune_min_el=0", "Default parameters for neptune map")
-config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,lim_Pluto_min_el=0", "Default parameters for pluto map")
+config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin,order=0", "Default parameters for sky map")
+config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin,order=0", "Default parameters for ground map")
+config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=sidelobe:Sun,prec=bin,order=0,lim_Sun_min_el=0", "Default parameters for sun map")
+config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=sidelobe:Moon,prec=bin,order=0,lim_Moon_min_el=0", "Default parameters for moon map")
+config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=sidelobe:Jupiter,prec=bin,order=0,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
+config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=sidelobe:Saturn,prec=bin,order=0,lim_Saturn_min_el=0", "Default parameters for saturn map")
+config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelobe:Uranus,prec=bin,order=0,lim_Uranus_min_el=0", "Default parameters for uranus map")
+config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=sidelobe:Neptune,prec=bin,order=0,lim_Neptune_min_el=0", "Default parameters for neptune map")
+config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,order=0,lim_Pluto_min_el=0", "Default parameters for pluto map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1.0,tol=0.5", "Default parameters for scan/pickup signal")
 config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
@@ -56,6 +56,7 @@ config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", 
 config.default("filter_null_default",     "use=no,name=null", "Default parameters for filter that does nothing")
 config.default("filter_beamsym_default", "use=no,name=beamsym,value=1,ibeam=1,obeam=1,postnoise=1", "Default parameters for beam symmetrization filter. ibeam and obeam (fwhm arcmin) specify the current and target beam horizontal size. To symmetrize, set the target horizontal beam size to its vertical size. If this filter becomes standard, these paramters should be moved to filedb or something.")
 config.default("filter_deslope_default", "use=no,name=deslope,value=1", "Desloping filter.")
+config.default("filter_inpaintsub_default", "use=no,name=inpaintsub,value=1,fknee=10,alpha=10,postnoise=1", "Subtract inpaint-prediction around a set of objects. Pass in object list as obj=name:rad,name:rad,etc. :rad deg and optional, will repeat last. Default rad 0.5 deg. name can be a capitalized planet name or [ra,dec] in degrees.")
 
 # Default map filter parameters
 config.default("mapfilter_gauss_default", "use=no,name=gauss,value=0,cap=1e3,type=gauss,sky=yes", "Default parameters for gaussian map filter in mapmaking")
@@ -463,7 +464,7 @@ for out_ind in range(nouter):
 			else:
 				split = False
 				area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
-			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param), split=split)
+			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], pmat_order=param["order"], extra=setup_extra_transforms(param), split=split)
 		elif param["type"] == "fmap":
 			area = enmap.read_map(get_map_path(param["value"]))
 			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
@@ -471,7 +472,7 @@ for out_ind in range(nouter):
 		elif param["type"] == "dmap":
 			area = dmap.read_map(get_map_path(param["value"]), bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
-			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
+			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], pmat_order=param["order"], extra=setup_extra_transforms(param))
 		elif param["type"] == "fdmap":
 			area = dmap.read_map(get_map_path(param["value"]), bbox=mybbox, tshape=tshape, comm=comm)
 			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
@@ -707,6 +708,11 @@ for out_ind in range(nouter):
 			filter = mapmaking.FilterBroadenBeamHor(ibeam, obeam)
 		elif param["name"] == "deslope":
 			filter = mapmaking.FilterDeslope()
+		elif param["name"] == "inpaintsub":
+			fknee = float(param["fknee"])
+			alpha = float(param["alpha"])
+			targets= param["obj"]
+			filter = mapmaking.FilterInpaintSub(targets, fknee=fknee, alpha=alpha)
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 

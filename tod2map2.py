@@ -55,6 +55,7 @@ config.default("filter_fitphase_default",  "use=no,name=fitphase,value=1,mul=+1,
 config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", "Default parameters for filter that simply scale the TOD by the given value")
 config.default("filter_null_default",     "use=no,name=null", "Default parameters for filter that does nothing")
 config.default("filter_beamsym_default", "use=no,name=beamsym,value=1,ibeam=1,obeam=1,postnoise=1", "Default parameters for beam symmetrization filter. ibeam and obeam (fwhm arcmin) specify the current and target beam horizontal size. To symmetrize, set the target horizontal beam size to its vertical size. If this filter becomes standard, these paramters should be moved to filedb or something.")
+config.default("filter_highpass_default", "use=no,name=highpass,value=1,fknee=1,alpha=-3.5,postnoise=1", "Default parameters for highpass filter.")
 config.default("filter_deslope_default", "use=no,name=deslope,value=1", "Desloping filter.")
 config.default("filter_inpaintsub_default", "use=no,name=inpaintsub,value=1,fknee=10,alpha=10,postnoise=1", "Subtract inpaint-prediction around a set of objects. Pass in object list as obj=name:rad,name:rad,etc. :rad deg and optional, will repeat last. Default rad 0.5 deg. name can be a capitalized planet name or [ra,dec] in degrees.")
 
@@ -453,33 +454,35 @@ for out_ind in range(nouter):
 			signal = mapmaking.SignalCut(active_scans, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 			signal_cut = signal
 		elif param["type"] == "map":
-			area = enmap.read_map(get_map_path(param["value"]))
+			shape, wcs = enmap.read_map_geometry(get_map_path(param["value"]))
 			if "split" in param:
 				split = True
 				if param["split"] == "leftright":
 					for scan in active_scans:
 						scan.split = np.concatenate([[0],scan.boresight[1:,1]<=scan.boresight[:-1,1]])
-						area = enmap.zeros((2,args.ncomp)+area.shape[-2:], area.wcs, dtype)
+						area = enmap.zeros((2,args.ncomp)+shape[-2:], wcs, dtype)
 				else: raise ValueError("Split type %s not recognized" % param["split"])
 			else:
 				split = False
-				area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+				area = enmap.zeros((args.ncomp,)+shape[-2:], wcs, dtype)
 			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], pmat_order=param["order"], extra=setup_extra_transforms(param), split=split)
 		elif param["type"] == "fmap":
-			area = enmap.read_map(get_map_path(param["value"]))
-			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+			shape, wcs = enmap.read_map_geometry(get_map_path(param["value"]))
+			area = enmap.zeros((args.ncomp,)+shape[-2:], wcs, dtype)
 			signal = mapmaking.SignalMapFast(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "dmap":
-			area = dmap.read_map(get_map_path(param["value"]), bbox=mybbox, tshape=tshape, comm=comm)
-			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+			shape, wcs = enmap.read_map_geometry(get_map_path(param["value"]))
+			geometry = dmap.DGeometry((args.ncomp,)+shape, wcs, bbox=mybbox, tshape=tshape, comm=comm, dtype=dtype)
+			area = dmap.zeros(geometry)
 			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], pmat_order=param["order"], extra=setup_extra_transforms(param))
 		elif param["type"] == "fdmap":
-			area = dmap.read_map(get_map_path(param["value"]), bbox=mybbox, tshape=tshape, comm=comm)
-			area = dmap.zeros(area.geometry.aspre(args.ncomp).astype(dtype))
+			shape, wcs = enmap.read_map_geometry(get_map_path(param["value"]))
+			geometry = dmap.DGeometry((args.ncomp,)+shape, wcs, bbox=mybbox, tshape=tshape, comm=comm, dtype=dtype)
+			area = dmap.zeros(geometry)
 			signal = mapmaking.SignalDmapFast(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "bmap":
-			area = enmap.read_map(get_map_path(param["value"]))
-			area = enmap.zeros((args.ncomp,)+area.shape[-2:], area.wcs, dtype)
+			shape, wcs = enmap.read_map_geometry(get_map_path(param["value"]))
+			area = enmap.zeros((args.ncomp,)+shape[-2:], wcs, dtype)
 			signal = mapmaking.SignalMapBuddies(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], extra=setup_extra_transforms(param))
 		elif param["type"] == "scan":
 			res = float(param["res"])*utils.arcmin
@@ -615,12 +618,16 @@ for out_ind in range(nouter):
 				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order, ptoff=ptoff, det_muls=det_muls)
 			map_add_filters.append(filter)
 			if mode >= 2:
+				print("Mode is 2")
 				# In post mode we subtract the map that was added before each output. That's
 				# why mul is -1 here
+				print("matching signals")
+				print(list(matching_signals(param, signal_params, signals)))
 				for sparam, signal in matching_signals(param, signal_params, signals):
 					assert sparam["sys"] == param["sys"]
 					print(signal.area.shape, m.shape)
 					assert signal.area.shape[-2:] == m.shape[-2:]
+					print("Adding post")
 					signal.post.append(mapmaking.PostAddMap(m, mul=-mul))
 		elif param["name"] == "addphase" or param["name"] == "fitphase":
 			if "map" not in param: raise ValueError("-F addphase/subphase/fitphase needs a phase dir to subtract. e.g. -F addphase:map=foo")
@@ -713,6 +720,11 @@ for out_ind in range(nouter):
 			alpha = float(param["alpha"])
 			targets= param["obj"]
 			filter = mapmaking.FilterInpaintSub(targets, fknee=fknee, alpha=alpha)
+		elif param["name"] == "highpass":
+			if param["value"] == 0: continue
+			fknee = float(param["fknee"])
+			alpha = float(param["alpha"])
+			filter = mapmaking.FilterHighpass(fknee=fknee, alpha=alpha)
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 

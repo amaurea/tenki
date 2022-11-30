@@ -887,7 +887,7 @@ for out_ind in range(nouter):
 			# Anyway, in almost all the cases only a single map will be added
 			oname = root + "added" + ("_%d"%fi if len(map_add_filters)>1 else "") + ".fits"
 			if isinstance(map, dmap.Dmap):
-				map.write(oname)
+				map.write(oname, merged=config.get("dmap_format")=="merged")
 			elif comm.rank == 0:
 				enmap.write_map(oname, map)
 			del map

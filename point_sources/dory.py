@@ -188,9 +188,11 @@ elif args.mode == "fit":
 		try:
 			# We support polarization here, but treat each component independently
 			imap   = enmap.read_map(args.imap, pixbox=reg_pad).preflat[:args.ncomp]
+			print(args.imap, imap.wcs.wcs.cdelt[1]*60)
 			idiv   = divdiag(enmap.read_map(args.idiv, pixbox=reg_pad))[:args.ncomp]
 			if args.mask:
 				mshape, mwcs = enmap.read_map_geometry(args.mask)
+				print(args.mask, mwcs.wcs.cdelt[1]*60)
 				mbox  = enmap.pixbox_of(mwcs, imap.shape, imap.wcs)
 				mask  = enmap.read_map(args.mask, pixbox=mbox).preflat[0] > 0
 				idiv *= 1-mask

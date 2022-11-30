@@ -38,7 +38,7 @@ parser.add_argument("-T", "--tiling",  type=str, default="tiled")
 args = parser.parse_args()
 import numpy as np, time
 from pixell import enmap, utils, bunch, analysis, uharm, powspec, pointsrcs, curvedsky, mpi
-from enlib import mapdata, array_ops, sauron
+from enlib import array_ops, sauron
 from scipy import ndimage
 
 utils.mkdir(args.odir)

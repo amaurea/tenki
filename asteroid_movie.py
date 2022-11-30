@@ -102,7 +102,7 @@ info    = np.load(args.astinfo).view(np.recarray)
 orbit   = interpolate.interp1d(info.ctime, [utils.unwind(info.ra*utils.degree), info.dec*utils.degree, info.r, info.ang*utils.arcsec], kind=3)
 utils.mkdir(args.odir)
 
-for fi in range(comm.rank, len(ifiles), comm.size):		
+for fi in range(comm.rank, len(ifiles), comm.size):
 	ifile    = ifiles[fi]
 	infofile = utils.replace(ifile, "map.fits", "info.hdf")
 	tfile    = utils.replace(ifile, "map.fits", "time.fits")

@@ -5,16 +5,18 @@
 import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("halos",   help="Raw WebSky catalog pkcs file")
-parser.add_argument("mapdata", help="Mapdata file that gives us the geometry, freq and beam")
+parser.add_argument("geometry",help="Geometry template. A file containing (at least) a fits header specifying the map shape and projection to use")
 parser.add_argument("ofile",   help="Output map")
+parser.add_argument("-f", "--freq",  type=float, default=98, help="Frequency to simulate at")
+parser.add_argument("-b", "--beam",  type=str,   default="2.1", help="The beam to use. Either a number, which is interpreted as a FWHM in arcmin, or a file name, which should be to a beam transform file with the format [l,b(l)]")
 parser.add_argument("-n", "--nhalo", type=int,   default=0, help="Number of halos to use. 0 for unlimited")
-parser.add_argument("-b", "--bsize", type=int,   default=100000)
+parser.add_argument("-B", "--bsize", type=int,   default=100000)
 parser.add_argument("-V", "--vmin",  type=float, default=0.001)
 args = parser.parse_args()
 import numpy as np, pyccl, time
 from astropy.io import fits
 from pixell import enmap, utils, bunch, pointsrcs
-from enlib import mapdata, mpi, clusters
+from enlib import mpi, clusters
 
 dtype   = np.float32 # only float32 supported by fast srcsim
 comm    = mpi.COMM_WORLD
@@ -32,12 +34,19 @@ nhalo   = clusters.websky_pkcs_nhalo(args.halos)
 if args.nhalo:
 	nhalo = min(nhalo, args.nhalo)
 
-meta        = mapdata.read_meta(args.mapdata)
 cosmology   = pyccl.Cosmology(Omega_c=0.2589, Omega_b=0.0486, h=0.6774, sigma8=0.8159, n_s=0.9667, transfer_function="boltzmann_camb")
-shape, wcs  = meta.map_geometry
+shape, wcs  = enmap.read_map_geometry(args.geometry)
+freq        = args.freq*1e9
 omap        = enmap.zeros(shape[-2:], wcs, dtype)
 rht         = utils.RadialFourierTransform()
-lbeam       = np.interp(rht.l, np.arange(len(meta.beam)), meta.beam)
+# Read the beam from one of the two formats
+try:
+	sigma = float(args.beam)*utils.fwhm*utils.arcmin
+	lbeam = np.exp(-0.5*rht.l**2*sigma**2)
+except ValueError:
+	l, bl = np.loadtxt(args.beam, usecols=(0,1), ndmin=2).T
+	bl   /= np.max(bl)
+	lbeam = np.interp(rht.l, l, bl)
 prof_builder= clusters.ProfileBattagliaFast(cosmology=cosmology, beta_range=beta_range)
 mass_interp = clusters.MdeltaTranslator(cosmology)
 
@@ -79,7 +88,7 @@ for bi in range(comm.rank, nblock, comm.size):
 	yamps   = rprofs[:,0].copy()
 	rprofs /= yamps[:,None]
 	# Prepare for painting
-	amps   = (yamps * utils.tsz_spectrum(meta.freq*1e9) / utils.dplanck(meta.freq*1e9) * 1e6).astype(dtype)
+	amps   = (yamps * utils.tsz_spectrum(freq) / utils.dplanck(freq) * 1e6).astype(dtype)
 	poss   = np.array([cat.dec,cat.ra]).astype(dtype)
 	profiles = [np.array([r,prof]).astype(dtype) for prof in rprofs]; del rprofs
 	prof_ids = np.arange(len(profiles)).astype(np.int32)
@@ -92,6 +101,8 @@ for bi in range(comm.rank, nblock, comm.size):
 	print("%3d %4d/%d ndone %6.1fk get %6.3f ms prof %6.3f ms draw %6.3f tot %6.3f each maxamp %7.2f" % (
 		comm.rank, bi+1, nblock, ntot/1e3, tget/ngood*1e3, tprof/ngood*1e3, tpaint/ngood*1e3,
 		(tget+tprof+tpaint)/ngood*1e3, np.max(np.abs(amps))))
+
+print("%4d Reducing" % comm.rank)
 
 if comm.size > 1:
 	comm.Barrier()

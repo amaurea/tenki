@@ -43,12 +43,12 @@ config.default("signal_srcsamp_default",  "use=no,type=srcsamp,name=srcsamp,srcs
 config.default("signal_template_default",  "use=no,type=template,name=template,ofmt={name}_{rank:03},output=yes,sys=cel,order=0,pmul=1", "Default parameters for per-tod template amplitude fit")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
-config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012,jitter=0,gainerr=0,deterr=0", "Default parameters for map subtraction filter")
-config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012,jitter=0,gainerr=0,deterr=0", "Default parameters for map subtraction filter")
+config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012,jitter=0,detjitter=0,gainerr=0,deterr=0,polefferr=no,tconsterr=0", "Default parameters for map subtraction filter")
+config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012,jitter=0,detjitter=0,gainerr=0,deterr=0,polefferr=no,tconsterr=0", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
 config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
-config.default("filter_common_default", "use=no,name=common,value=1", "Default parameters for blockwise common mode filter")
+config.default("filter_commonblock_default", "use=no,name=commonblock,value=1", "Default parameters for blockwise common mode filter")
 config.default("filter_addphase_default",  "use=no,name=addphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
 config.default("filter_subphase_default",  "use=no,name=addphase,value=1,mul=-1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
 config.default("filter_fitphase_default",  "use=no,name=fitphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5,perdet=1", "Default parameters for phasemap subtraction filter")
@@ -56,8 +56,13 @@ config.default("filter_scale_default",     "use=no,name=scale,value=1,sky=yes", 
 config.default("filter_null_default",     "use=no,name=null", "Default parameters for filter that does nothing")
 config.default("filter_beamsym_default", "use=no,name=beamsym,value=1,ibeam=1,obeam=1,postnoise=1", "Default parameters for beam symmetrization filter. ibeam and obeam (fwhm arcmin) specify the current and target beam horizontal size. To symmetrize, set the target horizontal beam size to its vertical size. If this filter becomes standard, these paramters should be moved to filedb or something.")
 config.default("filter_highpass_default", "use=no,name=highpass,value=1,fknee=1,alpha=-3.5,postnoise=1", "Default parameters for highpass filter.")
+config.default("filter_bandpass_default", "use=no,name=bandpass,value=1,fknee1=1,fknee2=2,alpha=-10,postnoise=1", "Default parameters for bandpass filter.")
 config.default("filter_deslope_default", "use=no,name=deslope,value=1", "Desloping filter.")
 config.default("filter_inpaintsub_default", "use=no,name=inpaintsub,value=1,fknee=10,alpha=10,postnoise=1", "Subtract inpaint-prediction around a set of objects. Pass in object list as obj=name:rad,name:rad,etc. :rad deg and optional, will repeat last. Default rad 0.5 deg. name can be a capitalized planet name or [ra,dec] in degrees.")
+config.default("filter_badify_default",  "use=no,name=badify,value=1,gainerr=0,deterr=0,deterr_rand=0,seed=0", "Default parameters for badification filter")
+config.default("filter_gainfit_default",  "use=no,name=gainfit,value=1,fmax=1.0", "Default parameters for common mode fit filter. Add odir to write fit amplitudes to that directory")
+config.default("filter_common_default",  "use=no,name=common,value=1,mode=highpass", "Default parameters for common mode filter.")
+config.default("filter_replacegain_default",  "use=no,name=replacegain,value=1,postnoise=1", "Default parameters for gain replacement filter.")
 
 # Default map filter parameters
 config.default("mapfilter_gauss_default", "use=no,name=gauss,value=0,cap=1e3,type=gauss,sky=yes", "Default parameters for gaussian map filter in mapmaking")
@@ -77,7 +82,8 @@ parser.add_argument("odir")
 parser.add_argument("prefix",nargs="?")
 parser.add_argument("-d", "--dump", type=str, default="10,300,500,700,1000,1500,2000,3000,4000,5000,6000,8000,10000", help="CG map dump steps")
 parser.add_argument("--ncomp",      type=int, default=3,  help="Number of stokes parameters")
-parser.add_argument("--dets",       type=str, default=0,  help="Detector slice")
+parser.add_argument("--dets",       type=str, default=0,  help="Detector slice/listfile")
+parser.add_argument("--det-blacklist", type=str, default=0,  help="Detector blacklist")
 parser.add_argument("--dump-config", action="store_true", help="Dump the configuration file to standard output.")
 parser.add_argument("-S", "--signal",    action="append", help="Signals to solve for. For example -S sky:area.fits -S scan would solve for the sky map and scan pickup maps jointly, using area.fits as the map template.")
 parser.add_argument("-F", "--filter",    action="append")
@@ -88,6 +94,7 @@ parser.add_argument("--group",      type=int, default=0)
 parser.add_argument("--tod-debug",  action="store_true")
 parser.add_argument("--prepost",    action="store_true")
 parser.add_argument("--define-planets", type=str, default=None)
+parser.add_argument("--no-filter-gapfill", action="store_true")
 args = parser.parse_args()
 
 if args.dump_config:
@@ -143,8 +150,9 @@ if comm.rank == 0:
 		for id in filelist:
 			f.write("%s\n" % str(id))
 	shutil.copyfile(filedb.cjoin(["root","dataset","filedb"]),  root + "filedb.txt")
-	try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), root + "todinfo.hdf")
-	except (IOError, OSError): pass
+	# Todinfo has gotten too big to keep copying every time
+	#try: shutil.copyfile(filedb.cjoin(["root","dataset","todinfo"]), root + "todinfo.hdf")
+	#except (IOError, OSError): pass
 # Set up logging
 utils.mkdir(root + "log")
 logfile   = root + "log/log%03d.txt" % comm.rank
@@ -231,7 +239,7 @@ mapfilter_params = setup_params("mapfilter", [], {"use":"no"})
 L.info("Reading %d scans" % len(filelist))
 myinds = np.arange(len(filelist))[comm.rank::comm.size]
 myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
-		db, dets=args.dets, downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
+		db, dets=args.dets, det_blacklist=args.det_blacklist, downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
 myinds = np.array(myinds, int)
 
 # Collect scan info. This currently fails if any task has empty myinds
@@ -292,7 +300,8 @@ else:
 L.info("Rereading shuffled scans")
 del myscans # scans do take up some space, even without the tod being read in
 myinds, myscans = scanutils.read_scans(filelist, myinds, actscan.ACTScan,
-		db, dets=args.dets, downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
+		db, dets=args.dets, det_blacklist=args.det_blacklist,
+		downsample=config.get("downsample"), hwp_resample=config.get("hwp_resample"))
 
 if config.get("skip_main_cuts"):
 	from enlib import sampcut
@@ -567,7 +576,7 @@ for out_ind in range(nouter):
 					else:
 						raise NotImplementedError("Scan postfiltering for '%s' signals not implemented" % sparam["type"])
 					signal.post.append(mapmaking.PostPickup(myscans, signal, signal_cut, prec, daz=daz, nt=nt, weighted=weighted>0))
-		elif param["name"] == "common":
+		elif param["name"] == "commonblock":
 			mode = int(param["value"])
 			if mode == 0: continue
 			filter = mapmaking.FilterCommonBlockwise()
@@ -581,23 +590,46 @@ for out_ind in range(nouter):
 			tmul = float(param["tmul"])
 			order = int(param["order"]) if "order" in param else None
 			# Set up optional pointing jitter and random gain errors
-			jitter  = float(param["jitter"])*utils.arcmin
-			gainerr = float(param["gainerr"])
-			deterr  = float(param["deterr"])
+			jitter    = float(param["jitter"])*utils.arcmin
+			detjitter = float(param["detjitter"])*utils.arcmin
+			gainerr   = float(param["gainerr"])
+			deterr    = float(param["deterr"])
+			tconsterr = float(param["tconsterr"])*1e-3
+			polefffile = param["polefferr"]
+
+			# Pointing errors
 			ptoff = jitter*np.random.standard_normal([len(myscans),2]) if jitter > 0 else [0,0]
+			if jitter > 0 or detjitter > 0:
+				ptoff = {scan: np.random.randn(2)*jitter + np.random.randn(scan.ndet,2)*detjitter for scan in myscans}
+			else: ptoff = None
+			# Gain errors
+			det_muls = {scan:np.full(scan.ndet,1.0) for scan in myscans}
 			if gainerr:
-				mul = mul * (1+gainerr*np.random.standard_normal(len(myscans)))
+				for scan, r in zip(myscans, np.random.standard_normal(len(myscans))):
+					det_muls[scan] *= 1+gainerr*r
 			if deterr:
 				# random det errs. This didn't seem to do much
 				# det_muls = [1+deterr*np.random.standard_normal(scan.ndet) for scan in myscans]
 				# radial det errs
-				det_muls = []
 				for scan in myscans:
 					det_r = np.sum((scan.offsets[:,1:]-np.mean(scan.offsets[:,1:],0))**2,1)**0.5
 					det_g = utils.rescale(-det_r, [-deterr, deterr])
 					det_g+= 1 - np.mean(det_g)
-					det_muls.append(det_g)
-			else: det_muls = None
+					det_muls[scan] *= det_g
+			# Polarization efficiency errors
+			if polefffile != "no":
+				from enact import files
+				poleff_dets, poleff_vals = files.read_poleff(polefffile)
+				poleffs = {}
+				for scan in myscans:
+					mydets = actdata.split_detname(scan.dets)[1]
+					inds   = utils.find(poleff_dets, mydets)
+					poleffs[scan] = poleff_vals[inds]
+			else: poleffs = None
+			# Time constant errors
+			if tconsterr > 0:
+				tconstoff = {scan:np.random.randn(scan.ndet)*tconsterr for scan in myscans}
+			else: tconstoff = None
 
 			if mode == 0: continue
 			if param["type"] == "auto":
@@ -615,7 +647,7 @@ for out_ind in range(nouter):
 				m = enmap.read_map(fname).astype(dtype)
 				for i in range(len(m)):
 					if i not in comps: m[i] = 0
-				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order, ptoff=ptoff, det_muls=det_muls)
+				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order, ptoff=ptoff, det_muls=det_muls, poleffs=poleffs, tconstoff=tconstoff)
 			map_add_filters.append(filter)
 			if mode >= 2:
 				print("Mode is 2")
@@ -725,6 +757,30 @@ for out_ind in range(nouter):
 			fknee = float(param["fknee"])
 			alpha = float(param["alpha"])
 			filter = mapmaking.FilterHighpass(fknee=fknee, alpha=alpha)
+		elif param["name"] == "bandpass":
+			if param["value"] == 0: continue
+			fknee1 = float(param["fknee1"])
+			fknee2 = float(param["fknee2"])
+			alpha  = float(param["alpha"])
+			filter = mapmaking.FilterBandpass(fknee1=fknee1, fknee2=fknee2, alpha=alpha)
+		elif param["name"] == "badify":
+			if param["value"] == 0: continue
+			gainerr = float(param["gainerr"])
+			deterr  = float(param["deterr"])
+			deterr_rand = float(param["deterr_rand"])
+			seed    = int  (param["seed"])
+			filter = mapmaking.FilterBadify(gainerr=gainerr, deterr=deterr, deterr_rand=deterr_rand, seed=seed)
+		elif param["name"] == "gainfit":
+			if param["value"] == 0: continue
+			fmax    = float(param["fmax"])
+			odir    = None if "odir" not in param else param["odir"]
+			filter = mapmaking.FilterGainfit(fmax=fmax, odir=odir)
+		elif param["name"] == "common":
+			if param["value"] == 0: continue
+			filter = mapmaking.FilterCommon(mode=param["mode"])
+		elif param["name"] == "replacegain":
+			if param["value"] == 0: continue
+			filter = mapmaking.FilterReplaceGain()
 		else:
 			raise ValueError("Unrecognized fitler name '%s'" % param["name"])
 
@@ -747,10 +803,11 @@ for out_ind in range(nouter):
 	# in FilterGapfill. For source injection we end up with large values anyway.
 	# I think the best thing would be to use basic cut gapfilling in filters and full cut
 	# gapfilling in filters2
-	if len(filters) > 0:
-		filters.append(mapmaking.FilterGapfill(basic=True))
-	if len(filters2) > 0:
-		filters2.append(mapmaking.FilterGapfill())
+	if not args.no_filter_gapfill:
+		if len(filters) > 0:
+			filters.append(mapmaking.FilterGapfill(basic=True))
+		if len(filters2) > 0:
+			filters2.append(mapmaking.FilterGapfill())
 
 	# Register the special source handler as a filter
 	if white_src_handler:

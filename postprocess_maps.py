@@ -72,8 +72,6 @@ onames = {}
 for key in datasets.keys():
 	m = re.match(r"s\d\d_\w+_pa\d_f\d\d\d_(no)?hwp_(day|night|daynight)\b.*", key)
 	if not m:
-		if comm.rank == 0:
-			print("%s does not follow the standard name format" % key)
 		if args.allow_nonstandard: onames[key] = key
 		else: del datasets[key]
 	else:

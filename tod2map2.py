@@ -39,7 +39,7 @@ config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1.0,tol=0.5", "Default parameters for scan/pickup signal")
 config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
-config.default("signal_srcsamp_default",  "use=no,type=srcsamp,name=srcsamp,srcs=none,minamp=10000,ofmt={name}_{rank:03},output=no,sys=cel", "Default parameters for source model error handling signal")
+config.default("signal_srcsamp_default",  "use=no,type=srcsamp,name=srcsamp,ofmt={name}_{rank:03},output=no,sys=cel,keep=1,prior=yes,prior_edge=10,prior_core=0.01,edge_rad=2", "Default parameters for source model error handling signal")
 config.default("signal_template_default",  "use=no,type=template,name=template,ofmt={name}_{rank:03},output=yes,sys=cel,order=0,pmul=1", "Default parameters for per-tod template amplitude fit")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
@@ -525,14 +525,10 @@ for out_ind in range(nouter):
 			# That was surprisingly cumbersome
 			signal  = mapmaking.SignalNoiseRect(active_scans, area, drift, my_ys, comm, name=effname, mode=param["mode"], ofmt=param["ofmt"], output=param["output"]=="yes")
 		elif param["type"] == "srcsamp":
-			if param["srcs"] == "none": srcs = None
-			else: srcs = pointsrcs.read(param["srcs"])
-			minamp = float(param["minamp"])
-			if "mask" in param:
-				m = expand_ncomp(enmap.read_map(param["mask"]).astype(dtype))
-			else: m = None
+			m = expand_ncomp(enmap.read_map(param["mask"]).astype(dtype))
+			keep  = int(param["keep"])!=0
 			signal = mapmaking.SignalSrcSamp(active_scans, dtype=dtype, comm=comm,
-					srcs=srcs, amplim=minamp, mask=m, sys=param["sys"])
+					mask=m, sys=param["sys"], keep=keep)
 			signal_srcsamp = signal
 		elif param["type"] == "template":
 			template = enmap.read_map(param["map"]).astype(dtype)
@@ -830,15 +826,8 @@ for out_ind in range(nouter):
 	if config.get("tod_window"):
 		weights.append(mapmaking.FilterWindow(config.get("tod_window")))
 
-	# Multiposts
+	# Multiposts. This was used to implement srcsamp before, but it's now handled via a prior
 	multiposts = []
-	# HACK
-	for signal in signals:
-		if isinstance(signal, mapmaking.SignalSrcSamp):
-			target_signals = [tsig for tsig in signals if tsig.output and
-					not isinstance(tsig, (mapmaking.SignalCut, mapmaking.SignalSrcSamp))]
-			insert_srcsamp = mapmaking.MultiPostInsertSrcSamp(myscans, signal_srcsamp, target_signals, weights=weights)
-			multiposts.append(insert_srcsamp)
 
 	L.info("Initializing equation system")
 	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, filters2=filters2, filters_noisebuild=filters_noisebuild, weights=weights, multiposts=multiposts, dtype=dtype, comm=comm)
@@ -871,6 +860,12 @@ for out_ind in range(nouter):
 			continue
 		if param["type"] in ["cut","srcsamp","template"]:
 			signal.precon = mapmaking.PreconCut(signal, myscans)
+			# Optionally set up srcsamp prior
+			if param["type"] == "srcsamp" and param["prior"] != "no":
+				prior_core = float(param["prior_core"])
+				prior_edge = float(param["prior_edge"])
+				edge_rad   = float(param["edge_rad"])*utils.arcmin
+				signal.prior = mapmaking.PriorSrcSamp(signal, eps_core=prior_core, eps_edge=prior_edge, redge=edge_rad)
 		elif param["type"] in ["map","bmap","fmap","noiserect"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
 			if param["prec"] == "bin":
@@ -892,6 +887,10 @@ for out_ind in range(nouter):
 				signal.prior = mapmaking.PriorMapNohor(prior_weight)
 			if "unmix" in param and param["unmix"] != "no":
 				signal.prior = mapmaking.PriorNorm(float(param["unmix"]))
+			if "zeromask" in param and "zeroeps" in param:
+				mask = enmap.read_map(param["zeromask"]).astype(dtype)
+				eps  = float(param["zeroeps"])
+				signal.prior = mapmaking.PriorNorm(epsilon=mask*eps)
 		elif param["type"] in ["dmap","fdmap"]:
 			if param["prec"] == "bin":
 				signal.precon = mapmaking.PreconDmapBinned(signal, myscans, weights)

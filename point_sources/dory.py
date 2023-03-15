@@ -62,6 +62,7 @@ parser.add_argument(      "--rmax",    type=float, default=None)
 parser.add_argument(      "--lknee",   type=float, default=None)
 parser.add_argument(      "--npass",   type=int,   default=2)
 parser.add_argument(      "--vmin",    type=float, default=0.01, help="Only simulate srcs out to this value in uK")
+parser.add_argument("-W", "--pixwin-order", type=int, default=0, help="0: nearest neighbor pixel window, 1: bilinear pixel window. Should match that of the actual map")
 parser.add_argument("-c", "--cont",    action="store_true")
 
 args = parser.parse_args()
@@ -86,10 +87,6 @@ def divdiag(div):
 def get_div(div, ci):
 	if len(div) > ci: return div[ci]
 	else: return div[0]*2
-
-def work_around_stupid_mpi4py_bug(imap):
-	imap.dtype = np.dtype('=' + imap.dtype.char)
-	return imap
 
 def write_args(fname):
 	with open(fname, "w") as ofile:
@@ -124,7 +121,7 @@ if args.mode == "find":
 			else:                      dump_prefix = None
 			nsigma = args.nsigma if args.nsigma is not None else 3.5
 			result = dory.find_srcs(imap, idiv, beam, freq=args.freq, apod=args.apod, apod_margin=args.apod_margin,
-					snmin=nsigma, verbose=args.verbose, dump=dump_prefix)
+					snmin=nsigma, pixwin_order=args.pixwin_order, verbose=args.verbose, dump=dump_prefix)
 			# FIXME: artifacts are act-specific
 			if args.prune:
 				result = dory.prune_artifacts(result)
@@ -188,11 +185,9 @@ elif args.mode == "fit":
 		try:
 			# We support polarization here, but treat each component independently
 			imap   = enmap.read_map(args.imap, pixbox=reg_pad).preflat[:args.ncomp]
-			print(args.imap, imap.wcs.wcs.cdelt[1]*60)
 			idiv   = divdiag(enmap.read_map(args.idiv, pixbox=reg_pad))[:args.ncomp]
 			if args.mask:
 				mshape, mwcs = enmap.read_map_geometry(args.mask)
-				print(args.mask, mwcs.wcs.cdelt[1]*60)
 				mbox  = enmap.pixbox_of(mwcs, imap.shape, imap.wcs)
 				mask  = enmap.read_map(args.mask, pixbox=mbox).preflat[0] > 0
 				idiv *= 1-mask
@@ -211,12 +206,15 @@ elif args.mode == "fit":
 			local_amps = None
 			for ci in range(len(imap)):
 				# Build an amplitude prior from our input catalog fluxes
-				prior    = dory.build_prior(icat.flux[:,ci]/fluxconv, icat.dflux[:,ci]/fluxconv, 1/args.prior)
+				if args.prior > 0:
+					prior  = dory.build_prior(icat.flux[:,ci]/fluxconv, icat.dflux[:,ci]/fluxconv, 1/args.prior)
+				else:
+					prior  = None
 				src_pos  = np.array([icat.dec,icat.ra]).T
 				try:
 					fit_inds, amp, icov, lamps = dory.fit_src_amps(imap[ci], get_div(idiv,ci), src_pos, beam, prior=prior,
-							apod=args.apod, apod_margin=args.apod_margin, verbose=args.verbose, dump=dump_prefix, hack=args.hack,
-							region=ri, lknee=args.lknee, npass=args.npass)
+							apod=args.apod, apod_margin=args.apod_margin, pixwin_order=args.pixwin_order, verbose=args.verbose,
+							dump=dump_prefix, hack=args.hack, region=ri, lknee=args.lknee, npass=args.npass)
 				except dory.FitError as e:
 					fit_inds, amp, icov, lamps = np.zeros([0],int), np.zeros([0]), np.zeros([0,0]), np.zeros([0])
 				if reg_cat is None:
@@ -277,9 +275,8 @@ elif args.mode == "subtract":
 		reg_fid = regions[ri]
 		reg_pad = dory.pad_region(reg_fid, args.pad)
 		print("%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1]))
-		map    = enmap.read_map(args.imap, pixbox=reg_pad)
-		map    = work_around_stupid_mpi4py_bug(map)
-		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True,verbose=args.verbose, rmax=rmax, vmin=args.vmin)
+		map    = enmap.read_map(args.imap, pixbox=reg_pad).astype(dtype)
+		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True, pixwin_order=args.pixwin_order, verbose=args.verbose, rmax=rmax, vmin=args.vmin).astype(dtype)
 		model[map==0] = 0
 		omaps.append(map-model)
 		if args.omodel: models.append(model)
@@ -313,7 +310,7 @@ elif args.mode == "subtract_nompi":
 	print("Reading %s" % args.imap)
 	map    = enmap.read_map(args.imap)
 	print("Subtracting")
-	model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True, verbose=args.verbose, rmax=rmax, vmin=args.vmin)
+	model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True, pixwin_order=args.pixwin_order, verbose=args.verbose, rmax=rmax, vmin=args.vmin)
 	map   -= model
 	print("Writing map")
 	enmap.write_map(args.omap, map)

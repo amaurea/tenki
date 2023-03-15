@@ -1,7 +1,7 @@
 import numpy as np, time, os
 from pixell import utils, enmap, mpi, bunch
 from enact import filedb, files, actscan, actdata
-from enlib import config, scanutils, log, coordinates, mapmaking, sampcut, cg, dmap
+from enlib import config, scanutils, log, coordinates, mapmaking, sampcut, cg, dmap, errors
 
 config.default("dmap_format", "merged")
 config.default("map_bits", 32, "Bit-depth to use for maps and TOD")
@@ -101,10 +101,16 @@ def bounds_helper(t1, t2, az1, az2, el, sys, acenter, site):
 	return opoints # [{dec,ra},:]
 
 def find_bounding_box(scandb, entrydb, sys="cel"):
-	# all tods in group have same site. We also assume the same detector layout
-	entry    = entrydb[scandb.ids[0]]
-	site     = files.read_site(entry.site)
-	detpos   = actdata.read_point_offsets(entry).point_offset
+	# all tods in group have same site. We also assume the same detector layout.
+	# We need to loop in case some tods are missing pointing, though
+	detpos = None
+	for id in scandb.ids:
+		entry    = entrydb[scandb.ids[0]]
+		site     = files.read_site(entry.site)
+		try: detpos = actdata.read_point_offsets(entry).point_offset
+		except errors.DataMissing: continue
+		break
+	if detpos is None: raise errors.DataMissing("No pointing found")
 	# Array center and radius in focalplane coordinates
 	acenter  = np.mean(detpos,0)
 	arad     = np.max(np.sum((detpos-acenter)**2,1)**0.5)
@@ -270,7 +276,14 @@ for gi in range(comm_inter.rank, len(gvals), comm_inter.size):
 	if args.cont and meta_done and (maps_done or args.meta_only): continue
 	L.info("Processing %4d/%d period %4d arr %s @%.0f dur %4.2f h with %2d tods" % (gi+1, len(gvals), pid, arrays[aid], t, (periods[pid,1]-periods[pid,0])/3600, len(inds)))
 	# Find the bounding box for this group, as well as this task's part of it
-	box = find_bounding_box(db.select(inds), filedb.data, sys=sys)
+	try: box = find_bounding_box(db.select(inds), filedb.data, sys=sys)
+	except errors.DataMissing:
+		if comm_intra.rank == 0:
+			L.debug("Skipping %4d/%d: No readable tods" % (gi+1, len(gvals)))
+			utils.mkdir(os.path.dirname(prefix))
+			with open(prefix + ".empty", "w") as ofile:
+				ofile.write("\n")
+		continue
 	box = utils.widen_box(box, widen, relative=False)
 	# Build our geometry
 	shape, wcs = enmap.Geometry(shape_full, wcs_full).submap(box=box)

@@ -176,7 +176,8 @@ for fi in range(comm.rank, nfile, comm.size):
 	# Read in our data
 	map  = enmap.read_map(mapfile)  * fconv
 	ivar = enmap.read_map(ivarfile) / fconv**2
-	info = bunch.read(infofile)
+	if args.shift > 0:
+		info = bunch.read(infofile)
 	dtype  = map.dtype
 	ny, nx = map.shape[-2:]
 	# Build our shift matrix
@@ -200,7 +201,7 @@ for fi in range(comm.rank, nfile, comm.size):
 		mask |= bright.distance_transform(rmax=rmask) < rmask
 		del bright
 	mask = np.asanyarray(mask)
-	if mask.size > 0:
+	if mask.size > 0 and mask.ndim > 0:
 		noise_apod *= enmap.apod_mask(1-mask, apod_holes)
 	del mask
 	# Build the noise model

@@ -1,7 +1,7 @@
 import numpy as np
 from pixell import enmap, utils, mpi, fft
-from enlib import pmat, sampcut, config, errors, pulsar, array_ops, log
-from enact import filedb, actdata, actscan
+from enlib import pmat, sampcut, config, errors, pulsar, array_ops, log, gapfill
+from enact import filedb, actdata, actscan, cuts
 config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 config.default("eig_limit", 1e-3, "Smallest relative eigenvalue to invert in eigenvalue inversion. Ones smaller than this are set to zero.")
 parser = config.ArgumentParser()
@@ -15,7 +15,24 @@ parser.add_argument("-E", "--ephemeris",   type=str,   default="https://naif.jpl
 parser.add_argument("-n", "--nbin",        type=int,   default=10)
 parser.add_argument(      "--fknee",       type=float, default=3)
 parser.add_argument(      "--alpha",       type=float, default=-10)
+parser.add_argument("-R", "--rad",         type=float, default=0.2)
+parser.add_argument("-F", "--filter-type", type=str,   default="planet")
 args = parser.parse_args()
+
+def lowpass_tod(tod, srate, fknee=3, alpha=-10):
+	ft   = fft.rfft(tod)
+	freq = fft.rfftfreq(tod.shape[-1])*srate
+	with utils.nowarn():
+		flt  = 1/(1+(freq/fknee)**-alpha)
+	ft  *= flt
+	fft.ifft(ft, tod, normalize=True)
+	return tod
+
+def planet_filter(scan, coords, tod, R=0.2*utils.degree, fknee=3, alpha=-10):
+	planet_cut = cuts.avoidance_cut(scan.d.boresight, scan.d.point_offset, scan.d.site, coords, R)
+	model      = gapfill.gapfill_joneig(tod, planet_cut, inplace=False)
+	model      = lowpass_tod(model, srate=scan.srate, fknee=fknee, alpha=alpha)
+	tod       -= model
 
 filedb.init()
 comm       = mpi.COMM_WORLD
@@ -82,12 +99,17 @@ for ind in range(comm.rank, len(ids), comm.size):
 	tod  = utils.deslope(tod)
 	tod  = tod.astype(dtype)
 	L.debug("%s tod" % id)
-	# Lowpass filter. This won't affect our signal much since we're
-	# looking for a 30 Hz signal
-	freq  = fft.rfftfreq(scan.nsamp, 1/scan.srate)
-	ftod  = fft.rfft(tod)
-	ftod /= 1 + (np.maximum(freq,freq[1]/2)/args.fknee)**args.alpha
-	fft.irfft(ftod, tod, normalize=True)
+	if args.filter_type == "planet":
+		# Filter from planet mapmaker. Gets rid of correlated noise
+		# without biasing small central region.
+		planet_filter(scan, coords, tod, R=args.rad*utils.degree, fknee=args.fknee, alpha=args.alpha)
+	else:
+		# Lowpass filter. This won't affect our signal much since we're
+		# looking for a 30 Hz signal
+		freq  = fft.rfftfreq(scan.nsamp, 1/scan.srate)
+		ftod  = fft.rfft(tod)
+		ftod /= 1 + (np.maximum(freq,freq[1]/2)/args.fknee)**args.alpha
+		fft.irfft(ftod, tod, normalize=True)
 	L.debug("%s filtered" % id)
 	# Estimate noise per detector. Should be white noise by now. Using median
 	# of means to be robust to bright signal

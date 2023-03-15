@@ -1,13 +1,13 @@
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("mapstack")
-parser.add_argument("ivar")
+parser.add_argument("maps1")
+parser.add_argument("maps2")
 parser.add_argument("odir")
 parser.add_argument("tag", nargs="?", default=None)
 parser.add_argument("-b", "--beam", type=str,   default=1.4)
 parser.add_argument("-f", "--freq", type=float, default=98)
-parser.add_argument("-R", "--rmask",type=float, default=2)
-parser.add_argument(     "--noise-block-size", type=int, default=5)
+#parser.add_argument("-R", "--rmask",type=float, default=2)
+parser.add_argument(     "--noise-block-size", type=int, default=2)
 args = parser.parse_args()
 import numpy as np
 from scipy import ndimage
@@ -51,40 +51,55 @@ utils.mkdir(args.odir)
 prefix = args.odir + "/"
 if args.tag: prefix += args.tag + "_"
 bsize = args.noise_block_size
-rmask = args.rmask*utils.arcmin
+#rmask = args.rmask*utils.arcmin
 
-# Read in the maps [nt,ncomp,ny,nx]
-imaps = enmap.read_map(args.mapstack)
-ivars = enmap.read_map(args.ivar)
-nmap  = len(imaps)
+# Read in the maps [nt,ncomp,ny,nx]. We read in two data splits
+# to build an empirical noise model without worrying about signal
+# contamination
+imaps1 = enmap.read_map(args.maps1)
+imaps2 = enmap.read_map(args.maps2)
+nmap   = len(imaps1)
 # Output them again for reference. They shouldn't be big anyway
-enmap.write_map(prefix + "map.fits", imaps)
-enmap.write_map(prefix + "ivar.fits", imaps)
-# Compute the coadded map, which we will subtract
-rhs = np.sum(imaps*ivars[:,None],0)
-div = np.sum(ivars,0)
+enmap.write_map(prefix + "maps1.fits", imaps1)
+enmap.write_map(prefix + "maps2.fits", imaps2)
+# Build the noise model. We don't trust the ivar from the
+# mapmaker, as we have strong evidence of multiplicative noise.
+# There's therefore not much point in reading in ivar. /2 takes us
+# from var of diff to var of individual
+
+# These diffs reveal pointing issues for the tau_a tods. Need to build
+# new pointing model
+enmap.write_map(prefix + "rawdiffs.fits", imaps1-imaps2)
+
+
+vemp = blockavg(np.mean((imaps1-imaps2)**2,0),bsize) / 2
+mask = np.all((imaps1[:,0]!=0)&(imaps2[:,0]!=0),0)
+# Coadd, assuming uniform noise between splits and bins. The bin part
+# is completely safe. The split thing is almost certainly good enough.
+map_coadd  = 0.5*(np.mean(imaps1,0)+np.mean(imaps2,0))
 with utils.nowarn():
-	map_coadd = utils.without_nan(rhs/div[None])
-# Subtract this coadd map to get the deviation from mean.
-# This is where the pulsar pulses would be
-imaps -= map_coadd
-# Output cleaned map
-enmap.write_map(prefix + "diffmap.fits", imaps)
-# We can't really trust ivars as it is because there will be model error
-# noise in the region of bright signal. But we can try to fit this empirically.
-# For example var_tot = 1/ivar + a*abs(T). But for now, just do a simple block
-# measurement.
-#with utils.nowarn():
-#	correction = blockavg(imaps**2*ivars[:,None], bsize)
-#	# Maximum to avoid dividing by too small values, which can happen in very poorly hit pixels
-#	ivars_emp  = ivars[:,None] / np.maximum(correction, np.max(correction)*1e-3)
-ivars_emp = calibrate_ivar(imaps, ivars[:,None], rmask=rmask)
+	ivar_coadd = utils.without_nan(2*nmap / vemp)*mask
+enmap.write_map(prefix + "map_coadd.fits",  map_coadd)
+enmap.write_map(prefix + "ivar_coadd.fits", ivar_coadd)
+# Mean-subtracted split-coadded maps
+maps  = 0.5*(imaps1+imaps2) - map_coadd
+with utils.nowarn():
+	ivars = ivar_coadd / (nmap-1) + maps*0
+enmap.write_map(prefix + "diffmap.fits", maps)
+
+# Estimating noise from diff maps results in a factor 5
+# overestimate of the noise RMS in the central region!
+vemp2 = blockavg(np.mean(maps**2*ivars,0),bsize)
+enmap.write_map(prefix + "diffrms.fits", vemp2**0.5)
+
+
+# Setup our beam, which we need for the matched filter
 bl  = get_beam(args.beam)
-uht = uharm.UHT(imaps.shape, imaps.wcs)
-B   = enmap.samewcs(utils.interp(uht.l, np.arange(len(bl)), bl), imaps)
+uht = uharm.UHT(maps.shape, maps.wcs)
+B   = enmap.samewcs(utils.interp(uht.l, np.arange(len(bl)), bl), maps)
 # Do the matched filter
 fconv = utils.dplanck(args.freq*1e9)/1e3
-rho, kappa = analysis.matched_filter_white(imaps*fconv, B, ivars_emp/fconv**2, uht)
+rho, kappa = analysis.matched_filter_white(maps*fconv, B, ivars/fconv**2, uht)
 enmap.write_map(prefix + "rho.fits", rho)
 enmap.write_map(prefix + "kappa.fits", kappa)
 # Solve

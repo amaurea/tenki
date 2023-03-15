@@ -31,7 +31,11 @@ for id in ids:
 		subdets = [int(w) for w in args.dets.split(",")]
 
 	fields = ["array_info","tags","gain","mce_filter","tconst","cut","boresight","tod"]
-	if args.fields: fields = args.fields.split(",")
+	if args.fields:
+		if args.fields.startswith("+"):
+			fields += args.fields[1:].split(",")
+		else:
+			fields = args.fields.split(",")
 	d = actdata.read(entry, fields=fields)
 	if absdets: d.restrict(dets=absdets)
 	if subdets: d.restrict(dets=d.dets[subdets])
@@ -69,6 +73,7 @@ for id in ids:
 			hfile["az"]  = d.boresight[1]
 			hfile["el"]  = d.boresight[2]
 		hfile["dets"] = np.char.encode(d.dets)
-		try:
-			hfile["mask"] = d.cut.to_mask().astype(np.int16)
+		try: hfile["mask"] = d.cut.to_mask().astype(np.int16)
+		except AttributeError: pass
+		try: hfile["point_template"] = d.point_template
 		except AttributeError: pass

@@ -27,26 +27,26 @@ config.default("src_handling_lim", 10000, "Minimum source amplitude to apply spe
 config.default("src_handling_list", "", "Override source list")
 
 # Default signal parameters
-config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin,order=0", "Default parameters for sky map")
-config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin,order=0", "Default parameters for ground map")
-config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=sidelobe:Sun,prec=bin,order=0,lim_Sun_min_el=0", "Default parameters for sun map")
-config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=sidelobe:Moon,prec=bin,order=0,lim_Moon_min_el=0", "Default parameters for moon map")
-config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=sidelobe:Jupiter,prec=bin,order=0,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
-config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=sidelobe:Saturn,prec=bin,order=0,lim_Saturn_min_el=0", "Default parameters for saturn map")
-config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelobe:Uranus,prec=bin,order=0,lim_Uranus_min_el=0", "Default parameters for uranus map")
-config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=sidelobe:Neptune,prec=bin,order=0,lim_Neptune_min_el=0", "Default parameters for neptune map")
-config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,order=0,lim_Pluto_min_el=0", "Default parameters for pluto map")
+config.default("signal_sky_default",   "use=no,type=map,name=sky,sys=cel,prec=bin,order=default", "Default parameters for sky map")
+config.default("signal_hor_default",   "use=no,type=map,name=hor,sys=hor,prec=bin,order=default", "Default parameters for ground map")
+config.default("signal_sun_default",   "use=no,type=map,name=sun,sys=sidelobe:Sun,prec=bin,order=default,lim_Sun_min_el=0", "Default parameters for sun map")
+config.default("signal_moon_default",  "use=no,type=map,name=moon,sys=sidelobe:Moon,prec=bin,order=default,lim_Moon_min_el=0", "Default parameters for moon map")
+config.default("signal_jupiter_default",  "use=no,type=map,name=jupiter,sys=sidelobe:Jupiter,prec=bin,order=default,lim_Jupiter_min_el=0", "Default parameters for jupiter map")
+config.default("signal_saturn_default",  "use=no,type=map,name=saturn,sys=sidelobe:Saturn,prec=bin,order=default,lim_Saturn_min_el=0", "Default parameters for saturn map")
+config.default("signal_uranus_default",  "use=no,type=map,name=uranus,sys=sidelobe:Uranus,prec=bin,order=default,lim_Uranus_min_el=0", "Default parameters for uranus map")
+config.default("signal_neptune_default",  "use=no,type=map,name=neptune,sys=sidelobe:Neptune,prec=bin,order=default,lim_Neptune_min_el=0", "Default parameters for neptune map")
+config.default("signal_pluto_default",  "use=no,type=map,name=pluto,sys=sidelobe:Pluto,prec=bin,order=default,lim_Pluto_min_el=0", "Default parameters for pluto map")
 config.default("signal_cut_default",   "use=no,type=cut,name=cut,ofmt={name}_{rank:03},output=no,use=yes", "Default parameters for cut (junk) signal")
 config.default("signal_scan_default",  "use=no,type=scan,name=scan,2way=yes,res=1.0,tol=0.5", "Default parameters for scan/pickup signal")
 config.default("signal_noiserect_default", "use=no,type=noiserect,name=noiserect,drift=10.0,prec=bin,mode=keepaz,leftright=0", "Default parameters for noiserect mapping")
 config.default("signal_srcsamp_default",  "use=no,type=srcsamp,name=srcsamp,ofmt={name}_{rank:03},output=no,sys=cel,keep=1,prior=yes,prior_edge=10,prior_core=0.01,edge_rad=2", "Default parameters for source model error handling signal")
-config.default("signal_template_default",  "use=no,type=template,name=template,ofmt={name}_{rank:03},output=yes,sys=cel,order=0,pmul=1", "Default parameters for per-tod template amplitude fit")
+config.default("signal_template_default",  "use=no,type=template,name=template,ofmt={name}_{rank:03},output=yes,sys=cel,order=default,pmul=1", "Default parameters for per-tod template amplitude fit")
 # Default filter parameters
 config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhwp=0,weighted=1,niter=3,sky=yes", "Default parameters for scan/pickup filter")
 config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012,jitter=0,detjitter=0,gainerr=0,deterr=0,polefferr=no,tconsterr=0", "Default parameters for map subtraction filter")
 config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012,jitter=0,detjitter=0,gainerr=0,deterr=0,polefferr=no,tconsterr=0", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
-config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin", "Default parameters for map subtraction filter")
+config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin,order=default", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
 config.default("filter_commonblock_default", "use=no,name=commonblock,value=1", "Default parameters for blockwise common mode filter")
 config.default("filter_addphase_default",  "use=no,name=addphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
@@ -212,6 +212,10 @@ def setup_params(category, predefined, defparams):
 	params = [p for p in params if p["use"] != "no"]
 	return params
 def get_effname(param): return param["name"] + (str(param["i"]) if param["i"] > 1 else "")
+def parse_param(params, key, type=str, default=None):
+	if key not in params: return default
+	if params[key] == "default": return default
+	return type(params[key])
 
 ######## Signal parmeters ########
 signal_params = setup_params("signal", ["cut","sky","hor","sun","moon","scan"], {"use":"no", "ofmt":"{name}", "output":"yes"})
@@ -459,6 +463,7 @@ for out_ind in range(nouter):
 	for param in signal_params:
 		effname = get_effname(param)
 		active_scans = apply_scan_limits(myscans, param)
+		pmat_order = parse_param(param, "order", int)
 		if param["type"] == "cut":
 			signal = mapmaking.SignalCut(active_scans, dtype=dtype, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes")
 			signal_cut = signal
@@ -474,7 +479,7 @@ for out_ind in range(nouter):
 			else:
 				split = False
 				area = enmap.zeros((args.ncomp,)+shape[-2:], wcs, dtype)
-			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], pmat_order=param["order"], extra=setup_extra_transforms(param), split=split)
+			signal = mapmaking.SignalMap(active_scans, area, comm=comm, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], pmat_order=pmat_order, extra=setup_extra_transforms(param), split=split)
 		elif param["type"] == "fmap":
 			shape, wcs = enmap.read_map_geometry(get_map_path(param["value"]))
 			area = enmap.zeros((args.ncomp,)+shape[-2:], wcs, dtype)
@@ -483,7 +488,7 @@ for out_ind in range(nouter):
 			shape, wcs = enmap.read_map_geometry(get_map_path(param["value"]))
 			geometry = dmap.DGeometry((args.ncomp,)+shape, wcs, bbox=mybbox, tshape=tshape, comm=comm, dtype=dtype)
 			area = dmap.zeros(geometry)
-			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], pmat_order=param["order"], extra=setup_extra_transforms(param))
+			signal = mapmaking.SignalDmap(active_scans, mysubs, area, name=effname, ofmt=param["ofmt"], output=param["output"]=="yes", sys=param["sys"], pmat_order=pmat_order, extra=setup_extra_transforms(param))
 		elif param["type"] == "fdmap":
 			shape, wcs = enmap.read_map_geometry(get_map_path(param["value"]))
 			geometry = dmap.DGeometry((args.ncomp,)+shape, wcs, bbox=mybbox, tshape=tshape, comm=comm, dtype=dtype)
@@ -534,7 +539,7 @@ for out_ind in range(nouter):
 			template = enmap.read_map(param["map"]).astype(dtype)
 			pmul     = float(param["pmul"])
 			template[1:] *= pmul
-			signal   = mapmaking.SignalTemplate(active_scans, template, comm=comm, name=effname, ofmt=param["ofmt"], sys=param["sys"], pmat_order=param["order"])
+			signal   = mapmaking.SignalTemplate(active_scans, template, comm=comm, name=effname, ofmt=param["ofmt"], sys=param["sys"], pmat_order=pmat_order)
 		else:
 			raise ValueError("Unrecognized signal type '%s'" % param["type"])
 		# Hack. Special source handling for some signals
@@ -557,6 +562,7 @@ for out_ind in range(nouter):
 	src_filters = []
 	map_add_filters = []
 	for param in filter_params:
+		pmat_order = parse_param(param, "order", int)
 		if param["name"] == "scan":
 			daz, nt, mode, niter = float(param["daz"]), int(param["nt"]), int(param["value"]), int(param["niter"])
 			nhwp = int(param["nhwp"])
@@ -584,7 +590,6 @@ for out_ind in range(nouter):
 			mode, sys, fname, mul = int(param["value"]), param["sys"], param["map"], float(param["mul"])
 			comps = set([int(c) for c in param["comps"]])
 			tmul = float(param["tmul"])
-			order = int(param["order"]) if "order" in param else None
 			# Set up optional pointing jitter and random gain errors
 			jitter    = float(param["jitter"])*utils.arcmin
 			detjitter = float(param["detjitter"])*utils.arcmin
@@ -638,24 +643,19 @@ for out_ind in range(nouter):
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
 				for i in range(len(m)):
 					if i not in comps: m[i] = 0
-				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order)
+				filter = mapmaking.FilterAddDmap(myscans, mysubs, m, sys=sys, mul=mul, tmul=tmul, pmat_order=pmat_order)
 			else:
 				m = enmap.read_map(fname).astype(dtype)
 				for i in range(len(m)):
 					if i not in comps: m[i] = 0
-				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul, pmat_order=order, ptoff=ptoff, det_muls=det_muls, poleffs=poleffs, tconstoff=tconstoff)
+				filter = mapmaking.FilterAddMap(myscans, m, sys=sys, mul=mul, tmul=tmul, pmat_order=pmat_order, ptoff=ptoff, det_muls=det_muls, poleffs=poleffs, tconstoff=tconstoff)
 			map_add_filters.append(filter)
 			if mode >= 2:
-				print("Mode is 2")
 				# In post mode we subtract the map that was added before each output. That's
 				# why mul is -1 here
-				print("matching signals")
-				print(list(matching_signals(param, signal_params, signals)))
 				for sparam, signal in matching_signals(param, signal_params, signals):
 					assert sparam["sys"] == param["sys"]
-					print(signal.area.shape, m.shape)
 					assert signal.area.shape[-2:] == m.shape[-2:]
-					print("Adding post")
 					signal.post.append(mapmaking.PostAddMap(m, mul=-mul))
 		elif param["name"] == "addphase" or param["name"] == "fitphase":
 			if "map" not in param: raise ValueError("-F addphase/subphase/fitphase needs a phase dir to subtract. e.g. -F addphase:map=foo")
@@ -713,7 +713,7 @@ for out_ind in range(nouter):
 			if param["type"] != "dmap":
 				m = enmap.read_map(fname).astype(dtype)
 				if not pertod:
-					filter = mapmaking.FilterBuddy(myscans, m, sys=sys, mul=-mul, tmul=tmul)
+					filter = mapmaking.FilterBuddy(myscans, m, sys=sys, mul=-mul, tmul=tmul, pmat_order=pmat_order)
 				else:
 					1/0 # FIXME
 					m = enmap.zeros((args.ncomp,)+m.shape[-2:], m.wcs, dtype)
@@ -722,7 +722,7 @@ for out_ind in range(nouter):
 				# Warning: This only works if a dmap has already been initialized etc.
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
 				if not pertod:
-					filter = mapmaking.FilterBuddyDmap(myscans, mysubs, m, sys=sys, mul=-mul, tmul=tmul)
+					filter = mapmaking.FilterBuddyDmap(myscans, mysubs, m, sys=sys, mul=-mul, tmul=tmul, pmat_order=pmat_order)
 				else:
 					raise NotImplementedError("FIXME: Implement per tod buddy subtraction with dmaps")
 		elif param["name"] == "src":

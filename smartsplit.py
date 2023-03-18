@@ -7,7 +7,7 @@ parser.add_argument("-R", "--rad",   type=float, default=0.7)
 parser.add_argument("-r", "--res",   type=float, default=0.5)
 parser.add_argument("-b", "--block", type=str,   default="day")
 parser.add_argument("-O", "--nopt",  type=int,   default=2000)
-parser.add_argument("-m", "--mode",  type=str,   default="crosslink")
+parser.add_argument("-m", "--mode",  type=str,   default="crosslink", help="plain, crosslink or scanpat")
 parser.add_argument("-w", "--weight",type=str,   default="plain")
 parser.add_argument("--opt-mode",    type=str,   default="linear")
 parser.add_argument("--constraint",  type=str,   default=None)
@@ -45,6 +45,9 @@ elif args.mode == "scanpat":
 	npat     = np.max(pids)+1
 	for pid in range(npat):
 		anames[pids==pid] = np.char.add(anames[pids==pid], "p%d" % pid)
+else:
+	# In this case we don't split arrays
+	pass
 
 def ids2ctimes(ids): return np.char.partition(ids,".").T[0].astype(int)
 def fix_aname(aname): return aname.replace("ar","pa").replace(":","_")

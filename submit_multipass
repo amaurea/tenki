@@ -40,7 +40,7 @@ parser.add_argument(      "--cgpat",  type=str, default="200")
 args, unknown = parser.parse_known_args()
 from enlib import utils, config, enmap, colors
 
-tenkidir = "/home/snaess/local/tenki"
+tenkidir = os.environ["HOME"] + "/local/tenki"
 
 config.init()
 root  = config.get("root")
@@ -66,6 +66,11 @@ array_freqs = {"pa1":["f150"], "pa2":["f150"], "pa3":["f090","f150"],
 season_arrays = {"s13":["pa1"], "s14":["pa1","pa2"], "s15":["pa1","pa2","pa3"],
 	"s16":["pa2","pa3","pa4"], "s17":["pa4","pa5","pa6"], "s18":["pa4","pa5","pa6"],
 	"s19":["pa4","pa5","pa6"], "s20":["pa4","pa5","pa7"], "s21":["pa4","pa5","pa7"]}
+
+accounts = {"rbond": "rrg-rbond-ac", "sievers": "rrg-sievers"}
+account  = args.account
+if account and account in accounts:
+	account = accounts[account]
 
 tag_map = {"+":"", "~":"no", ">":"_gt_", "<":"_lt_"}
 def remap(toks, tag_map):
@@ -271,6 +276,8 @@ for toks in utils.list_combination_iter(alts):
 			# Set up our slurm parameters
 			slurm_command  = "#SBATCH --nodes %d --ntasks-per-node=%d --cpus-per-task=%d --time=%s\n" % (nnode, npernode, nomp, args.time)
 			slurm_command += "#SBATCH --job-name %s\n" % otag
+			if account:
+				slurm_command += "#SBATCH --account %s\n" % account
 			# and the dependency list. First our previous try
 			deps = []
 			if prev_jobid is not None:

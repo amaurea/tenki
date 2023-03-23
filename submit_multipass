@@ -37,6 +37,7 @@ parser.add_argument(      "--srcsub", action="store_true")
 parser.add_argument(      "--minpass",type=int,   default=1)
 parser.add_argument(      "--downpat",type=str, default=None)
 parser.add_argument(      "--cgpat",  type=str, default="200")
+parser.add_argument(      "--distributed", type=int, default=-1)
 args, unknown = parser.parse_known_args()
 from enlib import utils, config, enmap, colors
 
@@ -229,7 +230,10 @@ for toks in utils.list_combination_iter(alts):
 			patch_file = get_patch_file(otoks, args.patch)
 			shape, wcs = enmap.read_map_geometry(patch_file)
 			npix = shape[-2]*shape[-1]
-			map_type = "map" if npix < 4e7 else "dmap"
+			# Determine the map type
+			if   args.distributed == 0: map_type = "map"
+			elif args.distributed >= 1: map_type = "dmap"
+			else: map_type = "map" if npix < 4e7 else "dmap"
 			# Allow variable replacement in the unknown arguments
 			unknown_expanded = [a.format(*otoks, i=i) for a in unknown]
 			# 4. Ok, we can finally set up the actual job. This differs whether we are

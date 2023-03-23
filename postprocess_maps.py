@@ -44,7 +44,7 @@ else:
 
 # Look for map files in the input directory
 datasets = {}
-for fname in glob.glob(args.idir + "/*map????.fits"):
+for fname in utils.glob(args.idir + "/*map????.fits"):
 	fname = os.path.basename(fname)
 	if args.exclude and re.search(args.exclude, fname): continue
 	if args.only    and not re.search(args.only, fname): continue

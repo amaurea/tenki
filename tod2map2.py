@@ -46,7 +46,7 @@ config.default("filter_scan_default",  "use=no,name=scan,value=2,daz=3,nt=10,nhw
 config.default("filter_add_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=+1,tmul=1,sky=yes,comps=012,jitter=0,detjitter=0,gainerr=0,deterr=0,polefferr=no,tconsterr=0", "Default parameters for map subtraction filter")
 config.default("filter_sub_default",  "use=no,name=add,value=1,sys=cel,type=auto,mul=-1,tmul=1,sky=yes,comps=012,jitter=0,detjitter=0,gainerr=0,deterr=0,polefferr=no,tconsterr=0", "Default parameters for map subtraction filter")
 config.default("filter_src_default",   "use=no,name=src,value=1,snr=5,sys=cel,mul=1,sky=yes", "Default parameters for point source subtraction filter")
-config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin,order=default", "Default parameters for map subtraction filter")
+config.default("filter_buddy_default",   "use=no,name=buddy,value=1,mul=1,type=auto,sys=cel,tmul=1,sky=yes,pertod=0,nstep=200,prec=bin,order=default,rcut=1,rapod=5", "Default parameters for map subtraction filter")
 config.default("filter_hwp_default",   "use=no,name=hwp,value=1", "Default parameters for hwp notch filter")
 config.default("filter_commonblock_default", "use=no,name=commonblock,value=1", "Default parameters for blockwise common mode filter")
 config.default("filter_addphase_default",  "use=no,name=addphase,value=1,mul=+1,tmul=1,sky=yes,tol=0.5", "Default parameters for phasemap subtraction filter")
@@ -702,6 +702,8 @@ for out_ind in range(nouter):
 			tmul  = float(param["tmul"])
 			pertod= int(param["pertod"])
 			nstep = int(param["nstep"])
+			rcut  = float(param["rcut"])*utils.arcmin
+			rapod = float(param["rapod"])*utils.arcmin
 			prec  = param["prec"]
 			if mode == 0: continue
 			# Two types of buddy subtraction: The one based on an input map,
@@ -713,7 +715,8 @@ for out_ind in range(nouter):
 			if param["type"] != "dmap":
 				m = enmap.read_map(fname).astype(dtype)
 				if not pertod:
-					filter = mapmaking.FilterBuddy(myscans, m, sys=sys, mul=-mul, tmul=tmul, pmat_order=pmat_order)
+					filter = mapmaking.FilterBuddy(myscans, m, sys=sys, mul=-mul, tmul=tmul,
+							pmat_order=pmat_order, rcut=rcut, rapod=rapod)
 				else:
 					1/0 # FIXME
 					m = enmap.zeros((args.ncomp,)+m.shape[-2:], m.wcs, dtype)
@@ -722,7 +725,8 @@ for out_ind in range(nouter):
 				# Warning: This only works if a dmap has already been initialized etc.
 				m = dmap.read_map(fname, bbox=mybbox, tshape=tshape, comm=comm).astype(dtype)
 				if not pertod:
-					filter = mapmaking.FilterBuddyDmap(myscans, mysubs, m, sys=sys, mul=-mul, tmul=tmul, pmat_order=pmat_order)
+					filter = mapmaking.FilterBuddyDmap(myscans, mysubs, m, sys=sys, mul=-mul, tmul=tmul,
+							pmat_order=pmat_order, rcut=rcut, rapod=rapod)
 				else:
 					raise NotImplementedError("FIXME: Implement per tod buddy subtraction with dmaps")
 		elif param["name"] == "src":

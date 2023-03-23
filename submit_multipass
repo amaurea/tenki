@@ -38,6 +38,7 @@ parser.add_argument(      "--minpass",type=int,   default=1)
 parser.add_argument(      "--downpat",type=str, default=None)
 parser.add_argument(      "--cgpat",  type=str, default="200")
 parser.add_argument(      "--distributed", type=int, default=-1)
+parser.add_argument(      "--account",type=str, default=None)
 args, unknown = parser.parse_known_args()
 from enlib import utils, config, enmap, colors
 
@@ -159,7 +160,7 @@ if args.queue:
 	queue  = get_queue(user)
 
 tag_prefix = "" if args.prefix is None else args.prefix + "_"
-tag_suffix = "" if args.prefix is None else "_" + args.suffix
+tag_suffix = "" if args.suffix is None else "_" + args.suffix
 order_str  = "" if args.order  is None else ",order=%s" % str(args.order)
 downpat    = None if args.downpat is None else [int(w) for w in args.downpat.split(",")]
 cgpat      = [int(w) for w in args.cgpat.split(",")]
@@ -280,7 +281,7 @@ for toks in utils.list_combination_iter(alts):
 			# Set up our slurm parameters
 			slurm_command  = "#SBATCH --nodes %d --ntasks-per-node=%d --cpus-per-task=%d --time=%s\n" % (nnode, npernode, nomp, args.time)
 			slurm_command += "#SBATCH --job-name %s\n" % otag
-			if account:
+			if account and account != "default":
 				slurm_command += "#SBATCH --account %s\n" % account
 			# and the dependency list. First our previous try
 			deps = []
@@ -303,7 +304,7 @@ cd "%(cdir)s"
 				jobid = int(subprocess.check_output(["sbatch","--parsable",runfile]))
 				print("%sSubmitted %6d %s%s" % (colors.lgreen, jobid, otag, colors.reset))
 			else:
-				print("%sWould have submitted %6d %s%s" % (colors.lgreen, jobid, otag, colors.reset))
+				print("%sWould have submitted %6d %s%s: %s" % (colors.lgreen, jobid, otag, colors.reset, batch.replace("\n",";")))
 				jobid += 1
 			prev_jobid = jobid
 			if args.print_scripts:

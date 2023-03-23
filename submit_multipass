@@ -246,7 +246,7 @@ for toks in utils.list_combination_iter(alts):
 			# standard filters itself. That also means that we know that the main maps we
 			# get out will be source-free, and that we must add srcs to get the src-full map
 			#map_command = """%(echo)sOMP_NUM_THREADS=4 mpirun -ppn 10 python %(tenki)s/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s --map_cg_nmax=%(nstep)s""" % {
-			map_command = """%(echo)ssrun python %(tenki)s/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s%(order_str)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s --map_cg_nmax=%(nstep)s""" % {
+			map_command = """%(echo)smyrun -npernode %(npernode)d -nomp %(nomp)d python %(tenki)s/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s%(order_str)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s --map_cg_nmax=%(nstep)s""" % {
 					"sky":args.sky, "map_type":map_type, "osel":osel, "odir":workdir, "otag":otag, "extra_args":" ".join(unknown_expanded), "nstep":nstep, "tenki":tenkidir, "patch":patch_file, "order_str":order_str, "echo": echo, "npernode":args.npernode, "nomp":args.nomp}
 			# Set up filters
 			if args.srcsub:

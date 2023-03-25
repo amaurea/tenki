@@ -18,11 +18,13 @@ from enlib import enmap, utils, retile, bunch, mpi
 comm = mpi.COMM_WORLD
 outputs = set(args.output.split(","))
 verbose = True
+dtype   = np.float32
 
 # Optional pixel window correction
 def apply_fourier(map, op, apod=10*utils.arcmin):
 	mask     = map.preflat[0] != 0
-	apod_map = enmap.apod_mask(mask, width=apod, edge=False)
+	apod_map = enmap.apod_mask(mask, width=apod, edge=False).astype(map.dtype)
+	del mask
 	fmap     = enmap.fft(map*apod_map)
 	del map
 	fmap     = op(fmap)
@@ -109,6 +111,7 @@ def read_map(ifile, slice=None):
 		if slice: map = eval("map"+slice)
 	else:
 		map = retile.read_monolithic(ifile, slice=slice, verbose=False)
+	map = map.astype(dtype, copy=False)
 	return map
 
 def copy_mono(ifile, ofile, slice=None, op=lambda x:x):

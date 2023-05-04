@@ -872,10 +872,15 @@ for out_ind in range(nouter):
 				signal.prior = mapmaking.PriorSrcSamp(signal, eps_core=prior_core, eps_edge=prior_edge, redge=edge_rad)
 		elif param["type"] in ["map","bmap","fmap","noiserect"]:
 			prec_signal = signal if param["type"] != "bmap" else signal.get_nobuddy()
+			# Optional mask that removes some pixels from the map degrees of freedom. Mask should be
+			# 1 in regions to remove and 0 in regions to keep (so the mask indicates bad areas)
+			if "mask" in param and param["mask"] != "none":
+				mask = enmap.read_map(param["mask"]) == 0
+			else: mask = None
 			if param["prec"] == "bin":
-				signal.precon = mapmaking.PreconMapBinned(prec_signal, myscans, weights)
+				signal.precon = mapmaking.PreconMapBinned(prec_signal, myscans, weights, mask=mask)
 			elif param["prec"] == "jacobi":
-				signal.precon = mapmaking.PreconMapBinned(prec_signal, myscans, weights, noise=False)
+				signal.precon = mapmaking.PreconMapBinned(prec_signal, myscans, weights, noise=False, mask=mask)
 			elif param["prec"] == "hit":
 				print("Warning: map and cut precon must have compatible units")
 				signal.precon = mapmaking.PreconMapHitcount(prec_signal, myscans)

@@ -95,7 +95,7 @@ for key in sorted(datasets.keys()):
 
 # Check if we follow the standard format
 onames = {}
-for key in datasets.keys():
+for key in list(datasets.keys()):
 	m = re.match(r"s\d\d_\w+_pa\d_f\d\d\d_(no)?hwp_(day|night|daynight)\b.*", key)
 	if not m:
 		if args.allow_nonstandard: onames[key] = key

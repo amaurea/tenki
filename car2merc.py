@@ -31,7 +31,8 @@ shape = imap.shape[:-2]+shape
 dtype = imap.dtype
 
 # Get rid of too high values, to avoid ringing
-imap = logify(imap, args.vmax)
+with bench.show("logify"):
+	imap = logify(imap, args.vmax)
 
 # Build a mask of exposed areas
 with bench.show("build mask"):
@@ -51,7 +52,8 @@ with bench.show("alm2map"):
 	omap  = curvedsky.alm2map_cyl(alms, omap)
 
 # Restore the map to linear scale
-omap = unlogify(omap, args.vmax)
+with bench.show("unlogify"):
+	omap = unlogify(omap, args.vmax)
 
 # Apply the mask
 with bench.show("apply mask"):

@@ -2,7 +2,8 @@ import argparse, sys
 parser = argparse.ArgumentParser()
 parser.add_argument("ifile")
 parser.add_argument("odir")
-parser.add_argument("-T", "--tsize", type=int, default=256)
+parser.add_argument("-T", "--tsize",        type=int, default=256)
+parser.add_argument("-E", "--output-empty", type=int, default=0)
 args = parser.parse_args()
 import numpy as np
 from pixell import enmap, utils, mpi
@@ -50,7 +51,8 @@ for i in range(nlevel):
 					tgeo = enmap.Geometry(shape, wcs)[ty*tsize:(ty+1)*tsize,tx*tsize:(tx+1)*tsize]
 					tile = enmap.zeros(*tgeo, dtype=dtype)
 					comm.Recv(tile, source=0, tag=oi)
-					enmap.write_map("%s/tile_%d_%d.fits" % (tdir, ny-1-ty, tx), tile)
+					if args.output_empty > 0 or np.any(tile != 0):
+						enmap.write_map("%s/tile_%d_%d.fits" % (tdir, ny-1-ty, tx), tile)
 			if comm.rank == 0:
 				sys.stderr.write("\r%2d %3d %3d" % (i, ty, tx))
 			oi += 1

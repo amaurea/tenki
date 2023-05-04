@@ -67,6 +67,7 @@ div = enmap.zeros((ncomp,nbin*ncomp)+shape[-2:], wcs, dtype)
 
 L.info("Processing %d scans" % len(ids))
 
+good_ids = []
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
 	# Setup the scan
@@ -130,11 +131,13 @@ for ind in range(comm.rank, len(ids), comm.size):
 		del one
 	L.debug("%s div" % id)
 	del scan, tod, pmap
+	good_ids.append(id)
 
 # Done processing tods. Reduce
 L.info("Reducing")
 rhs = utils.allreduce(rhs, comm)
 div = utils.allreduce(div, comm)
+good_ids = sorted(comm.allreduce(good_ids))
 if comm.rank == 0:
 	L.info("Solving")
 	# Reshape to sensible shape
@@ -149,4 +152,7 @@ if comm.rank == 0:
 	# Output results
 	enmap.write_map(prefix + "map.fits",  map)
 	enmap.write_map(prefix + "ivar.fits", div[:,0,0])
+	with open(prefix + "ids.txt", "w") as ofile:
+		for tod_id in good_ids:
+			ofile.write(tod_id + "\n")
 	L.info("Done")

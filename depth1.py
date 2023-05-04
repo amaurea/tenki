@@ -10,6 +10,9 @@ config.default("verbosity", 1, "Verbosity for output. Higher means more verbose.
 config.default("tod_window", 5.0, "Number of seconds to window the tod by on each end")
 config.default("eig_limit", 0.1, "Pixel condition number below which polarization is dropped to make total intensity more stable. Should be a high value for single-tod maps to avoid thin stripes with really high noise")
 config.default("map_sys", "cel", "Map coordinate system")
+# Use nearest neigbbor mapmaking, regardless of what's set in .enkirc. Can still be
+# overridden with command line arguments
+config.set("pmat_map_order", 0)
 
 parser = config.ArgumentParser()
 parser.add_argument("sel")

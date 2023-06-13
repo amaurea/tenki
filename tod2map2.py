@@ -738,7 +738,9 @@ for out_ind in range(nouter):
 				srcs = srcs[srcs.snr >= float(param["snr"])]
 			srcparam = pointsrcs.src2param(srcs)
 			srcparam = srcparam.astype(np.float64)
-			filter = mapmaking.FilterAddSrcs(myscans, srcparam, sys=param["sys"], mul=-float(param["mul"]))
+			mul      = -float(param["mul"]) # - since we're filtering them away
+			tmul     = float(param["tmul"])
+			filter = mapmaking.FilterAddSrcs(myscans, srcparam, sys=param["sys"], mul=mul, tmul=tmul)
 			src_filters.append(filter)
 		elif param["name"] == "beamsym":
 			if param["value"] == 0: continue

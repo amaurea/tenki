@@ -18,6 +18,6 @@ else:
 		if len(vals) > 1:
 			print(name)
 			for val in vals:
-				print("  " + val)
+				print("  " + str(val))
 		else:
 			print(name + "  " + str(vals[0]))

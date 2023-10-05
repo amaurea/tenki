@@ -11,6 +11,7 @@ parser.add_argument("-O", "--output",    type=str, default="map,ivar,sens,xlink,
 parser.add_argument("--exclude",         type=str, default=None)
 parser.add_argument("--only",            type=str, default=None)
 parser.add_argument("--repixwin",        type=str, default=None)
+parser.add_argument("--suffix",          type=str, default="")
 args = parser.parse_args()
 import numpy as np, glob, re, os, shutil, sys
 from enlib import enmap, utils, retile, bunch, mpi
@@ -213,7 +214,7 @@ for iname in sorted(datasets.keys()):
 	# Per split stuff
 	for si, sub in enumerate(d):
 		ipre = args.idir + "/" + sub.name + "_"
-		opre = obase + "_%dway_set%d_" % (len(d),si)
+		opre = obase + "_%dway_set%d_" % (len(d),si) + args.suffix
 		if "map"  in outputs:
 			schedule(coadd_mono, [ipre + "sky_map%04d.fits" % sub.it], [ipre + "sky_div.fits"], opre + "map.fits", opre + "ivar.fits", op=mapfix)
 		if "ivar" in outputs and "map" not in outputs:
@@ -227,8 +228,7 @@ for iname in sorted(datasets.keys()):
 		if "sens" in outputs:
 			schedule(copy_plain, ipre + "noise.txt", opre + "sens.txt")
 	# Coadds
-	opre = obase + "_%dway_coadd_" % len(d)
-	ofmt = obase + "_%dway" % len(d) + "_set%d_"
+	opre = obase + "_%dway_coadd_" % len(d) + args.suffix
 	if "totmap" in outputs:
 		imaps = [args.idir + "/" + sub.name + "_sky_map%04d.fits" % sub.it for sub in d]
 		idivs = [args.idir + "/" + sub.name + "_sky_div.fits" for sub in d]

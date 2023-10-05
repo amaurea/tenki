@@ -140,7 +140,7 @@ wobox    = utils.widen_box(obox)
 shape, wcs = enmap.geometry(pos=wobox[:,::-1], res=args.res*utils.arcmin, proj="cea")
 nphi = int(2*np.pi/(args.res*utils.arcmin))
 map_orig = enmap.rand_gauss((ncomp,)+shape, wcs).astype(dtype)
-print "map shape %s" % str(map_orig.shape)
+print("map shape %s" % str(map_orig.shape))
 
 pbox = np.array([[0,0],shape],dtype=int)
 # define a test tod
@@ -168,7 +168,7 @@ ipfun    = interpol.ip_ndimage
 if args.interpolator == "all":
 	ipnames = [
 			#"fast",
-			"std_bi_0","std_bi_1","std_bi_3"]
+			"cf_bi_0", "std_bi_0","std_bi_1","std_bi_3"]
 else:
 	ipnames = args.interpolator.split(",")
 pix = None
@@ -226,8 +226,9 @@ for dir in dirs:
 			elif iptoks[0] == "std":
 				pmet = {"bi":1,"gr":2}[iptoks[1]]
 				mmet = int(iptoks[2])
+				split= np.zeros(1,np.int32)
 				core.pmat_map_direct_grid(dir, tod.T, 1, map.T, 1, pmet, mmet, bore.T, hwp.T, det_pos.T, det_comps.T,
-					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
+					rbox.T, nbox, yvals.T, pbox.T, nphi, times, split)
 			elif iptoks[0] == "cf":
 				pmet = {"bi":1,"gr":2}[iptoks[1]]
 				mmet = int(iptoks[2])
@@ -240,5 +241,5 @@ for dir in dirs:
 			val = np.sum(tod**2)
 		else:
 			val = np.sum(map**2)
-		print "ip %-14s dir %2d tb %6.4f ok %d size %5.3f M acc %5.2f %5.2f t %5.3f: %5.3f %5.3f %5.3f %5.3f v %13.7e %5.3f" % ((
-				ipname, dir, tbuild, ok, np.product(nbox)*1e-6, err, err2, tuse) + tuple(times[1:]) + (val,tpre))
+		print("ip %-14s dir %2d tb %6.4f ok %d size %5.3f M acc %5.2f %5.2f t %5.3f: %5.3f %5.3f %5.3f %5.3f v %13.7e %5.3f" % ((
+				ipname, dir, tbuild, ok, np.product(nbox)*1e-6, err, err2, tuse) + tuple(times[1:]) + (val,tpre)))

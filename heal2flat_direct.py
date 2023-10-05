@@ -39,7 +39,7 @@ nblock = (omap.shape[-2]+bsize-1)//bsize
 for bi in range(nblock):
 	r1 = bi*bsize
 	r2 = (bi+1)*bsize
-	print "Processing row %5d/%d" % (r1, omap.shape[-2])
+	print("Processing row %5d/%d" % (r1, omap.shape[-2]))
 	
 	# Output map coordinates
 	osub = omap[...,r1:r2,:]
@@ -65,7 +65,7 @@ for bi in range(nblock):
 	if args.rot and ncomp==3:
 		osub[1:3] = enmap.rotate_pol(osub[1:3], psi)
 
-print "Writing"
+print("Writing")
 if args.scalar: omap = omap.preflat[0]
 enmap.write_map(args.ofile, omap)
-print "Done"
+print("Done")

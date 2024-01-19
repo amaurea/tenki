@@ -46,6 +46,8 @@ def calibrate_ivar(maps, ivars, rmask=2*utils.arcmin, bsize=2):
 	oivars = ivars / np.maximum(correction, np.max(correction)*1e-3)
 	return oivars
 def measure_white_noise(diffmaps, lknee=5000, alpha=-10, bsize=2):
+	# Now that I'm doing phase differences before calculating
+	# the noise, this filtering is unneccessary (but not harmful)
 	fmap = enmap.fft(diffmaps)
 	l    = fmap.modlmap()+0.5
 	F    = (1+(l/lknee)**alpha)**-1
@@ -104,7 +106,7 @@ kappa = np.maximum(kappa, np.max(kappa)*1e-3)
 flux  = rho/kappa
 dflux = kappa**-0.5
 enmap.write_map(prefix + "flux.fits", flux)
-enmap.write_map(prefix + "kappa.fits", dflux)
+enmap.write_map(prefix + "kappa.fits", kappa)
 enmap.write_map(prefix + "snr.fits", flux/dflux)
 # Read off values at center
 flux_vals  = flux.at([0,0]).T # [ncomp,nt]

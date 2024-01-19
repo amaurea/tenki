@@ -11,6 +11,7 @@ parser.add_argument("-m", "--mode",  type=str,   default="crosslink", help="plai
 parser.add_argument("-w", "--weight",type=str,   default="plain")
 parser.add_argument("--opt-mode",    type=str,   default="linear")
 parser.add_argument("--constraint",  type=str,   default=None)
+parser.add_argument(      "--scanpat-tol", type=float, default=1)
 args = parser.parse_args()
 import numpy as np, sys, glob, re, os
 from enlib import utils
@@ -23,6 +24,9 @@ ids    = filedb.scans[args.sel]
 db     = filedb.scans.select(ids)
 ntod   = len(db)
 nsplit = args.nsplit
+if len(ids) < nsplit:
+	print("%d tods is too few for %d splits" % (ntod, nsplit))
+	sys.exit(1)
 nopt   = args.nopt if nsplit > 1 else 0
 optimize_subsets = (args.mode == "crosslink" or args.mode=="scanpat")
 detdir = args.odir + "/details"
@@ -41,7 +45,7 @@ if args.mode == "crosslink":
 elif args.mode == "scanpat":
 	# Treat each scanning pattern as a different array
 	patterns = np.array([db.data["baz"],db.data["bel"],db.data["waz"]]).T
-	pids     = utils.label_unique(patterns, axes=(1,), atol=1.0)
+	pids     = utils.label_unique(patterns, axes=(1,), atol=args.scanpat_tol)
 	npat     = np.max(pids)+1
 	for pid in range(npat):
 		anames[pids==pid] = np.char.add(anames[pids==pid], "p%d" % pid)
@@ -200,7 +204,7 @@ sys.stderr.write("\n")
 
 # Build a mask for the region of interest per array
 mask           = enmap.zeros((narray,)+shape, wcs, bool)
-nblock_per_pix = enmap.zeros((narray,)+shape, wcs, np.int)
+nblock_per_pix = enmap.zeros((narray,)+shape, wcs, int)
 nblock_lim     = np.zeros(narray)
 for ai in range(narray):
 	ahits   = hits[:,ai]

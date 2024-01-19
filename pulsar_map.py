@@ -17,6 +17,9 @@ parser.add_argument(      "--fknee",       type=float, default=3)
 parser.add_argument(      "--alpha",       type=float, default=-10)
 parser.add_argument("-R", "--rad",         type=float, default=0.2)
 parser.add_argument("-F", "--filter-type", type=str,   default="planet")
+parser.add_argument("-I", "--inject",      type=str,   default=None)
+parser.add_argument("-D", "--dump-tods",   action="store_true")
+parser.add_argument(      "--dump-phase",  action="store_true")
 args = parser.parse_args()
 
 def lowpass_tod(tod, srate, fknee=3, alpha=-10):
@@ -52,6 +55,11 @@ try: coords = np.array(known_pulsars[args.name_or_coords])*utils.degree
 except KeyError: coords = utils.parse_floats(args.name_or_coords)*utils.degree
 # Map coordinate system centered on pulsar
 sys = "equ:%.6f_%.6f/0_0" % (coords[0]/utils.degree,coords[1]/utils.degree)
+
+if args.inject:
+	# This map must be compatible with our output map for now.
+	# could be relaxes with a separate bini and pmap for the sim
+	inject_map = enmap.read_map(args.inject)
 
 utils.mkdir(args.odir)
 prefix = args.odir + "/"
@@ -99,6 +107,12 @@ for ind in range(comm.rank, len(ids), comm.size):
 	tod  = scan.get_samples(verbose=False)
 	tod  = utils.deslope(tod)
 	tod  = tod.astype(dtype)
+	if args.inject:
+		pmap.forward(tod, inject_map)
+	if args.dump_tods:
+		np.save(args.odir + "/tod_%s.npy" % id.replace(":","_"), tod)
+	if args.dump_phase:
+		np.save(args.odir + "/phase_%s.npy" % id.replace(".","_"), np.array([ctime,phase,bini]))
 	L.debug("%s tod" % id)
 	if args.filter_type == "planet":
 		# Filter from planet mapmaker. Gets rid of correlated noise

@@ -33,7 +33,7 @@ parser.add_argument("--slice", type=str, default=None)
 parser.add_argument("--box",   type=str, default=None)
 parser.add_argument("-c", "--cont",   action="store_true")
 parser.add_argument("-t", "--tshape",  type=str, default="500,1000")
-parser.add_argument("-C", "--comps",   type=str, default="TQU")
+parser.add_argument("-C", "--comps",   type=str, default="auto")
 parser.add_argument(      "--sim-cat", type=str, default=None)
 parser.add_argument(      "--sim-noise", action="store_true")
 parser.add_argument("-m", "--mask",    type=str, default=None)
@@ -42,6 +42,7 @@ args = parser.parse_args()
 import numpy as np, time
 from pixell import enmap, utils, bunch, analysis, uharm, powspec, pointsrcs, curvedsky, mpi
 from enlib import array_ops, sauron
+from enlib import mapdata_simple as mapdata
 from scipy import ndimage
 
 if args.mode == "find" or args.mode == "fit":
@@ -56,10 +57,17 @@ if args.mode == "find" or args.mode == "fit":
 	sim_cat= pointsrcs.read_sauron(args.sim_cat) if args.sim_cat else None
 	icat   = pointsrcs.read_sauron(args.icat)    if args.mode == "fit" else None
 
+	# Get map dimensions
+	shape, wcs = enmap.read_map_geometry(mapdata.read_info(args.ifiles[0]).map)
+	if args.comps == "auto":
+		if len(shape) == 2: comps = "T"
+		else: comps = "TQU"[:shape[-3]]
+	else: comps = args.comps
+
 	if args.tiling == "tiled":
-		sauron.search_maps_tiled(args.ifiles, args.odir, mode=args.mode, icat=icat, tshape=tshape, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, cont=args.cont, comm=comm, comps=args.comps, sim_cat=sim_cat, sim_noise=args.sim_noise, mask=args.mask)
+		sauron.search_maps_tiled(args.ifiles, args.odir, mode=args.mode, icat=icat, tshape=tshape, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, cont=args.cont, comm=comm, comps=comps, sim_cat=sim_cat, sim_noise=args.sim_noise, mask=args.mask)
 	elif args.tiling == "single":
-		res = sauron.search_maps(args.ifiles, mode=args.mode, icat=icat, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, comps=args.comps, sim_cat=sim_cat, sim_noise=args.sim_noise, mask=args.mask)
+		res = sauron.search_maps(args.ifiles, mode=args.mode, icat=icat, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, comps=comps, sim_cat=sim_cat, sim_noise=args.sim_noise, mask=args.mask)
 		sauron.write_results(args.odir, res)
 	else:
 		print("Unrecognized tiling '%s'" % args.tiling)

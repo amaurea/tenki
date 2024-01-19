@@ -45,7 +45,7 @@ with bench.show("build mask"):
 
 # Transform
 with bench.show("map2alm"):
-	alms  = curvedsky.map2alm(imap, lmax=args.lmax, tweak=True)
+	alms  = curvedsky.map2alm(imap, lmax=args.lmax)
 del imap
 omap  = enmap.zeros(shape, wcs, dtype)
 with bench.show("alm2map"):

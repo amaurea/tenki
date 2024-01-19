@@ -1057,6 +1057,7 @@ if mode == "build":
 	config.default("verbosity", 1, "Verbosity for output. Higher means more verbose. 0 outputs only errors etc. 1 outputs INFO-level and 2 outputs DEBUG-level messages.")
 	config.default("tod_window", 5.0, "Number of samples to window the tod by on each end")
 	config.default("eig_limit", 0.1, "Pixel condition number below which polarization is dropped to make total intensity more stable. Should be a high value for single-tod maps to avoid thin stripes with really high noise")
+	config.set("pmat_map_order", 0)
 
 	# Not sure why linear gapfilling performs so much better here. With the other
 	# one I got prominent blotches in cut regions.
@@ -1099,7 +1100,7 @@ if mode == "build":
 	# These sources will be used for all arrays and frequencies, with the assumption that all have the
 	# same amplitude. May improve this later, but that's what it is for now.
 	srcs     = pointsrcs.read(args.srcs)
-	spos_raw = np.array([srcs.ra, srcs.dec])*utils.degree
+	spos_raw = np.array([srcs.ra, srcs.dec]) # *utils.degree
 
 	# Set up our fluxes. This is a bit inelegant. But it works.
 	if args.freq_cats:

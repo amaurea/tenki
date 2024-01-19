@@ -23,10 +23,9 @@ from __future__ import division, print_function
 import numpy as np, time, os, sys
 from scipy import integrate
 from enlib import utils
-with utils.nowarn(): import h5py
 from enlib import mpi, errors, fft, mapmaking, config, pointsrcs
-from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut, gapfill, wcsutils, array_ops
-from enact import filedb, actdata, actscan, nmat_measure
+from enlib import pmat, coordinates, enmap, bench, bunch, nmat, sampcut
+from enact import filedb, actdata, actscan
 
 config.set("downsample", 1, "Amount to downsample tod by")
 config.set("gapfill", "linear", "Gapfiller to use. Can be 'linear' or 'joneig'")
@@ -40,7 +39,6 @@ parser.add_argument("odir")
 parser.add_argument("-s", "--srcs",      type=str,   default=None)
 parser.add_argument("-v", "--verbose",   action="count", default=0)
 parser.add_argument("-q", "--quiet",     action="count", default=0)
-parser.add_argument("-H", "--highpass",  type=float, default=None)
 parser.add_argument(      "--minamp",    type=float, default=None)
 parser.add_argument(      "--minsn",     type=float, default=1)
 parser.add_argument(      "--sys",       type=str,   default="cel")
@@ -64,69 +62,71 @@ bounds  = db.data["bounds"]
 utils.mkdir(args.odir)
 
 srcdata  = read_srcs(args.catalog)
-highpass = [args.highpass, 8] if args.highpass else None
 
-# See src_tod_fit for the cuts logic
+def edges2ranges(edges):
+	return np.array([edges[:-1],edges[1:]]).T
 
-class NmatTot:
-	def __init__(self, scan, model=None, window=None, filter=None):
-		model  = config.get("noise_model", model)
-		window = config.get("tod_window", window)*scan.srate
-		nmat.apply_window(scan.tod, window)
-		self.nmat = nmat_measure.NmatBuildDelayed(model, cut=scan.cut_noiseest, spikes=scan.spikes)
-		self.nmat = self.nmat.update(scan.tod, scan.srate)
-		nmat.apply_window(scan.tod, window, inverse=True)
-		self.model, self.window = model, window
-		self.ivar = self.nmat.ivar
-		self.cut  = scan.cut
-		# Optional extra filter
-		if filter:
-			freq = fft.rfftfreq(scan.nsamp, 1/scan.srate)
-			fknee, alpha = filter
-			with utils.nowarn():
-				self.filter = (1 + (freq/fknee)**-alpha)**-1
-		else: self.filter = None
-	def apply(self, tod):
-		nmat.apply_window(tod, self.window)
-		ft = fft.rfft(tod)
-		self.nmat.apply_ft(ft, tod.shape[-1], tod.dtype)
-		if self.filter is not None: ft *= self.filter
-		fft.irfft(ft, tod, flags=['FFTW_ESTIMATE','FFTW_DESTROY_INPUT'])
-		nmat.apply_window(tod, self.window)
-		return tod
-	def white(self, tod):
-		nmat.apply_window(tod, self.window)
-		self.nmat.white(tod)
-		nmat.apply_window(tod, self.window)
+def find_ranges(mask):
+	"""Given a mask, return [nrange,{from,to}] descripring
+	the index ranges over which the mask is true"""
+	mask    = np.concatenate([[False],mask,[False]])
+	starts  = np.where(~mask[:-1]& mask[1:])[0]
+	ends    = np.where( mask[:-1]&~mask[1:])[0]
+	return np.array([starts, ends]).T
 
-class PmatTot:
-	def __init__(self, scan, srcpos, ndir=1, perdet=False, sys="cel"):
+def find_swipes(az, down=10):
+	"""Return the start and end sample for each left/right scan.
+	Assumes a regular scanning pattern"""
+	amin, amax = utils.minmax(az)
+	amid, aamp = 0.5*(amax+amin), 0.5*(amax-amin)
+	# Find the max and min of each above-mean and below-mean area.
+	# These should be the high and low turnaround points respectively
+	rhigh = find_ranges(az>amid+aamp*0.1)
+	rlow  = find_ranges(az<amid-aamp*0.1)
+	ihigh = np.array([r1+np.argmax(az[r1:r2]) for r1,r2 in rhigh])
+	ilow  = np.array([r1+np.argmin(az[r1:r2]) for r1,r2 in rlow ])
+	# This only works for a regular scanning pattern
+	edges = np.concatenate([[0],np.sort(np.concatenate([ihigh,ilow])),[len(az)]])
+	return edges2ranges(edges)
+
+class PmatPtsrcPerpass:
+	def __init__(self, scan, srcpos, sys="cel"):
+		# First find the sample ranges for each swipe
+		self.swipes = find_swipes(scan.boresight[:,1]) # [nswipe,{from,to}]
+		nswipe = len(self.swipes)
 		# Build source parameter struct for PmatPtsrc
-		self.params = np.zeros([srcpos.shape[-1],ndir,scan.ndet if perdet else 1,8],np.float64)
-		self.params[:,:,:,:2] = srcpos[::-1,None,None,:].T
-		self.params[:,:,:,5:7] = 1
-		self.psrc = pmat.PmatPtsrc(scan, self.params, sys=sys)
+		self.params = np.zeros([nswipe,srcpos.shape[-1],8],np.float64)
+		self.params[:,:,:2] = srcpos[::-1,:].T
+		self.params[:,:,5:7] = 1
+		self.psrc = pmat.PmatPtsrc(scan, self.params[0], sys=sys)
 		self.pcut = pmat.PmatCut(scan)
-		# Extract basic offset. Warning: referring to scan.d is fragile, since
-		# scan.d is not updated when scan is sliced
-		self.off0 = scan.d.point_correction
-		self.off  = self.off0*0
-		self.el   = np.mean(scan.boresight[::100,2])
-		self.point_template = scan.d.point_template
 		self.cut = scan.cut
-	def set_offset(self, off):
-		self.off = off*1
-		self.psrc.scan.offsets[:,1:] = actdata.offset_to_dazel(self.point_template + off + self.off0, [0,self.el])
 	def forward(self, tod, amps, pmul=1):
-		# Amps should be [nsrc,ndir,ndet|1,npol]
+		# Amps should be [nswipe,nsrc,nstokes]
 		params = self.params.copy()
-		params[...,2:2+amps.shape[-1]]   = amps
-		self.psrc.forward(tod, params, pmul=pmul)
+		params[:,:,2:2+amps.shape[-1]] = amps
+		bore = self.psrc.scan.boresight
+		for si, (r1,r2) in enumerate(self.swipes):
+			# This is not efficient, but lets us avoid modifying the fortran core.
+			# It's also super-hacky
+			rbore= np.ascontiguousarray(bore[r1:r2])
+			rtod = np.ascontiguousarray(tod [:,r1:r2])
+			self.psrc.scan.boresight = rbore
+			self.psrc.forward(rtod, params[si], pmul=pmul)
+			tod[:,r1:r2] = rtod
+		self.psrc.scan.boresight = bore
 		sampcut.gapfill_linear(self.cut, tod, inplace=True)
 	def backward(self, tod, amps=None, pmul=1, ncomp=3):
 		params = self.params.copy()
-		tod = sampcut.gapfill_linear(self.cut, tod, inplace=False, transpose=True)
-		self.psrc.backward(tod, params, pmul=pmul)
+		tod  = sampcut.gapfill_linear(self.cut, tod, inplace=False, transpose=True)
+		bore = self.psrc.scan.boresight
+		for si, (r1,r2) in enumerate(self.swipes):
+			# This is not efficient, but lets us avoid modifying the fortran core
+			rbore= np.ascontiguousarray(bore[r1:r2])
+			rtod = np.ascontiguousarray(tod [:,r1:r2])
+			self.psrc.scan.boresight = rbore
+			self.psrc.backward(rtod, params[si], pmul=pmul)
+		self.psrc.scan.boresight = bore
 		if amps is None: amps = params[...,2:2+ncomp]
 		else: amps[:] = params[...,2:2+amps.shape[-1]]
 		return amps
@@ -207,11 +207,15 @@ base_sids = list(base_sids)
 if args.sub:
 	background = enmap.read_map(args.sub).astype(dtype)
 
-# Iterate over groups
+# We will collect the mpi output into these, which we will reduce in the end
+olines = []
+otimes = []
+
+# Iterate over tods in parallel
 for ind in range(comm.rank, len(ids), comm.size):
 	id    = ids[ind]
 	ofile = args.odir + "/flux_%s.hdf" % id.replace(":","_")
-
+	# Figure out which point sources are relevant for this tod
 	sids = get_sids_in_tod(id, srcpos[:,base_sids], bounds, ind, base_sids, src_sys=sys)
 	if len(sids) == 0:
 		print("%s has 0 srcs: skipping" % id)
@@ -246,17 +250,19 @@ for ind in range(comm.rank, len(ids), comm.size):
 		Pmap.forward(scan.tod, background, tmul=-1)
 
 	# Build the noise model
-	N = NmatTot(scan, model="uncorr", window=2.0, filter=highpass)
-	P = PmatTot(scan, srcpos[:,sids], perdet=True, sys=sys)
+	N = scan.noise.update(scan.tod, scan.srate)
+	# Build a pointsource pointing matrix that measures each swipe of
+	# the telescope over the sky separately
+	P = PmatPtsrcPerpass(scan, srcpos[:,sids], sys=sys)
 
 	# rhs
 	N.apply(scan.tod)
-	rhs = P.backward(scan.tod, ncomp=1)
+	rhs = P.backward(scan.tod, ncomp=3)
 	# div
 	scan.tod[:] = 0
 	P.forward(scan.tod, rhs*0+1)
 	N.apply(scan.tod)
-	div = P.backward(scan.tod, ncomp=1)
+	div = P.backward(scan.tod, ncomp=3)
 
 	# Use beam to turn amp into flux. We want the flux in mJy, so divide by 1e3
 	beam_area = get_beam_area(scan.beam)
@@ -273,7 +279,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 		dflux = div**-0.5
 	del rhs, div
 
-	# Get the mean time for each source-detector. This will be nan for unhit sources
+	# Get the mean time for swipe. This will be nan for unhit sources
 	scan.tod[:] = scan.boresight[None,:,0]
 	N.white(scan.tod)
 	trhs = P.backward(scan.tod, ncomp=1)
@@ -294,28 +300,34 @@ for ind in range(comm.rank, len(ids), comm.size):
 		t0 = utils.mjd2ctime(scan.mjd0)
 	t += t0
 
-	# Get rid of nans to make future calculations easier
-	with utils.nowarn():
-		bad = ~np.isfinite(flux) | ~np.isfinite(dflux) | ~(dflux > 0) | ~(hits > 0)
-	flux[bad] = t[bad] = hits[bad] = tdiv[bad] = 0
-	dflux[bad] = np.inf
+	# At this point we have flux, dflux [nswipe,nsrc,nstokes] and t[nswipe,nsrc]
+	# Output to terminal and work file, skipping unhit sources
+	nswipe = len(flux)
+	for swi in range(nswipe):
+		for si in range(nsrc):
+			# Skip entries where we don't have a well-defined time or flux
+			good = True
+			for a in [t, trms, flux, dflux]:
+				good = good and np.isfinite(a[swi,si,0])
+			if not good: continue
+			msg = "%13.2f %4.2f %4d %8.2f %7.2f %8.2f %7.2f %8.2f %7.2f %s" % (
+					t[swi,si,0], trms[swi,si,0],
+					sids[si],
+					flux[swi,si,0], dflux[swi,si,0],
+					flux[swi,si,1], dflux[swi,si,1],
+					flux[swi,si,2], dflux[swi,si,2],
+					id,
+				)
+			print(msg)
+			olines.append(msg)
+			otimes.append(t[swi,si,0])
 
-	# Cut any sources that aren't hit by anything, and also get rid of useless indices
-	good = np.any(np.isfinite(dflux), (1,2,3))
-	sids = np.array(sids)[good]
-	flux, dflux, t, hits, trms, tdiv = [a[good,0,:,0] for a in [flux, dflux, t, hits, trms, tdiv]]
-
-	# Ok, we have everything we need. Output it.
-	with h5py.File(ofile, "w") as hfile:
-		hfile["id"]    = id.encode()
-		hfile["sids"]  = sids
-		hfile["dets"]  = np.char.encode(scan.dets)
-		hfile["flux"]  = flux
-		hfile["dflux"] = dflux
-		hfile["t"]     = t
-		hfile["trms"]  = trms
-		hfile["hits"]  = hits
-		hfile["tdiv"]  = tdiv
-		hfile["offs"]  = scan.d.point_template
-
-	del scan, P, N
+# Reduce
+otimes = utils.allgatherv(otimes, comm)
+olines = utils.allgatherv(olines, comm)
+order  = np.argsort(otimes)
+olines = olines[order]
+if comm.rank == 0:
+	with open(args.odir + "/lightcurves.txt", "w") as ofile:
+		for oline in olines:
+			ofile.write(oline + "\n")

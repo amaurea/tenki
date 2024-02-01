@@ -20,6 +20,8 @@ parser.add_argument("-F", "--filter-type", type=str,   default="planet")
 parser.add_argument("-I", "--inject",      type=str,   default=None)
 parser.add_argument("-D", "--dump-tods",   action="store_true")
 parser.add_argument(      "--dump-phase",  action="store_true")
+parser.add_argument(      "--dscale",      type=float, default=1)
+parser.add_argument(      "--weight",      type=str,   default="ivar")
 args = parser.parse_args()
 
 def lowpass_tod(tod, srate, fknee=3, alpha=-10):
@@ -107,6 +109,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 	tod  = scan.get_samples(verbose=False)
 	tod  = utils.deslope(tod)
 	tod  = tod.astype(dtype)
+	if args.dscale != 1:
+		tod *= args.dscale
 	if args.inject:
 		pmap.forward(tod, inject_map)
 	if args.dump_tods:
@@ -118,17 +122,24 @@ for ind in range(comm.rank, len(ids), comm.size):
 		# Filter from planet mapmaker. Gets rid of correlated noise
 		# without biasing small central region.
 		planet_filter(scan, coords, tod, R=args.rad*utils.degree, fknee=args.fknee, alpha=args.alpha)
-	else:
+	elif args.filter_type == "oof":
 		# Lowpass filter. This won't affect our signal much since we're
 		# looking for a 30 Hz signal
 		freq  = fft.rfftfreq(scan.nsamp, 1/scan.srate)
 		ftod  = fft.rfft(tod)
 		ftod /= 1 + (np.maximum(freq,freq[1]/2)/args.fknee)**args.alpha
 		fft.irfft(ftod, tod, normalize=True)
+	elif args.filter_type == "none":
+		pass
+	else:
+		raise ValueError("Unknown filter type '%s'" % str(args.filter_type))
 	L.debug("%s filtered" % id)
-	# Estimate noise per detector. Should be white noise by now. Using median
-	# of means to be robust to bright signal
-	det_ivar = np.median(utils.block_reduce(tod**2, 100, inclusive=False),-1)**-1
+	if args.weight == "ivar":
+		# Estimate noise per detector. Should be white noise by now. Using median
+		# of means to be robust to bright signal
+		det_ivar = np.median(utils.block_reduce(tod**2, 100, inclusive=False),-1)**-1
+	else:
+		det_ivar = np.ones(tod.shape[0], tod.dtype)
 	# Update RHS
 	sampcut.gapfill_const(scan.cut, tod, 0, inplace=True)
 	tod *= det_ivar[:,None]

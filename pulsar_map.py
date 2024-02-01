@@ -18,8 +18,9 @@ parser.add_argument(      "--alpha",       type=float, default=-10)
 parser.add_argument("-R", "--rad",         type=float, default=0.2)
 parser.add_argument("-F", "--filter-type", type=str,   default="planet")
 parser.add_argument("-I", "--inject",      type=str,   default=None)
-parser.add_argument("-D", "--dump-tods",   action="store_true")
-parser.add_argument(      "--dump-phase",  action="store_true")
+parser.add_argument("-D", "--dump-tods",   type=str,   default=None)
+parser.add_argument("-L", "--load-tods",   type=str,   default=None)
+parser.add_argument(      "--dump-phase",  type=str,   default=None)
 args = parser.parse_args()
 
 def lowpass_tod(tod, srate, fknee=3, alpha=-10):
@@ -110,9 +111,12 @@ for ind in range(comm.rank, len(ids), comm.size):
 	if args.inject:
 		pmap.forward(tod, inject_map)
 	if args.dump_tods:
-		np.save(args.odir + "/tod_%s.npy" % id.replace(":","_"), tod)
+		np.save(args.dump_tods + "/tod_%s.npy" % id.replace(":","_"), tod)
 	if args.dump_phase:
-		np.save(args.odir + "/phase_%s.npy" % id.replace(".","_"), np.array([ctime,phase,bini]))
+		np.save(args.dump_phase + "/phase_%s.npy" % id.replace(".","_"), np.array([ctime,phase,bini]))
+	if args.load_tods:
+		before = tod.copy()
+		tod[:] = np.load(args.load_tods + "/tod_%s.npy" % id.replace(":","_"))
 	L.debug("%s tod" % id)
 	if args.filter_type == "planet":
 		# Filter from planet mapmaker. Gets rid of correlated noise

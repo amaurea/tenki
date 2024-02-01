@@ -34,9 +34,10 @@ R    = args.dist * utils.degree
 csize= 100
 
 dtype= np.float32
-area = enmap.read_map(filedb.get_patch_path(args.area)).astype(dtype)
+shape, wcs = enmap.read_map_geometry(filedb.get_patch_path(args.area))
 ncomp= 3
-shape= area.shape[-2:]
+shape= shape[-2:]
+area = enmap.zeros((ncomp,)+shape, wcs, dtype)
 model_fknee = 10
 model_alpha = 10
 sys = "hor:"+args.planet
@@ -49,10 +50,7 @@ else: dbox = None
 
 if args.sim:
 	sim_ids = filedb.scans[args.sim][:len(ids)]
-	if area.ndim == 2:
-		tmp = enmap.zeros((ncomp,)+shape, area.wcs, dtype)
-		tmp[0] = area
-		area = tmp
+	area    = enmap.read_map(args.area).astype(dytpe)
 
 def smooth(tod, srate):
 	ft   = fft.rfft(tod)
@@ -151,8 +149,8 @@ for ind in range(comm.rank, len(ids), comm.size):
 	with bench.show("pmat"):
 		pmap = pmat.PmatMap(scan, area, sys=sys)
 		pcut = pmat.PmatCut(scan)
-		rhs  = enmap.zeros((ncomp,)+shape, area.wcs, dtype)
-		div  = enmap.zeros((ncomp,ncomp)+shape, area.wcs, dtype)
+		rhs  = enmap.zeros((ncomp,)+shape, wcs, dtype)
+		div  = enmap.zeros((ncomp,ncomp)+shape, wcs, dtype)
 		junk = np.zeros(pcut.njunk, dtype)
 	# Generate planet cut
 	with bench.show("planet cut"):

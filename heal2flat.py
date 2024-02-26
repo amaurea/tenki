@@ -1,5 +1,5 @@
 import numpy as np, argparse, os, healpy
-from enlib import sharp, utils, enmap, curvedsky, log, coordinates
+from enlib import utils, enmap, curvedsky, log, coordinates
 parser = argparse.ArgumentParser()
 parser.add_argument("ihealmap")
 parser.add_argument("templates", nargs="+")
@@ -41,17 +41,9 @@ if args.unit != 1: m /= args.unit
 L.debug("Preparing SHT")
 nside = healpy.npix2nside(m.shape[1])
 lmax  = args.lmax or 3*nside
-minfo = sharp.map_info_healpix(nside)
-ainfo = sharp.alm_info(lmax)
-sht   = sharp.sht(minfo, ainfo)
-alm   = np.zeros((ncomp,ainfo.nelem), dtype=ctype)
 # Perform the actual transform
-L.debug("T -> alm")
-print m.dtype, alm.dtype
-sht.map2alm(m[0], alm[0])
-if ncomp == 3:
-	L.debug("P -> alm")
-	sht.map2alm(m[1:3],alm[1:3], spin=2)
+L.debug("map -> alm")
+alm = healpy.map2alm(m, lmax=lmax)
 del m
 
 # Project down on each template

@@ -168,7 +168,7 @@ ipfun    = interpol.ip_ndimage
 if args.interpolator == "all":
 	ipnames = [
 			#"fast",
-			"std_bi_0","std_bi_1","std_bi_3"]
+			"cf_bi_0", "std_bi_0","std_bi_1","std_bi_3"]
 else:
 	ipnames = args.interpolator.split(",")
 pix = None
@@ -176,7 +176,7 @@ pix = None
 for dir in dirs:
 	for ipname in ipnames:
 		# Precompute pointing
-		if ipname.split("_")[0] in ["std"]:
+		if ipname.split("_")[0] in ["std","cf"]:
 			t1 = time.time()
 			corners = utils.box2corners(wibox).T
 			ocorners = transfun(corners)
@@ -229,6 +229,11 @@ for dir in dirs:
 				split= np.zeros(1,np.int32)
 				core.pmat_map_direct_grid(dir, tod.T, 1, map.T, 1, pmet, mmet, bore.T, hwp.T, det_pos.T, det_comps.T,
 					rbox.T, nbox, yvals.T, pbox.T, nphi, times, split)
+			elif iptoks[0] == "cf":
+				pmet = {"bi":1,"gr":2}[iptoks[1]]
+				mmet = int(iptoks[2])
+				core.pmat_map_direct_grid_cf(dir, tod.T, 1, map.T, 1, pmet, mmet, bore.T, hwp.T, det_pos.T, det_comps.T,
+					rbox.T, nbox, yvals.T, pbox.T, nphi, times)
 		t2 = time.time()
 		tuse = (t2-t1)/args.ntime
 		times /= args.ntime

@@ -158,7 +158,7 @@ with open(args.ofile, "w") as ofile:
 			sn = solve(np.sum(data[:,:,0],1), np.sum(data[:,:,2],1)**0.5)
 			rest_inds -= set(np.where(sn < args.minsn)[0])
 		rest_inds = sorted(list(rest_inds))
-		print(rest_inds)
+		#print(rest_inds)
 		#rest_inds = np.array(sorted(list(set(np.arange(nsrc))-set(targ_inds))))
 		ntarg, nrest = len(targ_inds), len(rest_inds)
 		frhs, trhs, ivar = np.moveaxis(data,2,0)

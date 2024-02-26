@@ -11,7 +11,7 @@ if len(sys.argv) < 2:
 mode = sys.argv[1]
 
 parser = argparse.ArgumentParser(description=help_general)
-parser.add_argument("mode", choices=["find","fit"])
+parser.add_argument("mode", choices=["find","fit","recat"])
 if mode == "find":
 	parser.add_argument("ifiles", nargs="+", help="The mapdata files to analyse, one for each frequency")
 	parser.add_argument("odir", help="The directory to write the output to. Will be created if necessary")
@@ -19,6 +19,9 @@ elif mode == "fit":
 	parser.add_argument("icat", help="The input point catalog for flux fitting. Must have the same format as what 'find' would produce.")
 	parser.add_argument("ifiles", nargs="+", help="The mapdata files to analyse, one for each frequency")
 	parser.add_argument("odir", help="The directory to write the output to. Will be created if necessary")
+elif mode == "recat":
+	parser.add_argument("icat")
+	parser.add_argument("ocat")
 else: pass
 parser.add_argument("--snr1",  type=float, default=8)
 parser.add_argument("--snr2",  type=float, default=4)
@@ -41,22 +44,27 @@ from pixell import enmap, utils, bunch, analysis, uharm, powspec, pointsrcs, cur
 from enlib import array_ops, sauron
 from scipy import ndimage
 
-utils.mkdir(args.odir)
-comm = mpi.COMM_WORLD
-tshape= np.zeros(2,int)+utils.parse_ints(args.tshape)
+if args.mode == "find" or args.mode == "fit":
+	utils.mkdir(args.odir)
+	comm = mpi.COMM_WORLD
+	tshape= np.zeros(2,int)+utils.parse_ints(args.tshape)
 
-dtype  = np.float32
-sel    = utils.parse_slice(args.slice)
-box    = utils.parse_box(args.box)*utils.degree if args.box  else None
-cl_cmb = powspec.read_spectrum(args.cmb)     if args.cmb     else None
-sim_cat= pointsrcs.read_sauron(args.sim_cat) if args.sim_cat else None
-icat   = pointsrcs.read_sauron(args.icat)    if args.mode == "fit" else None
+	dtype  = np.float32
+	sel    = utils.parse_slice(args.slice)
+	box    = utils.parse_box(args.box)*utils.degree if args.box  else None
+	cl_cmb = powspec.read_spectrum(args.cmb)     if args.cmb     else None
+	sim_cat= pointsrcs.read_sauron(args.sim_cat) if args.sim_cat else None
+	icat   = pointsrcs.read_sauron(args.icat)    if args.mode == "fit" else None
 
-if args.tiling == "tiled":
-	sauron.search_maps_tiled(args.ifiles, args.odir, mode=args.mode, icat=icat, tshape=tshape, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, cont=args.cont, comm=comm, comps=args.comps, sim_cat=sim_cat, sim_noise=args.sim_noise, mask=args.mask)
-elif args.tiling == "single":
-	res = sauron.search_maps(args.ifiles, mode=args.mode, icat=icat, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, comps=args.comps, sim_cat=sim_cat, sim_noise=args.sim_noise, mask=args.mask)
-	sauron.write_results(args.odir, res)
-else:
-	print("Unrecognized tiling '%s'" % args.tiling)
-	sys.exit(1)
+	if args.tiling == "tiled":
+		sauron.search_maps_tiled(args.ifiles, args.odir, mode=args.mode, icat=icat, tshape=tshape, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, cont=args.cont, comm=comm, comps=args.comps, sim_cat=sim_cat, sim_noise=args.sim_noise, mask=args.mask)
+	elif args.tiling == "single":
+		res = sauron.search_maps(args.ifiles, mode=args.mode, icat=icat, sel=sel, box=box, cl_cmb=cl_cmb, nmat1=args.nmat1, nmat2=args.nmat2, snr1=args.snr1, snr2=args.snr2, dtype=dtype, verbose=True, comps=args.comps, sim_cat=sim_cat, sim_noise=args.sim_noise, mask=args.mask)
+		sauron.write_results(args.odir, res)
+	else:
+		print("Unrecognized tiling '%s'" % args.tiling)
+		sys.exit(1)
+
+elif args.mode == "recat":
+	icat   = pointsrcs.read_sauron(args.icat)
+	pointsrcs.write_sauron(args.ocat, icat)

@@ -6,7 +6,8 @@ parser.add_argument("tag")
 parser.add_argument("-b", "--beam", type=str,   default=1.4)
 parser.add_argument("-f", "--freq", type=float, default=98)
 #parser.add_argument("-R", "--rmask",type=float, default=2)
-parser.add_argument(     "--noise-block-size", type=int, default=2)
+parser.add_argument(      "--noise-block-size", type=int, default=2)
+parser.add_argument("-m", "--median", action="store_true")
 args = parser.parse_args()
 import numpy as np
 from scipy import ndimage
@@ -72,7 +73,8 @@ enmap.write_map(prefix + "split_maps.fits", split_maps)
 # Output coadd across splits too
 enmap.write_map(prefix + "map_coadd.fits", np.mean(split_maps,0))
 # From this point we will only work with phase-mean-subtracted maps
-phase_diffs = split_maps - np.mean(split_maps,1)[:,None]
+if args.median: phase_diffs = split_maps - np.median(split_maps,1)[:,None]
+else:           phase_diffs = split_maps - np.mean  (split_maps,1)[:,None]
 # Build the noise model. We don't trust the ivar from the
 # mapmaker, as we have strong evidence of multiplicative noise.
 # There's therefore not much point in reading in ivar.

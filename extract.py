@@ -3,9 +3,10 @@ parser = argparse.ArgumentParser()
 parser.add_argument("box_or_template")
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("out")
+parser.add_argument("-F", "--fix-wcs", action="store_true")
 args = parser.parse_args()
 import numpy as np, os
-from pixell import enmap, utils
+from pixell import enmap, utils, wcsutils
 
 ifiles = sum([sorted(utils.glob(ifile)) for ifile in args.ifiles],[])
 kwargs = {}
@@ -19,5 +20,7 @@ for fi, ifile in enumerate(ifiles):
 	else:                ofile = args.out + "/" + os.path.basename(ifile)
 	print(ofile)
 	map = enmap.read_map(ifile, **kwargs)
+	if args.fix_wcs:
+		map.wcs = wcsutils.fix_wcs(map.wcs)
 	enmap.write_map(ofile, map)
 	del map

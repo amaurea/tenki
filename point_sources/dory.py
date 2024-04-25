@@ -61,8 +61,12 @@ parser.add_argument(      "--split-minflux",type=float, default=300)
 parser.add_argument(      "--rmax",    type=float, default=None)
 parser.add_argument(      "--lknee",   type=float, default=None)
 parser.add_argument(      "--npass",   type=int,   default=2)
+parser.add_argument(      "--lmin",    type=int,   default=0)
 parser.add_argument(      "--vmin",    type=float, default=0.01, help="Only simulate srcs out to this value in uK")
 parser.add_argument("-W", "--pixwin-order", type=int, default=0, help="0: nearest neighbor pixel window, 1: bilinear pixel window. Should match that of the actual map")
+parser.add_argument(      "--bnorm",   type=int,   default=1)
+parser.add_argument(      "--barea",   type=float, default=0)
+parser.add_argument(      "--maxcorrlen", type=float, default=3)
 parser.add_argument("-c", "--cont",    action="store_true")
 
 args = parser.parse_args()
@@ -73,7 +77,7 @@ from enlib import enmap, utils, bunch, mpi, fft, pointsrcs
 comm       = mpi.COMM_WORLD
 shape, wcs = enmap.read_map_geometry(args.imap)
 beam       = dory.get_beam(args.beam)
-beam       = utils.regularize_beam(beam, nl=40000, normalize=True)
+beam       = utils.regularize_beam(beam, nl=40000, normalize=args.bnorm>0)
 regions    = dory.get_regions(args.regions, shape, wcs)
 if args.rsplit:
 	regions = dory.split_regions(regions, args.rsplit)
@@ -169,8 +173,15 @@ elif args.mode == "fit":
 		npre  = len(icat)
 		icat  = dory.split_sources(icat, nimage=args.split_nimage, dist=args.split_dist*utils.arcmin, minflux=args.split_minflux/1e3)
 		print("Added %d extra images around %d sources > %f mJy" % (len(icat)-npre, (len(icat)-npre)//args.split_nimage, args.split_minflux))
-	beam_prof = dory.get_beam_profile(beam)
-	barea     = dory.calc_beam_profile_area(beam_prof)
+	if args.barea:
+		# Specify the beam area manually instead of calculating it.
+		# This is mainly useful for when we don't have a full beam (e.g. missing low-l)
+		# in which case the beam area is undefined. We can't get the true flux in this
+		# case, but we can still get out a number useful for catalog comparisons.
+		barea     = args.barea
+	else:
+		beam_prof = dory.get_beam_profile(beam)
+		barea     = dory.calc_beam_profile_area(beam_prof)
 	reg_cats  = []
 	utils.mkdir(args.odir)
 	write_args(args.odir + "/args.txt")
@@ -214,7 +225,8 @@ elif args.mode == "fit":
 				try:
 					fit_inds, amp, icov, lamps = dory.fit_src_amps(imap[ci], get_div(idiv,ci), src_pos, beam, prior=prior,
 							apod=args.apod, apod_margin=args.apod_margin, pixwin_order=args.pixwin_order, verbose=args.verbose,
-							dump=dump_prefix, hack=args.hack, region=ri, lknee=args.lknee, npass=args.npass)
+							dump=dump_prefix, hack=args.hack, region=ri, lknee=args.lknee, npass=args.npass, lmin=args.lmin,
+							maxcorrlen=args.maxcorrlen*utils.arcmin)
 				except dory.FitError as e:
 					fit_inds, amp, icov, lamps = np.zeros([0],int), np.zeros([0]), np.zeros([0,0]), np.zeros([0])
 				if reg_cat is None:

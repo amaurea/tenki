@@ -1,12 +1,13 @@
 from __future__ import division, print_function
-import numpy as np, argparse
-from pixell import enmap, utils
+import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("imaps_and_hits", nargs="+", help="map map map ... hits hits hits ... unless --transpose, in which case it's map hits map hits map hits ...")
 parser.add_argument("omap")
 parser.add_argument("ohit")
 parser.add_argument("-T", "--transpose",     action="store_true")
 args = parser.parse_args()
+import numpy as np
+from pixell import enmap, utils
 
 n = len(args.imaps_and_hits)//2
 if not args.transpose:

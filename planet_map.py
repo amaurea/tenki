@@ -50,7 +50,10 @@ else: dbox = None
 
 if args.sim:
 	sim_ids = filedb.scans[args.sim][:len(ids)]
-	area    = enmap.read_map(args.area).astype(dytpe)
+	area    = enmap.read_map(args.area).astype(dtype)
+
+#print("FIXME area data")
+#area    = enmap.read_map(args.area).astype(dtype)
 
 def smooth(tod, srate):
 	ft   = fft.rfft(tod)
@@ -171,6 +174,12 @@ for ind in range(comm.rank, len(ids), comm.size):
 		tod -= model
 		del model
 		tod  = tod.astype(dtype, copy=False)
+
+	#print("FIXME: Buddy subtracting for plot")
+	#from enlib import mapmaking
+	#fbuddy = mapmaking.FilterBuddy([scan], area, sys=sys, tmul=0)
+	#fbuddy(scan, tod)
+
 	# Should now be reasonably clean of correlated noise.
 	# Proceed to make simple binned map
 	with bench.show("rhs"):

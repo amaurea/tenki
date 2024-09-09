@@ -20,6 +20,7 @@ parser.add_argument(      "--time",   type=str,   default="24:00:00")
 parser.add_argument(      "--dry-run",action="store_true")
 parser.add_argument(      "--print-scripts", action="store_true")
 parser.add_argument(      "--sky",    type=str,   default="sky")
+parser.add_argument(      "--sys",    type=str,   deafult=None)
 parser.add_argument("--split-mode",   type=str,   default="jon")
 parser.add_argument("--no-prune",     action="store_true")
 parser.add_argument("--test",         type=str,   default=None)
@@ -48,7 +49,8 @@ config.init()
 root  = config.get("root")
 cdir  = os.getcwd()
 jobid = 0 # for dry runs
-echo = "echo " if args.test else ""
+echo  = "echo " if args.test else ""
+sys   = "" if not args.sys else ",%s" % args.sys
 
 nnode    = args.nnode
 npernode = args.npernode
@@ -246,8 +248,8 @@ for toks in utils.list_combination_iter(alts):
 			# standard filters itself. That also means that we know that the main maps we
 			# get out will be source-free, and that we must add srcs to get the src-full map
 			#map_command = """%(echo)sOMP_NUM_THREADS=4 mpirun -ppn 10 python %(tenki)s/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s --map_cg_nmax=%(nstep)s""" % {
-			map_command = """%(echo)smyrun -npernode %(npernode)d -nomp %(nomp)d python %(tenki)s/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s%(order_str)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s --map_cg_nmax=%(nstep)s""" % {
-					"sky":args.sky, "map_type":map_type, "osel":osel, "odir":workdir, "otag":otag, "extra_args":" ".join(unknown_expanded), "nstep":nstep, "tenki":tenkidir, "patch":patch_file, "order_str":order_str, "echo": echo, "npernode":args.npernode, "nomp":args.nomp}
+			map_command = """%(echo)smyrun -npernode %(npernode)d -nomp %(nomp)d python %(tenki)s/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s%(order_str)s%(sys)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s --map_cg_nmax=%(nstep)s""" % {
+					"sky":args.sky, "map_type":map_type, "osel":osel, "odir":workdir, "otag":otag, "extra_args":" ".join(unknown_expanded), "nstep":nstep, "tenki":tenkidir, "patch":patch_file, "order_str":order_str, "echo": echo, "npernode":npernode, "nomp":nomp, sys=sys}
 			# Set up filters
 			if args.srcsub:
 				map_command += " -F src"

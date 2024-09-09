@@ -4,6 +4,7 @@ parser.add_argument("ifile")
 parser.add_argument("odir")
 parser.add_argument("-T", "--tsize",        type=int, default=256)
 parser.add_argument("-E", "--output-empty", type=int, default=0)
+parser.add_argument("-t", "--template",     type=str, default=None)
 args = parser.parse_args()
 import numpy as np
 from pixell import enmap, utils, mpi
@@ -13,7 +14,9 @@ comm = mpi.COMM_WORLD
 # Check for problems first, and compute number of levels
 dtype = np.float32
 tsize = args.tsize
-shape, wcs = enmap.read_map_geometry(args.ifile)
+pre   = enmap.read_map_geometry(args.ifile)[0][:-2]
+shape, wcs = enmap.read_map_geometry(args.template if args.template is not None else args.ifile)
+shape = pre+shape[-2:]
 nlevel = utils.nint(np.log2(shape[-1]/tsize))+1
 tmp = tsize * 2**(nlevel-1)
 if tmp != shape[-1] or tmp != shape[-2]:
@@ -22,7 +25,7 @@ if tmp != shape[-1] or tmp != shape[-2]:
 
 if comm.rank == 0:
 	sys.stderr.write("Reading %s\n" % args.ifile)
-	map = enmap.read_map(args.ifile).astype(dtype, copy=False)
+	map = enmap.read_map(args.ifile, geometry=(shape, wcs)).astype(dtype, copy=False)
 utils.mkdir(args.odir)
 
 oi = 0

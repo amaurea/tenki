@@ -17,6 +17,12 @@ parser.add_argument(      "--fknee",       type=float, default=3)
 parser.add_argument(      "--alpha",       type=float, default=-10)
 parser.add_argument("-R", "--rad",         type=float, default=0.2)
 parser.add_argument("-F", "--filter-type", type=str,   default="planet")
+parser.add_argument("-I", "--inject",      type=str,   default=None)
+parser.add_argument("-D", "--dump-tods",   type=str,   default=None)
+parser.add_argument("-L", "--load-tods",   type=str,   default=None)
+parser.add_argument(      "--dump-phase",  type=str,   default=None)
+parser.add_argument(      "--dscale",      type=float, default=1)
+parser.add_argument(      "--weight",      type=str,   default="ivar")
 args = parser.parse_args()
 
 def lowpass_tod(tod, srate, fknee=3, alpha=-10):
@@ -37,6 +43,7 @@ def planet_filter(scan, coords, tod, R=0.2*utils.degree, fknee=3, alpha=-10):
 filedb.init()
 comm       = mpi.COMM_WORLD
 ids        = filedb.scans[args.sel]
+print("ids", ids)
 dtype      = np.float32
 ncomp      = 3
 nbin       = args.nbin
@@ -52,6 +59,11 @@ try: coords = np.array(known_pulsars[args.name_or_coords])*utils.degree
 except KeyError: coords = utils.parse_floats(args.name_or_coords)*utils.degree
 # Map coordinate system centered on pulsar
 sys = "equ:%.6f_%.6f/0_0" % (coords[0]/utils.degree,coords[1]/utils.degree)
+
+if args.inject:
+	# This map must be compatible with our output map for now.
+	# could be relaxes with a separate bini and pmap for the sim
+	inject_map = enmap.read_map(args.inject)
 
 utils.mkdir(args.odir)
 prefix = args.odir + "/"
@@ -99,22 +111,42 @@ for ind in range(comm.rank, len(ids), comm.size):
 	tod  = scan.get_samples(verbose=False)
 	tod  = utils.deslope(tod)
 	tod  = tod.astype(dtype)
+	if args.dscale != 1:
+		print("scaling tod by", args.dscale)
+		tod *= args.dscale
+	if args.inject:
+		pmap.forward(tod, inject_map)
+	if args.dump_tods:
+		np.save(args.dump_tods + "/tod_%s.npy" % id.replace(":","_"), tod)
+	if args.dump_phase:
+		np.save(args.dump_phase + "/phase_%s.npy" % id.replace(".","_"), np.array([ctime,phase,bini]))
+	if args.load_tods:
+		tod[:] = np.load(args.load_tods + "/tod_%s.npy" % id.replace(":","_"))
 	L.debug("%s tod" % id)
 	if args.filter_type == "planet":
 		# Filter from planet mapmaker. Gets rid of correlated noise
 		# without biasing small central region.
 		planet_filter(scan, coords, tod, R=args.rad*utils.degree, fknee=args.fknee, alpha=args.alpha)
-	else:
+	elif args.filter_type == "oof":
 		# Lowpass filter. This won't affect our signal much since we're
 		# looking for a 30 Hz signal
 		freq  = fft.rfftfreq(scan.nsamp, 1/scan.srate)
 		ftod  = fft.rfft(tod)
 		ftod /= 1 + (np.maximum(freq,freq[1]/2)/args.fknee)**args.alpha
 		fft.irfft(ftod, tod, normalize=True)
+	elif args.filter_type == "none":
+		print("no filtering")
+		pass
+	else:
+		raise ValueError("Unknown filter type '%s'" % str(args.filter_type))
 	L.debug("%s filtered" % id)
-	# Estimate noise per detector. Should be white noise by now. Using median
-	# of means to be robust to bright signal
-	det_ivar = np.median(utils.block_reduce(tod**2, 100, inclusive=False),-1)**-1
+	if args.weight == "ivar":
+		# Estimate noise per detector. Should be white noise by now. Using median
+		# of means to be robust to bright signal
+		det_ivar = np.median(utils.block_reduce(tod**2, 100, inclusive=False),-1)**-1
+	else:
+		print("no weights")
+		det_ivar = np.ones(tod.shape[0], tod.dtype)
 	# Update RHS
 	sampcut.gapfill_const(scan.cut, tod, 0, inplace=True)
 	tod *= det_ivar[:,None]
@@ -124,6 +156,7 @@ for ind in range(comm.rank, len(ids), comm.size):
 	for i in range(ncomp):
 		one = div[0]*0
 		one[i::ncomp] = 1
+		tod[:] = 0
 		pmap.forward(tod, one)
 		tod *= det_ivar[:,None]
 		sampcut.gapfill_const(scan.cut, tod, 0, inplace=True)
@@ -152,6 +185,8 @@ if comm.rank == 0:
 	# Output results
 	enmap.write_map(prefix + "map.fits",  map)
 	enmap.write_map(prefix + "ivar.fits", div[:,0,0])
+	enmap.write_map(prefix + "rhs.fits",  rhs)
+	enmap.write_map(prefix + "div.fits",  div)
 	with open(prefix + "ids.txt", "w") as ofile:
 		for tod_id in good_ids:
 			ofile.write(tod_id + "\n")

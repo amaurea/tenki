@@ -73,7 +73,7 @@ from enlib import enmap, utils, bunch, mpi, fft, pointsrcs
 comm       = mpi.COMM_WORLD
 shape, wcs = enmap.read_map_geometry(args.imap)
 beam       = dory.get_beam(args.beam)
-beam       = utils.regularize_beam(beam, nl=40000)
+beam       = utils.regularize_beam(beam, nl=40000, normalize=True)
 regions    = dory.get_regions(args.regions, shape, wcs)
 if args.rsplit:
 	regions = dory.split_regions(regions, args.rsplit)
@@ -121,7 +121,7 @@ if args.mode == "find":
 			else:                      dump_prefix = None
 			nsigma = args.nsigma if args.nsigma is not None else 3.5
 			result = dory.find_srcs(imap, idiv, beam, freq=args.freq, apod=args.apod, apod_margin=args.apod_margin,
-					snmin=nsigma, pixwin_order=args.pixwin_order, verbose=args.verbose, dump=dump_prefix)
+					snmin=nsigma, pixwin=args.pixwin_order>=0, pixwin_order=args.pixwin_order, verbose=args.verbose, dump=dump_prefix, hack=args.hack)
 			# FIXME: artifacts are act-specific
 			if args.prune:
 				result = dory.prune_artifacts(result)

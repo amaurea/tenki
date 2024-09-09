@@ -16,6 +16,8 @@ parser.add_argument(      "--simple",  action="store_true")
 parser.add_argument(      "--simple-lknee", type=float, default=1000)
 parser.add_argument(      "--simple-alpha", type=float, default=-3.5)
 parser.add_argument(      "--noisemask-lim",type=float, default=None)
+parser.add_argument("-p", "--pixwin",       type=str,   default="nn")
+parser.add_argument(      "--suffix",       type=str,   default="")
 args = parser.parse_args()
 import numpy as np
 from pixell import enmap, utils, bunch, mpi, uharm, array_ops, analysis
@@ -167,8 +169,8 @@ for fi in range(comm.rank, nfile, comm.size):
 	ivarfile = utils.replace(mapfile, "map", "ivar")
 	infofile = utils.replace(utils.replace(mapfile, "map", "info"), ".fits", ".hdf")
 	# Output file names
-	rhofile  = utils.replace(mapfile, "map", "rho")
-	kappafile= utils.replace(mapfile, "map", "kappa")
+	rhofile  = utils.replace(mapfile, "map", "rho"+args.suffix)
+	kappafile= utils.replace(mapfile, "map", "kappa"+args.suffix)
 	# Optionally skip existing files
 	if args.cont and os.path.isfile(rhofile) and os.path.isfile(kappafile):
 		continue
@@ -215,7 +217,8 @@ for fi in range(comm.rank, nfile, comm.size):
 	kappa = map*0
 	tot_weight = np.zeros(ny, map.dtype)
 	# Bands. At least band_height in height and with at least
-	# 2*apod_edge of overlapping padding at top and bottom
+	# 2*apod_edge of overlapping padding at top and bottom. Using narrow bands
+	# make the flat sky approximation a good approximation
 	nband    = utils.ceil(map.extent()[0]/band_height) if band_height > 0 else 1
 	bedge    = utils.ceil(apod_edge/map.pixshape()[0]) * 2
 	boverlap = bedge
@@ -234,6 +237,16 @@ for fi in range(comm.rank, nfile, comm.size):
 			biC.wcs = bmap.wcs.deepcopy()
 		# 2d beam
 		beam2d  = enmap.samewcs(utils.interp(bmap.modlmap(), np.arange(len(beam1d)), beam1d), bmap)
+		# Pixel window. We include it as part of the 2d beam, which is valid in the flat sky
+		# approximation we use here.
+		if args.pixwin in ["nn","0"]:
+			beam2d = enmap.apply_window(beam2d, order=0, nofft=True)
+		elif args.pixwin in ["lin","bilin","1"]:
+			beam2d = enmap.apply_window(beam2d, order=1, nofft=True)
+		elif args.pixwin in ["none"]:
+			pass
+		else:
+			raise ValueError("Invalid pixel window '%s'" % str(args.pixwin))
 		# Set up apodization
 		filter_apod = enmap.apod_mask(bhit, apod_edge)
 		bivar       = bivar*filter_apod

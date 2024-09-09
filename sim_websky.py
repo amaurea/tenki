@@ -51,7 +51,7 @@ prof_builder= clusters.ProfileBattagliaFast(cosmology=cosmology, beta_range=beta
 mass_interp = clusters.MdeltaTranslator(cosmology)
 
 # We use this to decide if it's worth it to prune
-# objects outide our patch or now. This pruning takes
+# objects outside our patch or not. This pruning takes
 # some extra calculations which aren't necessary if we're
 # fullsky or close to it
 fullsky = enmap.area(shape, wcs)/(4*np.pi) > 0.8

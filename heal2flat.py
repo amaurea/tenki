@@ -1,6 +1,5 @@
 import numpy as np, argparse, os, healpy
-from enlib import log
-from pixell import sharp, utils, enmap, reproject
+from enlib import utils, enmap, curvedsky, log, reproject
 parser = argparse.ArgumentParser()
 parser.add_argument("ihealmap")
 parser.add_argument("template")
@@ -33,7 +32,6 @@ hmap = hmap.astype(dtype)
 mask    = hmap < -1e20
 hmap[mask] = np.mean(hmap[~mask])
 if args.unit != 1: hmap /= args.unit
-
 # Perform transform
 L.info("Reprojecting")
 omap = reproject.healpix2map(hmap, shape, wcs, rot=args.rot, method=args.method, order=args.order, extensive=args.extensive, verbose=args.verbosity>1)

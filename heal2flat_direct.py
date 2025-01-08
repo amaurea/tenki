@@ -1,5 +1,5 @@
 import numpy as np, argparse, os, healpy
-from enlib import sharp, utils, enmap, curvedsky, log, coordinates
+from enlib import utils, enmap, curvedsky, log, coordinates
 parser = argparse.ArgumentParser()
 parser.add_argument("ihealmap")
 parser.add_argument("template")

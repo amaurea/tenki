@@ -123,6 +123,7 @@ if comm.rank == 0:
 	# Individual statistics
 	amean = a/n
 	adev  = (a2/n - amean**2)**0.5
+	# The normalization seems wrong here...
 	amean_mean = tot_stats_mean[mask]/n
 	# Overall
 	amean_tot = np.sum(a,0)/np.sum(n,0)

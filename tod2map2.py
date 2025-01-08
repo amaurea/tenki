@@ -1013,8 +1013,10 @@ for out_ind in range(nouter):
 				cg.save(cgpath)
 			dt = bench.stats["cg_step"]["time"].last
 			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0 or cg.i == nmax:
-				dump(cg)
-			bench.stats.write(benchfile)
+				with bench.mark("dump"):
+					dump(cg)
+			with bench.mark("write stats"):
+				bench.stats.write(benchfile)
 			ptime = bench.stats["M"]["time"].last
 			L.info("CG step %5d %15.7e %6.1f %6.3f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans)), ptime))
 		# If we exited early due to reaching the error limit make sure we output our result

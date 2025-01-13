@@ -817,12 +817,12 @@ def reproject_data(data, oshape, owcs, apod=10, pointoff=None):
 		# thumbnail is tiny, so it's enough to transform QU from the mapping system to cel here.
 		map  = enmap.rotate_pol(map, -data.table["polrot"][sind])
 		ivar = enmap.enmap(data.ivars[sind], data.wcss[sind])
-		odata.maps [sind] = utils.interpol(map,  ipix, order=3, mode="wrap")
+		odata.maps [sind] = utils.interpol(map,  ipix, mode="cubic", border="wrap")
 		with utils.nowarn():
 			# Interpolate var instead of ivar. This makes low-hit regions grow instead of shrink
 			# when interpolating, making us downweight areas that have contributions from low-hit
 			# pixels. This removes a lot of stripiness and bad pixels in the result.
-			odata.ivars[sind] = nonan(1/utils.interpol(1/ivar, ipix, order=1, mode="wrap"))
+			odata.ivars[sind] = nonan(1/utils.interpol(1/ivar, ipix, mode="lin", border="wrap"))
 		# ivars is in units of white noise per original pixel. Transform that to the equivalent
 		# white noise per new pixel
 		old_pixsize = np.product(data.table["pixshape"][sind])

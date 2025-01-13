@@ -44,7 +44,7 @@ class Model:
 		# Evaluate the plain beam
 		r       = np.sum((rpos - poss[detinds][:,None])**2,-1)**0.5
 		bpix    = r/self.dr
-		model   = utils.interpol(self.rdata.beam[1], bpix[None], mask_nan=False, order=1)
+		model   = utils.interpol(self.rdata.beam[1], bpix[None], mode="lin")
 		# Must mask invalid regions *before* fourier stuff
 		model  *= mask
 		# Apply the butterworth filter and time constants

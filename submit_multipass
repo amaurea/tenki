@@ -20,7 +20,7 @@ parser.add_argument(      "--time",   type=str,   default="24:00:00")
 parser.add_argument(      "--dry-run",action="store_true")
 parser.add_argument(      "--print-scripts", action="store_true")
 parser.add_argument(      "--sky",    type=str,   default="sky")
-parser.add_argument(      "--sys",    type=str,   deafult=None)
+parser.add_argument(      "--sys",    type=str,   default=None)
 parser.add_argument("--split-mode",   type=str,   default="jon")
 parser.add_argument("--no-prune",     action="store_true")
 parser.add_argument("--test",         type=str,   default=None)
@@ -50,7 +50,7 @@ root  = config.get("root")
 cdir  = os.getcwd()
 jobid = 0 # for dry runs
 echo  = "echo " if args.test else ""
-sys   = "" if not args.sys else ",%s" % args.sys
+map_sys = "" if not args.sys else ",sys=%s" % args.sys
 
 nnode    = args.nnode
 npernode = args.npernode
@@ -249,20 +249,20 @@ for toks in utils.list_combination_iter(alts):
 			# get out will be source-free, and that we must add srcs to get the src-full map
 			#map_command = """%(echo)sOMP_NUM_THREADS=4 mpirun -ppn 10 python %(tenki)s/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s --map_cg_nmax=%(nstep)s""" % {
 			map_command = """%(echo)smyrun -npernode %(npernode)d -nomp %(nomp)d python %(tenki)s/tod2map2.py --dmap_format=tiles -S %(sky)s:%(patch)s,type=%(map_type)s%(order_str)s%(sys)s "%(osel)s" "%(odir)s" "%(otag)s" %(extra_args)s --map_cg_nmax=%(nstep)s""" % {
-					"sky":args.sky, "map_type":map_type, "osel":osel, "odir":workdir, "otag":otag, "extra_args":" ".join(unknown_expanded), "nstep":nstep, "tenki":tenkidir, "patch":patch_file, "order_str":order_str, "echo": echo, "npernode":npernode, "nomp":nomp, sys=sys}
+					"sky":args.sky, "map_type":map_type, "osel":osel, "odir":workdir, "otag":otag, "extra_args":" ".join(unknown_expanded), "nstep":nstep, "tenki":tenkidir, "patch":patch_file, "order_str":order_str, "echo": echo, "npernode":npernode, "nomp":nomp, "sys":map_sys}
 			# Set up filters
 			if args.srcsub:
 				map_command += " -F src"
 			if ipass > 0:
 				ptag = get_otag(ipass-1)
 				prev_prefix = "%(odir)s/%(otag)s_%(sky)s" % {"odir":workdir, "otag":ptag, "sky":args.sky}
-				map_command += " -F buddy:map=%s_map_full.fits%s" % (prev_prefix,order_str)
+				map_command += " -F buddy:map=%s_map_full.fits%s%s" % (prev_prefix,order_str,map_sys)
 				if args.srcsub:
-					map_command += " -F sub:2,map=%s_map_srcfree.fits%s" % (prev_prefix,order_str)
+					map_command += " -F sub:2,map=%s_map_srcfree.fits%s%s" % (prev_prefix,order_str, map_sys)
 				else:
-					map_command += " -F sub:2,map=%s_map_full.fits%s" % (prev_prefix,order_str)
+					map_command += " -F sub:2,map=%s_map_full.fits%s%s" % (prev_prefix,order_str, map_sys)
 			if args.addsim:
-				map_command += " -F add:map=%s%s -F buddy:map=%s,mul=-1" % (args.addsim, order_str, args.addsim)
+				map_command += " -F add:map=%s%s%s -F buddy:map=%s,mul=-1%s" % (args.addsim, order_str, map_sys, args.addsim, map_sys)
 			if args.filter in ["az","post"]:
 				val = 2 if args.filter == "post" else 1
 				if args.daz is None:

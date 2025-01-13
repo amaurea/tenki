@@ -58,6 +58,7 @@ config.default("filter_beamsym_default", "use=no,name=beamsym,value=1,ibeam=1,ob
 config.default("filter_highpass_default", "use=no,name=highpass,value=1,fknee=1,alpha=-3.5,postnoise=1", "Default parameters for highpass filter.")
 config.default("filter_bandpass_default", "use=no,name=bandpass,value=1,fknee1=1,fknee2=2,alpha=-10,postnoise=1", "Default parameters for bandpass filter.")
 config.default("filter_deslope_default", "use=no,name=deslope,value=1", "Desloping filter.")
+config.default("filter_window_default", "use=no,name=window,value=1,width=5", "Desloping filter.")
 config.default("filter_inpaintsub_default", "use=no,name=inpaintsub,value=1,fknee=10,alpha=10,postnoise=1", "Subtract inpaint-prediction around a set of objects. Pass in object list as obj=name:rad,name:rad,etc. :rad deg and optional, will repeat last. Default rad 0.5 deg. name can be a capitalized planet name or [ra,dec] in degrees.")
 config.default("filter_badify_default",  "use=no,name=badify,value=1,gainerr=0,deterr=0,deterr_rand=0,seed=0", "Default parameters for badification filter")
 config.default("filter_gainfit_default",  "use=no,name=gainfit,value=1,fmax=1.0", "Default parameters for common mode fit filter. Add odir to write fit amplitudes to that directory")
@@ -749,6 +750,9 @@ for out_ind in range(nouter):
 			filter = mapmaking.FilterBroadenBeamHor(ibeam, obeam)
 		elif param["name"] == "deslope":
 			filter = mapmaking.FilterDeslope()
+		elif param["name"] == "window":
+			width = float(param["width"])
+			filter = mapmaking.FilterWindow(width=width)
 		elif param["name"] == "inpaintsub":
 			fknee = float(param["fknee"])
 			alpha = float(param["alpha"])
@@ -832,11 +836,10 @@ for out_ind in range(nouter):
 	if config.get("tod_window"):
 		weights.append(mapmaking.FilterWindow(config.get("tod_window")))
 
-	# Multiposts. This was used to implement srcsamp before, but it's now handled via a prior
-	multiposts = []
-
 	L.info("Initializing equation system")
-	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, filters2=filters2, filters_noisebuild=filters_noisebuild, weights=weights, multiposts=multiposts, dtype=dtype, comm=comm)
+	eqsys = mapmaking.Eqsys(myscans, signals, filters=filters, filters2=filters2, filters_noisebuild=filters_noisebuild, weights=weights, dtype=dtype, comm=comm)
+	#eqsignals = mapmaking.Signals(signals, comm=comm)
+	#eqsys = mapmaking.Eqsys2(myscans, eqsignals, filters=filters, filters2=filters2, filters_noisebuild=filters_noisebuild, weights=weights, dtype=dtype, comm=comm)
 
 	L.info("Initializing RHS")
 	eqsys.calc_b()
@@ -865,7 +868,7 @@ for out_ind in range(nouter):
 			print("Warning: map and cut precon must have compatible units")
 			continue
 		if param["type"] in ["cut","srcsamp","template"]:
-			signal.precon = mapmaking.PreconCut(signal, myscans)
+			signal.precon = mapmaking.PreconCut(signal, myscans, weights=weights)
 			# Optionally set up srcsamp prior
 			if param["type"] == "srcsamp" and param["prior"] != "no":
 				prior_core = float(param["prior_core"])
@@ -1010,8 +1013,10 @@ for out_ind in range(nouter):
 				cg.save(cgpath)
 			dt = bench.stats["cg_step"]["time"].last
 			if cg.i in dump_steps or cg.i % dump_steps[-1] == 0 or cg.i == nmax:
-				dump(cg)
-			bench.stats.write(benchfile)
+				with bench.mark("dump"):
+					dump(cg)
+			with bench.mark("write stats"):
+				bench.stats.write(benchfile)
 			ptime = bench.stats["M"]["time"].last
 			L.info("CG step %5d %15.7e %6.1f %6.3f %6.3f" % (cg.i, cg.err, dt, dt/max(1,len(eqsys.scans)), ptime))
 		# If we exited early due to reaching the error limit make sure we output our result

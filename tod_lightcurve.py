@@ -1,24 +1,4 @@
-# Time-domain forced photometry. Does not fit pointin offses, so should be much
-# faster than my other time-domain point source stuff. Measures a per-detector
-# amplitude for each point source for each TOD. The point of this is to be able
-# to calibrate the point sources against each other even in the presence of sub-array
-# gain errors. For example, one could have an interesting transient that might be changing
-# on minute-to-minute timescales, which most other sources do not.
-
-# During one TOD different subsets of the array hit each source differently,
-# which can make detector gain inconsistenties masquerade as rapid changes in
-# flux. We can calibrate this away by using the same subset of detectors for
-# the measurement of both the reference sources and the transient.
-
-# The output will be a per-source, per-detector amp, damp, t, where t is the
-# timestamp for when the detector hit the source. These will individually be
-# very noisy, so they will in practice need to be averaged together, but that
-# can be done in postprocessing.
-#
-# To keep things fast we will use an uncorrelated noise model, which will let us
-# solve for each detector separately. This will be slightly suboptimal, but should
-# be good enough.
-
+# Time-domain per-swipe forced photometry
 from __future__ import division, print_function
 import numpy as np, time, os, sys
 from scipy import integrate
@@ -195,6 +175,7 @@ def get_beam_area(beam):
 
 # Load source database
 srcpos, amps = srcdata[:2], srcdata[2]
+print(srcpos/utils.degree)
 # Which sources pass our requirements?
 base_sids  = set(range(amps.size))
 if args.minamp is not None:

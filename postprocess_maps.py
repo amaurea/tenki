@@ -28,7 +28,7 @@ def get_ref(ivar):
 	else: return 1
 
 # Optional pixel window correction
-def apply_fourier(map, ivar, op, tol=0.01):
+def apply_fourier(map, ivar, op, tol=0.01, inplace=True):
 	# To make fourier operations safe, we want to whiten areas with
 	# very high hitcount variance, which will be areas where the hitcount
 	# is low.
@@ -36,14 +36,15 @@ def apply_fourier(map, ivar, op, tol=0.01):
 	low = (ivar>0)&(ivar<ref)
 	whiten = (ivar[low]/ref)**0.5
 	# Apply edge whitening
-	map    = map.copy()
+	if not inplace:
+		map = map.copy()
 	map[:,low] *= whiten
-	# Actually apply our fourier operation
-	fmap     = enmap.fft(map)
-	del map
-	fmap     = op(fmap)
-	map      = enmap.ifft(fmap).real
-	del fmap
+	for I in utils.nditer(map.shape[:-2]):
+		# Actually apply our fourier operation
+		fmap     = enmap.fft(map[I])
+		fmap     = op(fmap)
+		map[I]   = enmap.ifft(fmap).real
+		del fmap
 	# Undo edge whitening
 	map[:,low] /= whiten
 	# Remask

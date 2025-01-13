@@ -12,6 +12,7 @@ parser.add_argument("-w", "--weight",type=str,   default="plain")
 parser.add_argument("--opt-mode",    type=str,   default="linear")
 parser.add_argument("--constraint",  type=str,   default=None)
 parser.add_argument(      "--scanpat-tol", type=float, default=1)
+parser.add_argument(      "--prefix",type=str,   default=None)
 args = parser.parse_args()
 import numpy as np, sys, glob, re, os
 from enlib import utils
@@ -52,6 +53,8 @@ elif args.mode == "scanpat":
 else:
 	# In this case we don't split arrays
 	pass
+if args.prefix:
+	anames = np.char.add(args.prefix + "_", anames)
 
 def ids2ctimes(ids): return np.char.partition(ids,".").T[0].astype(int)
 def fix_aname(aname): return aname.replace("ar","pa").replace(":","_")

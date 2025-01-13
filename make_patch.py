@@ -11,7 +11,7 @@ import numpy as np
 from pixell import utils, enmap
 box = utils.parse_box(args.box)*utils.degree
 shape, wcs = enmap.geometry(box, res=args.res*utils.arcmin, proj=args.proj)
-if   args.variant is None: pass
+if   args.variant == "cc": pass
 elif args.variant == "fejer1": wcs.wcs.crpix[1] -= 0.5
 else: raise ValueError("Unknown variant '%s'" % str(args.variant))
 if args.full:

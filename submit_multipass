@@ -40,6 +40,7 @@ parser.add_argument(      "--downpat",type=str, default=None)
 parser.add_argument(      "--cgpat",  type=str, default="200")
 parser.add_argument(      "--distributed", type=int, default=-1)
 parser.add_argument(      "--account",type=str, default=None)
+parser.add_argument(      "--nobuddy",action="store_true")
 args, unknown = parser.parse_known_args()
 from enlib import utils, config, enmap, colors
 
@@ -197,6 +198,7 @@ for toks in utils.list_combination_iter(alts):
 			def get_otag(ipass):
 				return tag_prefix + "_".join(otoks) + tag_suffix + "_%dpass" % (ipass+1) + "_%dway_%d" % (args.nsplit, i)
 			otag = get_otag(ipass)
+			job_name = otag + "_" + workdir.replace("/","_")
 			prefix = "%(odir)s/%(otag)s_%(sky)s" % {"odir":workdir, "otag":otag, "sky":args.sky}
 			prev_prefix = "%(odir)s/%(otag)s_%(sky)s" % {"odir":workdir, "otag":get_otag(ipass-1), "sky":args.sky}
 			# We can't run a pass if the previous pass is neither present on disk or queued up
@@ -211,7 +213,7 @@ for toks in utils.list_combination_iter(alts):
 					continue
 				elif args.queue:
 					# Are we already running or queued up?
-					qind, e = find_queue(queue, name=otag)
+					qind, e = find_queue(queue, name=job_name)
 					if e:
 						id, name, running, dep = e
 						if running:
@@ -256,20 +258,21 @@ for toks in utils.list_combination_iter(alts):
 			if ipass > 0:
 				ptag = get_otag(ipass-1)
 				prev_prefix = "%(odir)s/%(otag)s_%(sky)s" % {"odir":workdir, "otag":ptag, "sky":args.sky}
-				map_command += " -F buddy:map=%s_map_full.fits%s%s" % (prev_prefix,order_str,map_sys)
+				if not args.nobuddy:
+					map_command += " -F buddy:map=%s_map_full.fits%s%s" % (prev_prefix,order_str,map_sys)
 				if args.srcsub:
 					map_command += " -F sub:2,map=%s_map_srcfree.fits%s%s" % (prev_prefix,order_str, map_sys)
 				else:
-					map_command += " -F sub:2,map=%s_map_full.fits%s%s" % (prev_prefix,order_str, map_sys)
-			if args.addsim:
-				map_command += " -F add:map=%s%s%s -F buddy:map=%s,mul=-1%s" % (args.addsim, order_str, map_sys, args.addsim, map_sys)
+					map_command += " -F sub:2,map=%s_map_full.fits%s%s" % (prev_prefix,order_str,map_sys)
+			if args.addsim and not args.nobuddy:
+				map_command += " -F add:map=%s%s -F buddy:map=%s,mul=-1%s" % (args.addsim, order_str, args.addsim, map_sys)
 			if args.filter in ["az","post"]:
 				val = 2 if args.filter == "post" else 1
 				if args.daz is None:
 					map_command += " -F scan:%d" % val
 				else:
 					map_command += " -F scan:%d,daz=%.6f" % (val,args.daz)
-			if downpat: map_command += " --downsample=%d"   % downpat[ipass]
+			if downpat: map_command += " --downsample=%d"   % downpat[min(ipass,len(downpat)-1)]
 			# Set up tidying to run after the mapmaker has finished. This overlaps slightly
 			# with the postprocessing, but here we only do the bare minimum needed to make
 			# multipass mapmaking work
@@ -282,7 +285,7 @@ for toks in utils.list_combination_iter(alts):
 				post_command = """%sln -s "%s_map%04d.fits" "%s_map_full.fits" """ % (echo, otag+"_"+args.sky, nstep, prefix)
 			# Set up our slurm parameters
 			slurm_command  = "#SBATCH --nodes %d --ntasks-per-node=%d --cpus-per-task=%d --time=%s\n" % (nnode, npernode, nomp, args.time)
-			slurm_command += "#SBATCH --job-name %s\n" % otag
+			slurm_command += "#SBATCH --job-name %s\n" % job_name
 			if account and account != "default":
 				slurm_command += "#SBATCH --account %s\n" % account
 			# and the dependency list. First our previous try

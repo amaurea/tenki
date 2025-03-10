@@ -61,7 +61,7 @@ class Likelihood:
 		self.data = data
 		# Beam setup
 		self.beam = beam
-		self.beam_pre = utils.interpol_prefilter(beam)
+		self.beam_inter = utils.interpolator(beam)
 		self.dr   = dr
 		self.pos = self.data.rhs.posmap()
 		self.box = np.sort(self.data.rhs.box(),1)
@@ -83,7 +83,7 @@ class Likelihood:
 		pos = self.pos + off[:,None,None]
 		r   = np.sum(pos**2,0)**0.5
 		pix = r/self.dr
-		return enmap.samewcs(utils.interpol(self.beam_pre, pix[None], prefilter=False, mask_nan=False), pos)
+		return enmap.samewcs(self.beam_inter(pix[None]), pos)
 	def calc_amp(self, profile):
 		# (P'N"P)"P'N"d, P = profile, N" = hdiv corr hdiv and d = map
 		# N"d should be rhs. Is it? N"d = hdiv corr hdiv ihdiv icorr ihdiv rhs = rhs. Good

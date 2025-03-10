@@ -102,7 +102,7 @@ class BeamModel:
 		# Beam should be zero at large distances
 		vbeam -= vbeam[0]
 		# Prefilter for fast lookups
-		vbeam  = utils.interpol_prefilter(vbeam, npre=0, order=order)
+		vinter = utils.interpolator(vbeam, npre=0, mode="spline", order=order)
 		# The total beam will be this beam times a normal one in the
 		# perpendicular direction.
 		self.dec_ref = dec_ref
@@ -126,7 +126,7 @@ class BeamModel:
 		rorto    = np.sum(rvec*self.e_orto[:,None,None],0)
 		# Evaluate each beam component
 		ipara    = rpara/self.res+self.vbeam.size/2
-		bpara    = utils.interpol(self.vbeam, ipara[None], mask_nan=False, order=self.order, prefilter=False)
+		bpara    = self.vinter(ipara[None])
 		borto    = np.exp(-0.5*rorto**2/self.sigma**2)
 		res      = enmap.samewcs(bpara*borto, rvec)
 		return res

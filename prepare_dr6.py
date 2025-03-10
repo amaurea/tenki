@@ -14,12 +14,35 @@ cdir2 = "/gpfs/fs0/project/r/rbond/sigurdkn/actpol/map_coadd/20240323_simple"
 mdir  = "/gpfs/fs0/project/r/rbond/sigurdkn/actpol/masks"
 
 arrs    = ["pa5_f090", "pa6_f090", "pa4_f150", "pa5_f150", "pa6_f150", "pa4_f220"]
-arrs    = ["pa5_f090"]
-gains   = [     1.011,      1.009,         1.,      0.986,      0.970,      1.043]
-poleffs = [     0.953,      0.971,         1.,      0.955,      0.968,      0.907]
+
+gains = {
+	"std":        [    1.0111,     1.0086,        1.0,     0.9861,     0.9702,     1.0435],
+	"null-el1":   [    1.0081,     1.0028,     1.0000,     0.9820,     0.9693,     1.0585],
+	"null-el2":   [    1.0113,     1.0047,     1.0000,     0.9846,     0.9614,     1.0230],
+	"null-el3":   [    1.0075,     1.0119,     1.0000,     0.9788,     0.9739,     1.0250],
+	"null-inout1":[    1.0431,     1.0078,     1.0000,     1.0001,     0.9654,     0.9515],
+	"null-inout2":[    1.0118,     1.0031,     1.0000,     0.9398,     0.9403,     1.0409],
+	"null-pwv1":  [    1.0102,     1.0103,     1.0000,     0.9865,     0.9689,     1.0288],
+	"null-pwv2":  [    1.0079,     1.0041,     1.0000,     0.9789,     0.9626,     1.0381],
+	"null-t1":    [    1.0022,     1.0003,     1.0000,     0.9683,     0.9637,     1.0272],
+	"null-t2":    [    1.0144,     1.0144,     1.0000,     0.9907,     0.9737,     1.0288],
+}
+
+poleffs = {
+	"std":        [    0.9534,     0.9715,        1.0,     0.9545,     0.9679,     0.9074],
+	"null-el1":   [    0.9487,     0.9692,     1.0000,     0.9477,     0.9713,     0.9361],
+	"null-el2":   [    0.9538,     0.9564,     1.0000,     0.9545,     0.9566,     0.8711],
+	"null-el3":   [    0.9529,     0.9664,     1.0000,     0.9434,     0.9729,     0.9266],
+	"null-inout1":[    0.9626,     0.9734,     1.0000,     0.9516,     0.9628,     0.9015],
+	"null-inout2":[    0.9456,     0.9655,     1.0000,     0.9443,     0.9603,     0.8065],
+	"null-pwv1":  [    0.9536,     0.9669,     1.0000,     0.9503,     0.9677,     0.9163],
+	"null-pwv2":  [    0.9491,     0.9661,     1.0000,     0.9503,     0.9572,     0.8775],
+	"null-t1":    [    0.9512,     0.9678,     1.0000,     0.9565,     0.9693,     0.9215],
+	"null-t2":    [    0.9504,     0.9599,     1.0000,     0.9499,     0.9635,     0.8534],
+}
 
 datasets = [
-	["cmb_night",              "std",         "night", "AA", 3, 4, None],
+	["cmb_night",              "std",         "night", "AA", 4, 4, None],
 	["cmb_night_null_pwv1",    "null-pwv1",   "night", "AA", 3, 4, None],
 	["cmb_night_null_pwv2",    "null-pwv2",   "night", "AA", 3, 4, None],
 	["cmb_night_null_el1",     "null-el1",    "night", "AA", 3, 4, None],
@@ -32,6 +55,12 @@ datasets = [
 	["cmb_daydeep",            "std",         "day",   "DS", 3, 4, [[1260,  11039],[ 4109, 24765]]],
 	["cmb_daydeep",            "std",         "day",   "DN", 3, 4, [[7831, -10698],[10034,  2213]]],
 	["cmb_daywide",            "std",         "day",   "AA", 3, 4, None],
+	["cmb_daydeep_null_inout1","null-inout1", "day",   "DS", 3, 4, [[1260,  11039],[ 4109, 24765]]],
+	["cmb_daydeep_null_inout1","null-inout1", "day",   "DN", 3, 4, [[7831, -10698],[10034,  2213]]],
+	["cmb_daywide_null_inout1","null-inout1", "day",   "AA", 3, 4, None],
+	["cmb_daydeep_null_inout2","null-inout2", "day",   "DS", 3, 4, [[1260,  11039],[ 4109, 24765]]],
+	["cmb_daydeep_null_inout2","null-inout2", "day",   "DN", 3, 4, [[7831, -10698],[10034,  2213]]],
+	["cmb_daywide_null_inout2","null-inout2", "day",   "AA", 3, 4, None],
 	["galaxy_night",           "std",         "night", "GC", 3, 2, None],
 	["bridge_night",           "std",         "night", "BR", 3, 2, None],
 	["deep5_night",            "std",         "night", "D5", 3, 4, None],
@@ -97,7 +126,7 @@ for di, dset in enumerate(datasets):
 					extra["POLCCONV"] = ("IAU", "Polarization convention")
 				tasks.append(bunch.Bunch(
 					ifname=ifname, ofname=ofname, extra=extra, pixbox=pixbox,
-					mul=(gains[ai]**gexp * poleffs[ai]**pexp * sign)[...,None,None]))
+					mul=(gains[typ][ai]**gexp * poleffs[typ][ai]**pexp * sign)[...,None,None]))
 
 # Next set up the coadd maps. Here we have map types map[3], map_srcfree[3] and ivar[3],
 # and datasets {act,act_planck}, {s08,s17}_{f090,f150,f220}_{night,daynight}
@@ -148,6 +177,7 @@ for si, season in enumerate(seasons):
 					)
 					if sign.ndim == 1 and len(sign) == 3 and sign[2] < 0:
 						extra["POLCCONV"] = ("IAU", "Polarization convention")
+						print("Remember to manually fix missing CTYPE3 = STOKES! Currently can't write this out with enmap.write")
 					tasks.append(bunch.Bunch(
 						ifname=ifname, ofname=ofname, extra=extra, pixbox=None,
 						mul=np.array(sign)[...,None,None]))

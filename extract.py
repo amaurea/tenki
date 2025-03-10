@@ -4,6 +4,7 @@ parser.add_argument("box_or_template")
 parser.add_argument("ifiles", nargs="+")
 parser.add_argument("out")
 parser.add_argument("-F", "--fix-wcs", action="store_true")
+parser.add_argument("--op", type=str, default=None)
 args = parser.parse_args()
 import numpy as np, os
 from pixell import enmap, utils, wcsutils
@@ -22,5 +23,7 @@ for fi, ifile in enumerate(ifiles):
 	map = enmap.read_map(ifile, **kwargs)
 	if args.fix_wcs:
 		map.wcs = wcsutils.fix_wcs(map.wcs)
+	if args.op is not None:
+		map = eval(args.op, {"m":map,"enmap":enmap,"utils":utils,"np":np},np.__dict__)
 	enmap.write_map(ofile, map)
 	del map

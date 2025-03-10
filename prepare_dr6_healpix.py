@@ -8,14 +8,18 @@ args = parser.parse_args()
 import numpy as np, os, healpy
 from pixell import enmap, utils, curvedsky, reproject, mpi, bunch
 
-act_fields = set("TELESCOP", "INSTRUME", "RELEASE", "SEASON", "PATCH", "ARRAY", "FREQ", "ACTTAGS", "BUNIT", "EXTNAME")
+act_fields = set(["TELESCOP", "INSTRUME", "RELEASE", "SEASON", "PATCH", "ARRAY", "FREQ", "ACTTAGS", "BUNIT", "EXTNAME"])
+
+csys = "equ"
+if   csys == "equ": rot, coord = None, "C"
+elif csys == "gal": rot, coord = "equ,gal", "G"
+else: raise ValueError("Unrecognized csys '%s'" % str(csys))
 
 def extract_act_fields(header):
 	fields = []
 	for key, val in header.items():
-		print(type(val), val)
 		if key in act_fields:
-			fields.append([key]+val)
+			fields.append((key,val))
 	return fields
 
 comm    = mpi.COMM_WORLD
@@ -30,20 +34,20 @@ for fi, ifname in enumerate(ifnames):
 
 for ind in range(comm.rank, len(tasks), comm.size):
 	task    = tasks[ind]
-	map     = enmap.read_map(task.ifname)
-	headers = enmap.read_map_headers(task.ifname)
+	map     = enmap.read_map(task.ifname, verbose=True)
+	headers = enmap.read_fits_header(task.ifname)
 	fields  = extract_act_fields(headers)
 	dtype   = map.dtype
 	if task.isvar:
-		omap = reproject.map2healpix(map, nside=args.nside, rot="equ,gal", method="spline", spin=[0], order=0, extensive=True)
+		omap = reproject.map2healpix(map, nside=args.nside, rot=rot, method="spline", spin=[0], order=0, extensive=True)
 	else:
 		mask  = map.preflat[0]!=0
-		omask = reproject.map2healpix(omask, nside=args.nside, rot="equ,gal", method="spline", order=0)
+		omask = reproject.map2healpix(mask, nside=args.nside, rot=rot, method="spline", order=0)
 		del mask
-		omap  = reproject.map2healpix(map, nside=args.nside, rot="equ,gal", method="harm", lmax=args.lmax)
+		omap  = reproject.map2healpix(map, nside=args.nside, rot=rot, method="harm", lmax=args.lmax)
 		omap *= omask
 		del omask
 	del map
-	healpy.write_map(task.ofname, omap, dtype=dtype, coord="G", extra_header=fields, overwrite=True)
+	healpy.write_map(task.ofname, omap, dtype=dtype, coord=coord, extra_header=fields, overwrite=True)
 	del omap
 	print(task.ofname)

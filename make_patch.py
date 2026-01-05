@@ -2,10 +2,10 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("box", type=str)
 parser.add_argument("ofile")
-parser.add_argument("-r", "--res",  type=float, default=0.5)
-parser.add_argument("-p", "--proj", type=str, default="car")
+parser.add_argument("-r", "--res",  type=float, default=0.5, help="default 0.5 arcmin")
+parser.add_argument("-p", "--proj", type=str, default="car", help="default car")
 parser.add_argument("-f", "--full", action="store_true")
-parser.add_argument("-V", "--variant", type=str, default="fejer1")
+parser.add_argument("-V", "--variant", type=str, default="fejer1", help="default fejer1")
 args = parser.parse_args()
 import numpy as np
 from pixell import utils, enmap

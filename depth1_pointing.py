@@ -48,6 +48,7 @@ def find_srcs(rho, kappa, snlim=5, snlim0=2):
 	# measure center-of-mass position. This is a good estimate for the
 	# point source position, but not infallible
 	pixs = np.array(ndimage.center_of_mass(snr, labels, iall)).T
+	del snr
 	if pixs.size == 0: return np.zeros((0,4))
 	poss = rho.pix2sky(pixs)
 	# measure the flux
@@ -127,10 +128,15 @@ for ind in range(comm.rank, nfile, comm.size):
 	base  = utils.replace(rhofiles[ind], "_rho.fits", "")
 	if args.verbose >= 1:
 		print("%s%4d %4d/%d Processing %s%s" % (colors.lgreen, comm.rank, ind+1, nfile, base, colors.reset))
-	rho   = enmap.read_map(base + "_rho.fits")
-	kappa = enmap.read_map(base + "_kappa.fits")
+	try: rho   = enmap.read_map(base + "_rho.fits")
+	except Exception as e:
+		print("Error reading %s. Skipping. %s" % (base + "_rho.fits", str(e)))
+		continue
+	try: kappa = enmap.read_map(base + "_kappa.fits")
+	except Exception as e:
+		print("Error reading %s. Skipping. %s" % (base + "_kappa.fits", str(e)))
+		continue
 	kappa = np.maximum(kappa, np.max(kappa)*0.01)
-	tmap, tref = read_tmap(base + "_time.fits")
 	if not args.noinfo:
 		info  = bunch.read("_".join(base.split("_")[:-2]) + "_info.hdf")
 		# We need the commanded elevation, since this can be >90°, which
@@ -147,6 +153,7 @@ for ind in range(comm.rank, nfile, comm.size):
 
 	# Find srcs and sort by snr
 	mycat = find_srcs(rho, kappa, snlim=args.snlim) # [nsrc,{ra,dec,flux,dflux}]
+	del rho, kappa
 	mycat = mycat[np.argsort(mycat[:,2]/mycat[:,3])[::-1]]
 	if len(mycat) == 0 and args.verbose >= 1:
 		print("%4d %4d/%s No objects found in %s" % (comm.rank, ind+1, nfile, base))
@@ -158,9 +165,14 @@ for ind in range(comm.rank, nfile, comm.size):
 		print("%4d %4d/%s None of %d detected objects matched in %s" % (comm.rank, ind+1, nfile, len(mycat), base))
 		continue
 	nmatched = len(myinds)
+
+	try: tmap, tref = read_tmap(base + "_time.fits")
+	except Exception as e:
+		print("Error reading %s. Skipping. %s" % (base + "_time.fits", str(e)))
+		continue
 	# Get the time each object was hit. Uses observed coordinates
 	times = tmap.at(mycat.T[1::-1,myinds], order=1).astype(np.float64)+tref
-
+	del tmap
 	# Restrict to valid times. This is probably not necessary, since
 	# we shouldn't detect objects if there's a hole in the map anyway
 	tgood = times>=tref

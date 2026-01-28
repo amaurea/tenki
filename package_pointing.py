@@ -87,9 +87,6 @@ class ModelLookup:
 			omodel[ilook] = gmod[ibest]
 		return omodel, toff
 
-# Given a list of subids, I want to map them to the best entry
-# in models. 
-
 def rm(fname):
 	try: os.remove(fname)
 	except FileNotFoundError: pass
@@ -114,7 +111,7 @@ table  = np.zeros(len(inds), dtype=odtype).view(np.recarray)
 table.subid   = np.strings.encode(obsinfo.id[inds])
 table.version = "lat_v2"
 for field in table.dtype.names[2:]:
-	table[field] = omodels[field][inds]
+	table[field] = omodels[field][inds]*utils.degree
 
 utils.mkdir(args.odir)
 # Output as single hdf file with a dataset indicating the start of the time-range we cover,

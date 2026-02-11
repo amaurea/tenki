@@ -19,6 +19,7 @@ parser.add_argument(      "--simple-alpha", type=float, default=-3.5)
 parser.add_argument(      "--noisemask-lim",type=float, default=None)
 parser.add_argument("-p", "--pixwin",       type=str,   default="nn")
 parser.add_argument(      "--suffix",       type=str,   default="")
+parser.add_argument(      "--sel",          type=str,   default=None)
 args = parser.parse_args()
 import numpy as np
 from pixell import enmap, utils, bunch, mpi, uharm, array_ops, analysis
@@ -153,10 +154,12 @@ for fi in range(comm.rank, nfile, comm.size):
 	print("%4d %5d/%d Processing %s" % (comm.rank, fi+1, nfile, os.path.basename(mapfile)))
 	# Read in our data
 	map  = enmap.read_map(mapfile)
+	if args.sel: map = eval("map"+args.sel)
 	if map.shape[-2] < minsize or map.shape[-1] < minsize:
 		print("%4d Skipping %s: too small" % (comm.rank, os.path.basename(mapfile)))
 		continue
 	ivar = enmap.read_map(ivarfile)
+	if args.sel: ivar = eval("ivar"+args.sel)
 	dtype  = map.dtype
 	ny, nx = map.shape[-2:]
 	# Convet to mJy/sr

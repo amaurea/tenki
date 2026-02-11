@@ -16,6 +16,7 @@ parser.add_argument("-v", "--verbose", default=1, action="count")
 parser.add_argument("-q", "--quiet",   default=0, action="count")
 parser.add_argument("-b", "--bsize",   type=float, default=2.1, help="Beam FWHM in arcmin. Used to estimate position accuracy")
 parser.add_argument(      "--noinfo",  action="store_true")
+parser.add_argument("-e", "--edge",    type=float, default=2, help="Disqualify sources closer to the apodized edge than this, in beam FWHMs")
 args = parser.parse_args()
 import numpy as np, os
 from pixell import enmap, utils, mpi, bunch, colors
@@ -50,7 +51,8 @@ def find_srcs(rho, kappa, snlim=5, snlim0=2):
 	pixs = np.array(ndimage.center_of_mass(snr, labels, iall)).T
 	del snr
 	if pixs.size == 0: return np.zeros((0,4))
-	poss = rho.pix2sky(pixs)
+	poss = rho.pix2sky(pixs, safe=False)
+	poss[1] = utils.rewind(poss[1], ref=rho.center()[1])
 	# measure the flux
 	rho_vals   = rho.at(poss)
 	kappa_vals = kappa.at(poss)
@@ -64,6 +66,10 @@ def find_srcs(rho, kappa, snlim=5, snlim0=2):
 	# construct output catalog
 	cat = np.concatenate([poss[::-1,good], flux[None,good], dflux[None,good]]).T
 	return cat
+
+def calc_edge_dist(cat, mask, rmax=1*utils.degree):
+	# Mask is True if bad
+	return (~mask).distance_transform(rmax=rmax).at(cat.T[1::-1])
 
 def cat2fcart(cat, rscale=1, fscale=1):
 	coords       = np.zeros((len(cat),4))
@@ -120,6 +126,8 @@ verbosity= args.verbose - args.quiet
 refcat   = read_pointing_catalog(args.cat) # [{ra,dec,flux,dflux},nsrc]
 rhofiles = sum([sorted(utils.glob(fname)) for fname in args.rhofiles],[])
 nfile    = len(rhofiles)
+bsize    = args.bsize*utils.fwhm*utils.arcmin
+rmin     = args.edge*bsize
 
 # collect output here
 output = []
@@ -128,15 +136,19 @@ for ind in range(comm.rank, nfile, comm.size):
 	base  = utils.replace(rhofiles[ind], "_rho.fits", "")
 	if args.verbose >= 1:
 		print("%s%4d %4d/%d Processing %s%s" % (colors.lgreen, comm.rank, ind+1, nfile, base, colors.reset))
-	try: rho   = enmap.read_map(base + "_rho.fits")
+	try: rho   = enmap.read_map(base + "_rho.fits", preflat=True, sel=(0,))
 	except Exception as e:
 		print("Error reading %s. Skipping. %s" % (base + "_rho.fits", str(e)))
 		continue
-	try: kappa = enmap.read_map(base + "_kappa.fits")
+	try: kappa = enmap.read_map(base + "_kappa.fits", preflat=True, sel=(0,))
 	except Exception as e:
 		print("Error reading %s. Skipping. %s" % (base + "_kappa.fits", str(e)))
 		continue
-	kappa = np.maximum(kappa, np.max(kappa)*0.01)
+	klim  = np.max(kappa)*0.01
+	# Remember which areas are close to the edge. Will use this to disqualify srcs later
+	mask  = kappa < klim
+	# Apodize the S/N map to avoid huge number of fake detections at edges
+	kappa = np.maximum(kappa, klim)
 	if not args.noinfo:
 		info  = bunch.read("_".join(base.split("_")[:-2]) + "_info.hdf")
 		# We need the commanded elevation, since this can be >90°, which
@@ -155,6 +167,9 @@ for ind in range(comm.rank, nfile, comm.size):
 	mycat = find_srcs(rho, kappa, snlim=args.snlim) # [nsrc,{ra,dec,flux,dflux}]
 	del rho, kappa
 	mycat = mycat[np.argsort(mycat[:,2]/mycat[:,3])[::-1]]
+	# Disqualify srcs too close to edge
+	redge = calc_edge_dist(mycat, mask, rmax=rmin)
+	mycat = mycat[redge >= rmin]
 	if len(mycat) == 0 and args.verbose >= 1:
 		print("%4d %4d/%s No objects found in %s" % (comm.rank, ind+1, nfile, base))
 		continue
@@ -210,6 +225,7 @@ output = output[np.argsort(output[:,6])]
 
 if comm.rank == 0:
 	print("%sWriting %s%s" % (colors.lgreen, args.ofile, colors.reset))
+	utils.mkdir(os.path.dirname(args.ofile))
 	with open(args.ofile, "w") as ofile:
 		for row in output:
 			ofile.write(format_row(row, refcat, rhofiles) + "\n")

@@ -8,20 +8,14 @@ parser.add_argument(      "--nmin",   type=int,   default=6,   help="Skip if few
 parser.add_argument("-R", "--robust", type=int,   default=1,   help="Nonzero to fit robustly, which is the default. 3x slower.")
 parser.add_argument("-F", "--fit",    type=str,   default="enc_offset_az,enc_offset_el,base_tilt_cos,base_tilt_sin")
 parser.add_argument(      "--detoff", type=str,   default="lat_offs.txt")
+parser.add_argument("-G", "--group",  type=str,   default="obs", help="What to fit jointly. 'obs' to fit all data in obs together. 'obs,wafer' to fit each wafer separately per obs. 'obs,tube': same, but by tube. --fit-offs probably won't make sense if you fit wafers separately.")
+parser.add_argument("-f", "--fit-offs", type=int, default=1)
 args = parser.parse_args()
 import numpy as np
 from pixell import utils, bunch, coordsys, colors, bench
 from scipy import ndimage, optimize
 
-#fit_dtype = [
-#	("ctime","d"),("az","d"),("el","d"),("roll","d"),("snr","d"),
-#	("Δaz","d"), ("σaz","d"), ("Δel","d"), ("σel","d"),
-#	("Δra","d"), ("σra","d"), ("Δdec","d"), ("σdec","d"),
-#	("sid","i"), ("ra","d"), ("dec", "d"), ("ref_flux","d"),
-#	("flux","d"), ("name","U50"),
-#]
-#deg_fields = ["az", "el", "roll", "ra", "dec"]
-#arcmin_fields = ["Δaz", "σaz", "Δel", "σel", "Δra", "σra", "Δdec", "σdec"]
+# Differs from model_pointing.py by supporting joint fits across wafers
 
 fit_dtype = [
 	("ctime","d"),("ra","d"),("dec","d"),("snr","d"),("flux","d"),("dflux","d"),
@@ -54,15 +48,71 @@ def read_detoff(fname_or_literal):
 				offs[toks[0]] = (float(toks[1])*utils.degree, float(toks[2])*utils.degree)
 		return offs
 
-def get_detoff(offs, name):
-	key = ":".join(name.split("_")[1:-4])
-	if key in offs: return offs[key]
-	if "*" in offs: return offs["*"]
-	else: raise KeyError("no detoffs for '%s')" % key)
+def name2wafer(name):
+	# This works both for wafer and tube grouping
+	return ":".join(name.split("_")[1:-3])
 
-def split_cat(cat, maxdur=np.inf):
+def get_detoff(offs, wafer):
+	if wafer in offs: return offs[wafer]
+	if "*"   in offs: return offs["*"]
+	else: raise KeyError("no detoffs for '%s')" % wafer)
+
+#def get_detoff(offs, name):
+#	key = name2wafer(name)
+#	if key in offs: return offs[key]
+#	if "*" in offs: return offs["*"]
+#	else: raise KeyError("no detoffs for '%s')" % key)
+
+def cat_wafer_inds(cat):
+	# This is a bit inefficient, but straightforward
+	cwafers = np.array([name2wafer(name) for name in cat.name])
+	wafers, order, edges = utils.find_equal_groups_fast(cwafers)
+	labels = np.zeros(len(cat),int)
+	for wi in range(len(wafers)):
+		labels[order[edges[wi]:edges[wi+1]]] = wi
+	return bunch.Bunch(wafers=wafers, order=order, edges=edges, labels=labels)
+
+def add_cat_detoff(cat, offs, winds):
+	# Make an output catalog with xi,eta columns and copy over
+	dtype = cat.dtype.descr + [("xi","d"),("eta","d")]
+	ocat = np.zeros(len(cat), dtype=dtype).view(np.recarray)
+	for field in cat.dtype.names:
+		ocat[field] = cat[field]
+	# then add the offsets
+	for gi, wafer in enumerate(winds.wafers):
+		inds = winds.order[winds.edges[gi]:winds.edges[gi+1]]
+		ocat.xi[inds], ocat.eta[inds] = get_detoff(offs, wafer)
+	return ocat
+
+#def add_cat_detoff(cat, offs):
+#	dtype = cat.dtype.descr + [("xi","d"),("eta","d")]
+#	ocat = np.zeros(len(cat), dtype=dtype).view(np.recarray)
+#	for field in cat.dtype.names:
+#		ocat[field] = cat[field]
+#	# den add the offsets
+#	unames, order, edges = utils.find_equal_groups_fast(cat.name)
+#	for gi, name in enumerate(unames):
+#		inds = order[edges[gi]:edges[gi+1]]
+#		ocat.xi[inds], ocat.eta[inds] = get_detoff(offs, name)
+#	return ocat
+
+def name2tag(names, group_by="obs"):
+	fields = np.array([name.split("_") for name in names]).T
+	# Find out which columns we want
+	fmap   = {"obs":(-3,), "tube":(-5,), "wafer":(-5,-4), "wtype":(-4,), "band":(-2,)}
+	cols   = []
+	for fname in group_by.split(","):
+		cols += fmap[fname]
+	# Extract those
+	res = fields[cols[0]]
+	for col in cols[1:]:
+		res = np.strings.add(np.strings.add(res, "_"), fields[col])
+	return res
+
+def split_cat(cat, maxdur=np.inf, group_by="obs"):
 	# Group by name
-	names, labels = np.unique(cat.name, return_inverse=True)
+	tags = name2tag(cat.name, group_by=group_by)
+	names, labels = np.unique(tags, return_inverse=True)
 	# Split each name-group by maxdur
 	allofthem = np.arange(len(names))
 	tmins  = ndimage.minimum(cat.ctime, labels, allofthem)
@@ -72,15 +122,15 @@ def split_cat(cat, maxdur=np.inf):
 	tid    = utils.floor((cat.ctime-tmins[labels])/dts[labels])
 	# Avoid length-1 group at the end
 	tid    = np.minimum(tid, nsplit[labels]-1)
-	labels, inds = utils.label_multi([tid, cat.name], return_index=True)
+	labels, inds = utils.label_multi([tid, tags], return_index=True)
 	# Reformat for output. Useful to have in similar format as
 	# find_equal_groups_fast
-	_, order, edges = utils.find_equal_groups_fast(labels)
+	ulabels, order, edges = utils.find_equal_groups_fast(labels)
 	# Get the start and end time for each of the final groups
-	allofthem = np.arange(len(labels))
+	allofthem = np.arange(len(ulabels))
 	tmins  = ndimage.minimum(cat.ctime, labels, allofthem)
 	tmaxs  = ndimage.maximum(cat.ctime, labels, allofthem)
-	return bunch.Bunch(gnames=cat.name[inds], gsubs=tid[inds], order=order,
+	return bunch.Bunch(gnames=tags[inds], gsubs=tid[inds], order=order,
 		edges=edges, t1s=tmins, t2s=tmaxs)
 
 # Model fitting:
@@ -102,7 +152,7 @@ class PointingModel:
 	def __init__(self, params, roll=0, det_xieta=None):
 		self.params    = params.copy()
 		self.roll      = roll
-		self.det_xieta = det_xieta if det_xieta is not None else (0,0)
+		self.det_xieta = np.array(det_xieta) if det_xieta is not None else np.zeros(2)
 	def build_quats(self, baz, bel, roll):
 		model = self.params
 		corot = bel - roll - 60*utils.degree
@@ -149,8 +199,7 @@ class PointingModel:
 		baz -= self.params.enc_offset_az
 		bel -= self.params.enc_offset_el
 		return np.array([baz, bel])
-	def inverse(self, azel, niter=10):
-		# FIXME: apply and inverse must handle el>90°. If not, we end up with crazy fits
+	def inverse(self, azel, niter=10, return_oroll=False):
 		bazel = azel
 		oroll = self.roll
 		for it in range(niter):
@@ -159,17 +208,32 @@ class PointingModel:
 			q_base, q_lonlat, q_middle, q_det = self.build_quats(bazel[0], bazel[1], self.roll)
 			oroll = coordsys.Coords(q=q_base * q_lonlat * q_middle * q_det).roll
 			oaz, oel, oroll = restore_el(azel[1], bazel[0], bazel[1], oroll)
-		return bazel
+		if return_oroll: return bazel, oroll
+		else: return bazel
 	def copy(self): return PointingModel(params=self.params, roll=self.roll, det_xieta=self.det_xieta)
 	def update(self, dict):
 		self.params.update(dict)
 		return self
+	# The ones below here are for exploring coordinate systems where the pointing residuals
+	# could be more naturally explained
+	def azel2xieta(self, azel, bazel, oroll):
+		q_base, q_lonlat, q_middle, q_det = self.build_quats(bazel[0], bazel[1], self.roll)
+		q_tot = coordsys.Coords(az=azel[0], el=azel[1], roll=oroll).q
+		# q_tot = q_base * q_lonlat * q_middle * q_det. Want to infer q_det instead of using the
+		# fiducial one
+		q_odet = (1/q_middle) * (1/q_lonlat) * (1/q_base) * q_tot
+		return np.array(coordsys.decompose_xieta(q_odet))
+	def azel2postroll(self, azel, bazel, oroll):
+		q_base, q_lonlat, q_middle, q_det = self.build_quats(bazel[0], bazel[1], self.roll)
+		q_tot  = coordsys.Coords(az=azel[0], el=azel[1], roll=oroll).q
+		q_post = (1/q_lonlat) * (1/q_base) * q_tot
+		return np.array(coordsys.decompose_xieta(q_post))
 
 def debug(cat, base, det_xieta=None):
 	baz, bel, roll = utils.rewind(np.array([190, 120, 185])*utils.degree)
 	oroll = (3.269316324510058-180)*utils.degree
 	#baz, bel, roll = np.array([10, 60, 5])*utils.degree
-	model = PointingModel(base, roll=roll, det_xieta=det_xieta)
+	model = PointingModel(base, roll=roll, det_xieta=(cat.xi, cat.eta))
 	az, el = model.apply([baz, bel])
 	#baz2, bel2 = model.inverse([az,el])
 	baz2, bel2 = model._approx_inverse([az,el], [baz,bel], oroll)
@@ -177,21 +241,26 @@ def debug(cat, base, det_xieta=None):
 	baz3, bel3 = model.inverse([az,el])
 	print("%12.6f %12.6f %12.6f %12.6f %12.6f %12.6f" % (baz/utils.degree, baz3/utils.degree, (baz3-baz)/utils.degree, bel/utils.degree, bel3/utils.degree, (bel3-bel)/utils.degree))
 
-
 # Uncertainty estimate. If we assume gaussian, then we have:
 #  chisq    = (d-Pa)'N"(d-Pa), so
 #  chisq_,ij = (P'N"P)_ij. For comparison, the cov(â) = (P'N"P)", so
 #  chisq_,ij = icov(â)_ij
 
-def fit_model(cat, base, params=None, scale=1e-4, errs=None, estimate_dx=True, det_xieta=None):
+def _fit_model(cat, base, params=None, scale=1e-4, errs=None, estimate_dx=True, xieta_offset=None, xoff=0):
 	if params is None: params = ["enc_offset_az", "enc_offset_el", "base_tilt_cos", "base_tilt_sin"]
 	azel_obs  = np.array([cat.az,  cat.el])
 	Δazel     = np.array([cat.Δaz, cat.Δel])
 	σazel     = np.array([cat.σaz, cat.σel]) if errs is None else errs
 	azel_true = azel_obs - Δazel
 	# Unapply current model
-	model0    = PointingModel(base, roll=cat.roll, det_xieta=det_xieta)
-	bazel     = model0.inverse(azel_obs)
+	model0    = PointingModel(base, roll=cat.roll, det_xieta=(cat.xi, cat.eta))
+	bazel, oroll = model0.inverse(azel_obs, return_oroll=True)
+	# Now that we've calculated bazel and oroll, we can safely apply any xieta offset.
+	# If we did it before this, it would mostly cancel instead of representing a pointing
+	# error term
+	if xieta_offset is not None:
+		model0.det_xieta[0] += xieta_offset[0]
+		model0.det_xieta[1] += xieta_offset[1]
 	# Solve for the model parametrs that makes model.apply(bazel) match azel_true
 	def zip(model): return np.array([model.params[name] for name in params])/scale
 	def unzip(x): return model0.copy().update({name:x[i]*scale for i,name in enumerate(params)})
@@ -220,10 +289,15 @@ def fit_model(cat, base, params=None, scale=1e-4, errs=None, estimate_dx=True, d
 		return ddchisq
 	x0    = zip(model0)
 	x     = optimize.fmin_powell(calc_chisq, x0, disp=False)
+	# debug: artificial x offset
+	x    += xoff/scale
 	model = unzip(x)
 	azel  = model.apply(bazel)
 	resid = azel-azel_true
 	chisq = calc_chisq(x)
+	# Get offsets in focal plane coordinates too
+	Δxieta = model.azel2xieta(azel, bazel, oroll)[:2] - model.azel2xieta(azel_true, bazel, oroll)[:2]
+	#Δpost  = model.azel2postroll(azel, bazel, oroll)[:2] - model.azel2postroll(azel_true, bazel, oroll)[:2]
 	# Get a weighted average quantities
 	weight= np.sum(σazel**-2,0)
 	def avg(a): return np.sum(a*weight)/np.sum(weight)
@@ -239,23 +313,88 @@ def fit_model(cat, base, params=None, scale=1e-4, errs=None, estimate_dx=True, d
 		dxout = ivar**-0.5
 	else: dxout = x*0
 	res   = bunch.Bunch(model=model, resid=resid, chisq=chisq, n=len(cat), x=xout, dx=dxout,
-		params=params, t=avg_t, az=avg_az, el=avg_el, roll=avg_roll)
+		params=params, t=avg_t, az=avg_az, el=avg_el, roll=avg_roll, Δxieta=Δxieta)#, Δpost=Δpost)
 	return res
 
-def fit_model_robust(cat, base, params=None, scale=1e-4,
-		errs=[0.3*utils.arcmin,0.1*utils.arcmin,0], etol=3, det_xieta=None):
-	# First do a fit with bounded accuracy
-	σazel   = np.array([cat.σaz, cat.σel])
-	penalty = np.zeros(len(cat))
-	for i, err in enumerate(errs):
-		last  = i==len(errs)-1
-		σwork = (σazel**2 + err**2 + penalty)**0.5
-		fit   = fit_model(cat, base, params=params, scale=scale, errs=σwork, estimate_dx=last, det_xieta=det_xieta)
-		# Which have poor fits?
-		excess= np.mean(fit.resid**2,0) - np.mean(σwork**2,0)
-		penalty += np.maximum(0, excess - etol**2*np.mean(σazel**2,0))
-	return fit
+def fit_model(cat, base, params=None, scale=1e-4,
+		errs=[0.3*utils.arcmin,0.1*utils.arcmin,0], etol=3, xieta_offset=None, xoff=0, robust=False):
+	if not robust:
+		return _fit_model(cat, base, params=params, scale=scale, erros=errs, estimate_dx=True, xieta_offset=xieta_offset, xoff=xoff)
+	else:
+		# First do a fit with bounded accuracy
+		σazel   = np.array([cat.σaz, cat.σel])
+		penalty = np.zeros(len(cat))
+		for i, err in enumerate(errs):
+			last  = i==len(errs)-1
+			σwork = (σazel**2 + err**2 + penalty)**0.5
+			fit   = _fit_model(cat, base, params=params, scale=scale, errs=σwork, estimate_dx=last, xieta_offset=xieta_offset, xoff=xoff)
+			# Which have poor fits?
+			excess= np.mean(fit.resid**2,0) - np.mean(σwork**2,0)
+			penalty += np.maximum(0, excess - etol**2*np.mean(σazel**2,0))
+		return fit
 
+def wafer_avg(labels, vals, minlength=0):
+	weight = (cat.σaz**2+cat.σel**2)**-1
+	avgs   = utils.bincount(labels, vals*weight, minlength=minlength)
+	div    = np.bincount(labels, weight, minlength=minlength)
+	with utils.nowarn():
+		avgs /= div
+		utils.remove_nan(avgs)
+	return avgs
+
+def fit_det_offs(ginfo, cat, base, winds, params=None, scale=1e-4,
+		errs=[0.3*utils.arcmin,0.1*utils.arcmin,0], etol=3, niter=2, robust=False, verbose=False):
+	nwafer = len(winds.wafers)
+	xieta_offset = np.zeros((2,nwafer))
+	for it in range(niter):
+		# Fit each group
+		Δxieta = np.zeros((2,len(cat)))
+		for gi, (gname, gsub) in enumerate(zip(ginfo.gnames, ginfo.gsubs)):
+			name  = "%s_%02d" % (gname, gsub)
+			inds  = ginfo.order[ginfo.edges[gi]:ginfo.edges[gi+1]]
+			gcat  = cat[inds]
+			nsrc  = len(gcat)
+			t1, t2= ginfo.t1s[gi], ginfo.t2s[gi]
+			if nsrc < args.nmin: continue
+			# offsets[:,winds.labels] looks up the wafer offsets for each entry in cat
+			fit = fit_model(gcat, base, params=params, robust=robust, xieta_offset=xieta_offset[:,winds.labels[inds]])
+			Δxieta[:,inds] = fit.Δxieta
+			if verbose:
+				msg = format_fit(fit, name, [t1,t2])
+				print("%d/%d %5d/%d %s" % (it+1, niter, gi+1, len(ginfo.gnames), msg))
+		# We now have the individual offsets. Average per wafer
+		xieta_offset += wafer_avg(winds.labels, -Δxieta, minlength=nwafer)
+	return xieta_offset
+
+#def wafer_avg(labels, vals):
+#	weight = (cat.σaz**2+cat.σel**2)**-1
+#	avgs   = utils.bincount(labels, vals*weight)/np.bincount(labels, weight)
+#	return avgs[:,labels]
+#
+#def fit_det_offs(ginfo, cat, base, params=None, scale=1e-4,
+#		errs=[0.3*utils.arcmin,0.1*utils.arcmin,0], etol=3, niter=2, robust=False, verbose=False):
+#	xieta_offset = np.zeros((2,len(cat)))
+#	wlabels = utils.label_multi([cat.xi, cat.eta])
+#	for it in range(niter):
+#		# Fit each group
+#		Δxieta = np.zeros((2,len(cat)))
+#		for gi, (gname, gsub) in enumerate(zip(ginfo.gnames, ginfo.gsubs)):
+#			name  = "%s_%02d" % (gname, gsub)
+#			inds  = ginfo.order[ginfo.edges[gi]:ginfo.edges[gi+1]]
+#			gcat  = cat[inds]
+#			nsrc  = len(gcat)
+#			t1, t2= ginfo.t1s[gi], ginfo.t2s[gi]
+#			if nsrc < args.nmin: continue
+#			fit = fit_model(gcat, base, params=params, robust=robust, xieta_offset=xieta_offset[:,inds])
+#			Δxieta[:,inds] = fit.Δxieta
+#			if verbose:
+#				msg = format_fit(fit, name, [t1,t2])
+#				print("%d/%d %5d/%d %s" % (it+1, niter, gi+1, len(ginfo.gnames), msg))
+#		# We now have the individual offsets. Average per wafer
+#		xieta_offset += wafer_avg(wlabels, -Δxieta)
+#	return xieta_offset
+
+# Dumps the residual per individual observation
 def dump_resid(fname, cat, fit):
 	out = np.array([
 		cat.ctime, cat.az/utils.degree, cat.el/utils.degree, cat.roll/utils.degree, cat.snr,
@@ -267,6 +406,40 @@ def dump_resid(fname, cat, fit):
 		cat.ref_flux, cat.flux,
 		fit.resid[0]/utils.arcmin, fit.resid[1]/utils.arcmin]).T
 	np.savetxt(fname, out, fmt="%10.0f  %7.2f %6.2f %7.2f %7.2f  %6.3f %6.3f %6.3f %6.3f  %6.3f %6.3f %6.3f %6.3f  %5d %7.2f %7.2f %7.1f %7.1f  %6.3f %6.3f")
+
+# Dump the average offset and residual per entry in the
+# focal plane
+def dump_fplane(fname, cat, fit):
+	# First group by xieta
+	groups = utils.find_equal_groups(np.array([cat.xi, cat.eta]).T)
+	with open(fname, "w") as ofile:
+		# Will output one line in the file for each of these groups.
+		for gi, group in enumerate(groups):
+			gcat    = cat[group]
+			# If this is too vulnerable to outliers, then should increase error bar
+			# at some earlier point, not in this function
+			weight  = (gcat.σaz**2+gcat.σel**2)**-1
+			wtot    = np.sum(weight)
+			σ       = wtot**-0.5
+			Δaz0    = np.sum(gcat.Δaz*weight)/wtot
+			Δel0    = np.sum(gcat.Δel*weight)/wtot
+			Δaz,Δel = np.sum(fit.resid[:,group]*weight,-1)/wtot
+			ctime   = np.sum(gcat.ctime*weight)/wtot
+			baz     = np.sum(gcat.baz*weight)/wtot
+			bel     = np.sum(gcat.bel*weight)/wtot
+			roll    = np.sum(gcat.roll*weight)/wtot
+			Δxi,Δeta= np.sum(fit.Δxieta[:,group]*weight,-1)/wtot
+			#Δpost   = np.sum(fit.Δpost[:,group]*weight,-1)/wtot
+			msg     = "%6.3f %6.3f %6.3f %6.3f  %6.3f %6.3f  %6.3f %6.3f  %6.3f %6.3f   %10.0f %8.2f %8.2f %8.2f" % ( # %6.3f %6.3f" % (
+				Δaz0/utils.arcmin, σ/utils.arcmin,
+				Δel0/utils.arcmin, σ/utils.arcmin,
+				Δaz/utils.arcmin, Δel/utils.arcmin,
+				gcat.xi[0]/utils.degree, gcat.eta[0]/utils.degree,
+				Δxi/utils.arcmin, Δeta/utils.arcmin,
+				ctime, baz/utils.degree, bel/utils.degree, roll/utils.degree,
+				#Δpost[0]/utils.arcmin, Δpost[1]/utils.arcmin,
+				)
+			ofile.write(msg + "\n")
 
 param_order = ["enc_offset_az", "enc_offset_el", "enc_offset_cr", "base_tilt_sin", "base_tilt_cos", "el_axis_center_xi0", "el_axis_center_eta0", "mir_center_xi0", "mir_center_eta0", "cr_center_xi0", "cr_center_eta0", "el_sag_pivot", "el_sag_lin", "el_sag_quad"]
 
@@ -289,42 +462,43 @@ def format_header():
 	header += "\n"
 	return header
 
-params= args.fit.split(",")
-icat = read_fit_cat(args.src_fits)
-base = bunch.read(args.base_model)
-ginfo = split_cat(icat, maxdur=args.maxdur*utils.hour)
-
-# This should be per-tube/per-wafer, not just an overall number
+params = args.fit.split(",")
+cat    = read_fit_cat(args.src_fits)
+# add xieta wafer offsets per entry
+winds  = cat_wafer_inds(cat)
 detoff = read_detoff(args.detoff)
+cat    = add_cat_detoff(cat, detoff, winds)
+
+base  = bunch.read(args.base_model)
+ginfo = split_cat(cat, maxdur=args.maxdur*utils.hour, group_by=args.group)
+
 utils.mkdir(args.odir)
 
-# TODO: The pointing model has an el-sag term that requires the
-# full, 0-180° range of el, but we don't have that available in our
-# input fits. Should fix that.
+if args.fit_offs:
+	xieta_offset = fit_det_offs(ginfo, cat, base, winds, params=params, robust=args.robust, verbose=True)
+	with open(args.odir + "/wafer_offs.txt", "w") as ofile:
+		for wafer, (xi,eta) in zip(winds.wafers, xieta_offset.T):
+			ofile.write("%-6s %8.5f %8.5f\n" % (wafer, xi/utils.arcmin, eta/utils.arcmin))
+else: xieta_offset = np.zeros((2,len(cat)))
 
-# TODO: check if wafer offsets matter. They're currently ignored, but
-# maybe they're responsible for the wafer inconsistency I see in the
-# fits.
+xoff = np.zeros(len(params))
+#xoff[0] += 1*utils.arcmin
 
 with open(args.odir + "/model.txt", "w") as ofile:
 	ofile.write(format_header())
 	for gi, (gname, gsub) in enumerate(zip(ginfo.gnames, ginfo.gsubs)):
 		name  = "%s_%02d" % (gname, gsub)
 		inds  = ginfo.order[ginfo.edges[gi]:ginfo.edges[gi+1]]
-		gcat  = icat[inds]
+		gcat  = cat[inds]
 		nsrc  = len(gcat)
 		t1, t2= ginfo.t1s[gi], ginfo.t2s[gi]
-		try:
-			det_xieta = get_detoff(detoff, name)[::-1]
-		except KeyError as e:
-			print("%5d/%d %s skip:%s" % (gi+1, len(ginfo.gnames), name, str(e)))
-			continue
 		if nsrc < args.nmin:
 			print("%5d/%d %s skip:nsrc=%d" % (gi+1, len(ginfo.gnames), name, nsrc))
 			continue
-		if args.robust: fit = fit_model_robust(gcat, base, params=params, det_xieta=det_xieta)
-		else:           fit = fit_model(gcat, base, params=params, det_xieta=det_xieta)
+		fit = fit_model(gcat, base, params=params, robust=args.robust,
+			xieta_offset=xieta_offset[:,winds.labels[inds]], xoff=xoff)
 		dump_resid("%s/resid_%s.txt" % (args.odir, name), gcat, fit)
+		dump_fplane("%s/fplane_%s.txt" % (args.odir, name), gcat, fit)
 		msg = format_fit(fit, name, [t1,t2])
 		print("%5d/%d %s" % (gi+1, len(ginfo.gnames), msg))
 		ofile.write(msg + "\n")

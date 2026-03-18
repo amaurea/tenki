@@ -19,11 +19,11 @@ beam /= np.max(beam)
 map  = enmap.read_map(args.imap)
 # get rid of nans
 map[~np.isfinite(map)] = 0
-if args.apod: map *= enmap.apod_mask(map.preflat[0]!=0, args.apod*utils.degree)
+mask = np.any(map.preflat != 0,0)
+if args.apod: map *= enmap.apod_mask(mask, args.apod*utils.degree)
 uht  = uharm.UHT(map.shape, map.wcs)
 l    = np.maximum(uht.l, 0.5)
 if args.filter > 0: F = (1+(l/args.lknee)**args.alpha)**-1 * uht.lprof2hprof(beam)
-mask = map[0] != 0
 for I in utils.nditer(map.shape[:-3]):
 	# Filter T
 	if args.filter > 0:

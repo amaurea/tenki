@@ -31,15 +31,18 @@ def setup_buffers(dev, ntot, dtype=np.float32, ndet_guess=10000):
 	ftot = ntot//2 + ndet_guess
 	dev.pools["pointing"]   .empty((3, ntot), dtype=dtype)
 	dev.pools["tod"]        .empty(ntot, dtype=dtype)
+	dev.pools["tod2"]       .empty(ntot, dtype=dtype)
 	dev.pools["ft" ]        .empty(ftot, dtype=ctype)
 	dev.pools["fft_scratch"].empty(ftot, dtype=ctype)
 	dev.pools.reset()
 
-def simple_deriv(a, h=1, dt=1):
+def simple_deriv(a, h=1, dt=1, out=None):
 	ap  = device.anypy(a)
-	res = ap.zeros_like(a)
-	res[...,h:-h] = (a[...,2*h:]-a[...,:-2*h])/(2*h*dt)
-	return res
+	if out is None: out = ap.zeros_like(a)
+	out[...,h:-h]  = a[...,2*h:]
+	out[...,h:-h] -= a[...,:-2*h]
+	out /=  (2*h*dt)
+	return out
 
 def measure_shift(a, b, dev=None):
 	if dev is None: dev = device.get_device()
@@ -79,7 +82,8 @@ def analyse_heating(data, h=40, dev=None):
 	srate = (len(data.ctime)-1)/(data.ctime[-1]-data.ctime[0])
 	# Estimate the absolute acceleration and heating rate
 	acc     = dev.np.abs(simple_deriv(simple_deriv(dev.np.array(data.boresight[1]), h=h, dt=1/srate), h=h, dt=1/srate)).astype(data.tod.dtype)
-	heating = simple_deriv(data.tod, h=h, dt=1/srate)
+	heating = dev.pools["tod2"].zeros(data.tod.shape, data.tod.dtype)
+	heating = simple_deriv(data.tod, h=h, dt=1/srate, out=heating)
 	# Estimate the heating's delay relative to the acceleration
 	shift   = measure_shift(acc, heating, dev=dev)/srate
 	# Estimate the total amount of heating

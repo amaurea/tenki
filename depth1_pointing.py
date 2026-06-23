@@ -34,6 +34,10 @@ def read_pointing_catalog(fname):
 		cat[:,:2] *= utils.degree
 		return cat
 
+info_dtype = [("name","U40"),("band","U4"),("ctime","d"),("dur","d"),("az","d"),("waz","d"),("el","d"),("wel","d"),("roll","d"),("wroll","d"),("sens","d")]
+def read_info(fname):
+	return np.loadtxt(fname, dtype=info_dtype, ndmin=1).view(np.recarray)
+
 def read_tmap(fname):
 	tmap   = enmap.read_map(fname)
 	header = enmap.read_fits_header(fname)
@@ -150,13 +154,13 @@ for ind in range(comm.rank, nfile, comm.size):
 	# Apodize the S/N map to avoid huge number of fake detections at edges
 	kappa = np.maximum(kappa, klim)
 	if not args.noinfo:
-		info  = bunch.read("_".join(base.split("_")[:-2]) + "_info.hdf")
+		info  = read_info("_".join(base.split("_")[:-1]) + "_info.txt")
 		# We need the commanded elevation, since this can be >90°, which
 		# we can't recover from our coordinate transform. Also nice to have roll
-		obs_az   = info.obstab[0]["az"]*utils.degree
-		obs_waz  = info.obstab[0]["waz"]*utils.degree
-		obs_el   = info.obstab[0]["el"]*utils.degree
-		obs_roll = info.obstab[0]["roll"]*utils.degree
+		obs_az   = info[0]["az"]*utils.degree
+		obs_waz  = info[0]["waz"]*utils.degree
+		obs_el   = info[0]["el"]*utils.degree
+		obs_roll = info[0]["roll"]*utils.degree
 	else:
 		obs_az   = 0
 		obs_waz  = 0

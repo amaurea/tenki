@@ -12,6 +12,23 @@ import numpy as np, re, os
 from pixell import utils, bunch, sqlite
 from sogma import loading, device
 
+# This needs to be updated for my new model format.
+# 1. Use the model directly
+#  + Small, efficient, easy to read
+#  - Harder read logic, incompatible with sotodlib approach
+#  In particular, reading code would need to support each type
+#  of dependency (currently static, wafer and time). Not too big
+#  problem, really. Calibration happens at the wafer level, so
+#  reading code can safely evaluate the dependency to return a
+#  simple parameter object like it currently does.
+#  More importantly, it seems hard to restrict to the same
+#  scanning pattern...
+# 2. Pre-evaluate the model for each observation.
+#  + Same format as before, no need to change code
+#
+# Actally, my parameter format doens't contain the necessary
+# scanning pattern information. Fixing
+
 def get_wtube(name):
 	if m := re.search(r"[\b_]([cio]\d)_(ws\d)[\b_]", name):
 		return m.group(1), m.group(2)

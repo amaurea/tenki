@@ -539,11 +539,11 @@ class ModelDynamicV2(ModelStaticV2):
 		toks = parse_names(data.name)
 		uwafer,  iwafer  = np.unique(toks.wafer, return_inverse=True)
 		# For time, we want to split by obs (really depth1-id), but split if too long
-		itime, tmins, tmaxs = time_split(toks.obs, data.ctime, maxdur=self.maxdur)
-		tnames = np.array(["%.0f:+%.0f" % (t1,t2-t1) for (t1,t2) in zip(tmins, tmaxs)])
-		name  = ("time", "wafer")
-		inds  = (itime, iwafer)
-		bname = (tnames, uwafer)
+		# split by time and pattern
+		utpat,   itpat   = build_tpat(data, tol=self.tol, maxdur=self.maxdur)
+		name  = ("tpat", "wafer")
+		inds  = (itpat, iwafer)
+		bname = (utpat, uwafer)
 		return name, inds, bname
 	pinfo0 = np.array([
 		("enc_offset_az",       0, True,    0,       1*DEG),
@@ -567,8 +567,9 @@ class ModelDynamicV2(ModelStaticV2):
 	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelRadRollHor(Model):
-	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour):
+	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour, tol=1*utils.degree):
 		self.maxdur = maxdur
+		self.tol    = tol
 		Model.__init__(self, cat, dof=dof, fit=fit, defaults=defaults)
 	def variant(self, cat, dof):
 		return ModelRadRollHor(cat, dof=dof, maxdur=self.maxdur)
@@ -576,12 +577,11 @@ class ModelRadRollHor(Model):
 		toks = parse_names(data.name)
 		ustatic, istatic = np.array(["-"]), np.zeros(len(data),int)
 		uwafer,  iwafer  = np.unique(toks.wafer, return_inverse=True)
-		# For time, we want to split by obs (really depth1-id), but split if too long
-		itime, tmins, tmaxs = time_split(toks.obs, data.ctime, maxdur=self.maxdur)
-		tnames = np.array(["%.0f:+%.0f" % (t1,t2-t1) for (t1,t2) in zip(tmins, tmaxs)])
-		name  = ("time", "wafer", "static")
-		inds  = (itime, iwafer, istatic)
-		bname = (tnames, uwafer, ustatic)
+		# split by time and pattern
+		utpat,   itpat   = build_tpat(data, tol=self.tol, maxdur=self.maxdur)
+		name  = ("tpat", "wafer", "static")
+		inds  = (itpat, iwafer, istatic)
+		bname = (utpat, uwafer, ustatic)
 		return name, inds, bname
 	def eval(self, pfull, icoord):
 		# This model is identical to the static one, except we apply an r-dependent,
@@ -623,8 +623,9 @@ class ModelRadRollHor(Model):
 	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelRadRollArc(Model):
-	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour):
+	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour, tol=1*utils.degree):
 		self.maxdur = maxdur
+		self.tol    = tol
 		Model.__init__(self, cat, dof=dof, fit=fit, defaults=defaults)
 	def variant(self, cat, dof):
 		return ModelRadRollArc(cat, dof=dof, maxdur=self.maxdur)
@@ -632,12 +633,10 @@ class ModelRadRollArc(Model):
 		toks = parse_names(data.name)
 		ustatic, istatic = np.array(["-"]), np.zeros(len(data),int)
 		uwafer,  iwafer  = np.unique(toks.wafer, return_inverse=True)
-		# For time, we want to split by obs (really depth1-id), but split if too long
-		itime, tmins, tmaxs = time_split(toks.obs, data.ctime, maxdur=self.maxdur)
-		tnames = np.array(["%.0f:+%.0f" % (t1,t2-t1) for (t1,t2) in zip(tmins, tmaxs)])
-		name  = ("time", "wafer", "static")
-		inds  = (itime, iwafer, istatic)
-		bname = (tnames, uwafer, ustatic)
+		utpat,   itpat   = build_tpat(data, tol=self.tol, maxdur=self.maxdur)
+		name  = ("tpat", "wafer", "static")
+		inds  = (itpat, iwafer, istatic)
+		bname = (utpat, uwafer, ustatic)
 		return name, inds, bname
 	def eval(self, pfull, icoord):
 		# This model is identical to the dynamic v2 one, except we
@@ -658,7 +657,7 @@ class ModelRadRollArc(Model):
 		coords = coordsys.Coords(q=q_base * q_lonlat * q_middle * q_det)
 		ocoord = np.array(restore_el(bel, coords.az, coords.el, coords.roll)).T
 		return ocoord
-	# Here 2 = static, 1 = wafer-dependent and 0 = time-dependent
+	# Here 2 = static, 1 = wafer-dependent and 0 = time-scanpat
 	# In this model, most of the v2 static parameters are static
 	# and not fit. Might want to change that in variant models in the
 	# future, but for now this seems to perform well
@@ -727,6 +726,22 @@ def azel2xieta_v2(pfull, coord, icoord):
 	q_odet = (1/q_middle) * (1/q_lonlat) * (1/q_base) * q_tot
 	return np.array(coordsys.decompose_xieta(q_odet)).T
 
+def build_tpat(data, tol=1*utils.degree, maxdur=2*utils.hour):
+	"""Build the tpat = time+scanpat split"""
+	# First split by time and pattern
+	toks = parse_names(data.name)
+	itime, tmins, tmaxs = time_split(toks.obs, data.ctime, maxdur=maxdur)
+	ipat, azs,els,rolls = pattern_split(data.pat_baz, data.pat_bel, data.roll, tol=tol)
+	# Then combine
+	itpat, iinds  = utils.label_multi([itime,ipat], return_index=True)
+	tmins, tmaxs  = [a[itime[iinds]] for a in [tmins, tmaxs]]
+	azs,els,rolls = [a[ipat [iinds]] for a in [azs,els,rolls]]
+	# Try to keep name reasonably compact
+	names = np.array(["t:%.0f:+%.0f,az:%.0f,el:%.0f,roll:%.0f" % (
+		t1,t2-t1,az,el,roll) for t1,t2,az,el,roll in
+		zip(tmins,tmaxs,azs/utils.degree,els/utils.degree,rolls/utils.degree)])
+	return names, itpat
+
 def pinfo2defaults(pinfo):
 	dtype    = [(p["name"], "d") for p in pinfo]
 	default  = np.zeros(1, dtype)
@@ -769,6 +784,16 @@ def time_split(ilabels, ctime, maxdur=np.inf):
 	tmins  = ndimage.minimum(ctime, olabels, allofthem)
 	tmaxs  = ndimage.maximum(ctime, olabels, allofthem)
 	return olabels, tmins, tmaxs
+
+def pattern_split(baz, bel, roll, tol=1*utils.degree):
+	labels, nlabel = multi_split([baz,bel,roll],[tol,tol,tol])
+	allofthem = np.arange(nlabel)
+	oaz, oel, oroll = [ndimage.mean(a, labels, allofthem) for a in [baz,bel,roll]]
+	return labels, oaz, oel, oroll
+
+def multi_split(valss, tols):
+	labelss = [utils.label_similar_groups_fast(vals, tol) for vals,tol in zip(valss,tols)]
+	return utils.label_multi(labelss, return_nlabel=True)
 
 def restore_el(el0, az, el, roll):
 	over  = el0 > np.pi/2

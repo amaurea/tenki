@@ -1,10 +1,8 @@
 import argparse
 parser = argparse.ArgumentParser()
-parser.add_argument("model", help="Text file with one model fit per line")
-parser.add_argument("sel",   help="Selector for which observations to package model for")
-parser.add_argument("depth1_dir", help="Directory that contains depth1 info files, which will be used to map from model fits to subids")
-parser.add_argument("odir", help="Directory to write output sqlite and hdf data. Will be created if necessary")
-parser.add_argument("-P", "--tpad",    type=float, default=100)
+parser.add_argument("params", help="Text file with model parameters, as written by model_pointing.py")
+parser.add_argument("sel",    help="Selector for which observations to package model for")
+parser.add_argument("odir",   help="Directory to write output sqlite and hdf data. Will be created if necessary")
 parser.add_argument("-C", "--context", type=str,   default="lat")
 parser.add_argument("-T", "--maxdt",   type=float, default=10, help="Max time offset between observation and model in days")
 args = parser.parse_args()
@@ -26,8 +24,7 @@ from sogma import loading, device
 # 2. Pre-evaluate the model for each observation.
 #  + Same format as before, no need to change code
 #
-# Actally, my parameter format doens't contain the necessary
-# scanning pattern information. Fixing
+# Going with #2 here
 
 def get_wtube(name):
 	if m := re.search(r"[\b_]([cio]\d)_(ws\d)[\b_]", name):
@@ -104,40 +101,128 @@ class ModelLookup:
 			omodel[ilook] = gmod[ibest]
 		return omodel, toff
 
-def rm(fname):
-	try: os.remove(fname)
-	except FileNotFoundError: pass
+def read_params(pfile):
+	params = np.loadtxt(pfile, dtype=[("name", "U32"), ("type", "U32"), ("bin", "U100"), ("val", "d")])
+	# get the model version too
+	with open(pfile, "r") as ifile:
+		line = next(ifile)
+		m    = re.match(r"# *model *: *(\w+).*", line.strip())
+		if not m: raise ValueError("Invalid params header '%s'" % line)
+		model = m.group(1)
+	return params, model
+
+def parse_tpat(desc):
+	ttok, atok, etok, rtok = [tok.split(":") for tok in desc.split(",")]
+	if ttok[0] != "t" or atok[0] != "az" or etok[0] != "el" or rtok[0] != "roll" or ttok[2][0] != "+":
+		raise ValueError("Invalid tpat format '%s'" % desc)
+	t1 = float(ttok[1])
+	t2 = t1+float(ttok[2])
+	az = float(atok[1])*utils.degree
+	el = float(etok[1])*utils.degree
+	roll = float(rtok[1])*utils.degree
+	return t1,t2,az,el,roll
+
+def id2waf(subid):
+	obs, ws, band = subid.split(":")
+	fields = obs.split("_")
+	return ":".join(fields[2][-2:], ws)
+
+def close(a,b,tol): return np.abs(a-b) <= tol
+
+def sorted_range_cands(ranges, vals):
+	"""Given possibly overlapping ranges[n,{from,to}] sorted by
+	from, return the index of the first and beyond-last element in ranges
+	that could contain each entry in vals[m] as cand_ranges[m,{ifrom,ito}]"""
+	# First possible match is after last that ends before us
+	order2= np.searchsorted(ranges[:,1])
+	i1s0  = np.searchsorted(ranges[order2,1], vals)+1
+	bad   = i1s0 >= len(vals)
+	i1s   = order2[np.minimum(i1s0, len(vals))]
+	i1s[bad] = len(vals)
+	# Last possible match is first that starts after us
+	i2s   = np.searchsorted(ranges[:,0], ttarg)+1
+	cand_ranges = np.array([i1s, i2s]).T
+	return canc_ranges
+
+def tpat_lookukp(obsinfo, keys, ttol=1*utils.day, stol=1*utils.degree):
+	inds  = np.full(len(obsinfo), -1, int)
+	ttargs= obsinfo.ctime + obsinfo.dur/2
+	# Will end up looping in python, but let's make the start/end points smart at least.
+	order = np.argsort(info.keys[:,0])
+	keys  = info.keys[order].copy()
+	# Apply time-padding
+	keys[:,0] -= ttol
+	keys[:,1] += ttol
+	# Find sub-range we need to search through
+	i1s, i2s = sorted_range_cands(keys[:,2], ttargs)
+	# Then loop through all the obsinfo entries and find the best match, if any
+	for ei, (entry, ttarg, i1, i2) in enumerate(zip(obsinfo, ttargs, i1s, i2s)):
+		ibest, dbest = 0, np.inf
+		for i in range(i1, i2):
+			t1, t2, az, el, roll = keys[i]
+			if t1-ttol <= ttarg and ttarg < t2+ttol and close(az, entry.baz, stol) and close(el, entry.bel, stol) and close(roll, entry.roll, stol):
+				dist = np.abs(0.5*(t1+t2)-ttarg)
+				if dist < dbest:
+					ibest = i
+					dbest = dist
+		inds[ei] = order[ibest]
+	return inds
+
+def parse_params(params):
+	res = {}
+	for ind, (name, type, bin, val) in enumerate(params):
+		if name not in res: res[name] = bunch.Bunch(type=type, keys=[], inds=[], vals=[])
+		if   type == "tpat":   key = parse_tpat(bin)
+		elif type == "static": key = bin
+		elif type == "wafer":  key = bin
+		else: raise ValueError("Unrecognized param type '%s'" % str(type))
+		res[name].keys.append(key)
+		res[name].inds.append(ind)
+		res[name].vals.append(val)
+	for key, val in res.items():
+		val.keys = np.array(val.keys)
+		val.inds = np.array(val.inds)
+		val.vals = np.array(val.vals)
+	return res
+
+def eval_params(parsed, obsinfo, model="arc", ttol=1*utils.day, stol=1*utils.degree):
+	# Initialize the table
+	dtype = [("model", "U32")]
+	for name, info in parsed.items():
+		dtype.append((name, info.vals[0].dtype))
+	nobs  = len(obsinfo)
+	table = np.zeros(nobs, dtype).view(np.recarray)
+	good  = np.full(nobs, True, bool)
+	table["model"] = model
+	# Get wafer id for each entry in obsinfo
+	wafers = np.array([id2waf(id) for id in obsinfo.id])
+	# Get the fields
+	for name, info in parsed.items():
+		if   info.type == "tpat": inds = tpat_lookup(obsinfo, info.keys)
+		elif info.type == "wafer": inds = utils.find(info.keys, wafers, default=-1)
+		elif info.type == "static": inds = np.zeros(nobs, int)
+		else: raise ValueError("Unrecognized param type '%s'" % info.type)
+		valid = inds >= 0
+		table[name][valid] = info.val[inds[valid]]
+		good &= valid
+	return table, good
 
 # Get our observation info
 dev     = device.get_device("cpu")
 loader  = loading.Loader(args.context, dev=dev)
 obsinfo = loader.query(args.sel)
-# Load all the models
-imodels = read_models(args.model)
-# Match models to observations
-lookup  = ModelLookup(imodels)
-omodels, toff = lookup.lookup(obsinfo)
-# These are the observations where a usable model was found
-good    = toff < args.maxdt*utils.day
-inds    = np.where(good)[0]
-print("Found a matching model for %d/%d subids" % (len(inds),len(obsinfo)))
-
-# Now create the output database
-odtype = [("subid","S40"),("version","S6")]+omodels.dtype.descr[10:]
-table  = np.zeros(len(inds), dtype=odtype).view(np.recarray)
-table.subid   = np.strings.encode(obsinfo.id[inds])
-table.version = "lat_v2"
-for field in table.dtype.names[2:]:
-	table[field] = omodels[field][inds]*utils.degree
-
-utils.mkdir(args.odir)
+# Read the raw parametrs
+params, model = read_params(args.params)
+table, good = eval_params(params, obsinfo, model=model, ttol=args.maxdt)
+# Restrict to cases with a valid match
+print("Found a matching model for %d/%d subids" % (np.sum(good),len(obsinfo)))
 # Output as single hdf file with a dataset indicating the start of the time-range we cover,
 # which will be t0 for now
-bunch.write(args.odir + "/pointing_offsets.h5", bunch.Bunch(t0=table))
+utils.mkdir(args.odir)
+bunch.write(args.odir + "/pointing_offsets.h5", bunch.Bunch(t0=table[good]))
 np.savetxt(args.odir + "/unmatched.txt", obsinfo.id[~good], fmt="%s")
-
 # Output an sqlite file with a single time-range pointing to this file
-rm(args.odir + "/db.sqlite")
+utils.rm(args.odir + "/db.sqlite")
 with sqlite.open(args.odir + "/db.sqlite") as s:
 	s.execute("create table files (id integer, name text)")
 	s.execute("insert into files (id, name) values (?,?)", (0, "pointing_offsets.h5"))

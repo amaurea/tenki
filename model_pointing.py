@@ -164,7 +164,7 @@ dtype_pinfo = [("name", "U25"), ("depend", "i"), ("fit","i"), ("default", "d"), 
 # Then the mapmaker only needs to care about waf_off_*.
 
 class Pzipper:
-	dtype_annot = [("name", "U32"), ("type", "U32"), ("bin", "U32"), ("val", "d")]
+	dtype_annot = [("name", "U32"), ("type", "U32"), ("bin", "U100"), ("val", "d")]
 	def __init__(self, pinfo, labels, defaults=[]):
 		self.pinfo    = pinfo
 		self.labels   = labels
@@ -340,13 +340,13 @@ class Pzipper:
 		x      = self.parse(xannot)
 		if full: return self.unzip(x)
 		else: return x
-	def write(self, fname, x, full=False):
+	def write(self, fname, x, full=False, header=""):
 		if full: x = self.zip(x)
 		xannot   = self.annot(x)
 		lens     = np.max([[len(row[a]) for a in ["name", "type", "bin"]] for row in xannot],0)
 		lens     = tuple(map(int, lens))
 		fmt      = "%%-%ds %%-%ds %%-%ds %%15.7e" % lens
-		np.savetxt(fname, xannot, fmt=fmt)
+		np.savetxt(fname, xannot, fmt=fmt, header=header)
 
 def get_pinfo(pinfo0, fit=None):
 	pinfo = pinfo0.copy()
@@ -472,6 +472,7 @@ class Model:
 	pinfo0 = np.zeros(0, dtype=dtype_pinfo).view(np.recarray)
 
 class ModelStaticV2(Model):
+	name = "lat_v2"
 	def __init__(self, cat, dof=None, fit=None, defaults=[]):
 		Model.__init__(self, cat, dof=dof, fit=fit, defaults=defaults)
 	def label(self, data):
@@ -532,6 +533,7 @@ class ModelStaticV2(Model):
 	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelDynamicV2(ModelStaticV2):
+	name = "lat_v2"
 	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour):
 		self.maxdur = maxdur
 		ModelStaticV2.__init__(self, cat, dof=dof, fit=fit, defaults=defaults)
@@ -567,6 +569,7 @@ class ModelDynamicV2(ModelStaticV2):
 	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelRadRollHor(Model):
+	name = "rad_roll_hor"
 	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour, tol=1*utils.degree):
 		self.maxdur = maxdur
 		self.tol    = tol
@@ -623,6 +626,7 @@ class ModelRadRollHor(Model):
 	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelRadRollArc(Model):
+	name = "arc"
 	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour, tol=1*utils.degree):
 		self.maxdur = maxdur
 		self.tol    = tol
@@ -909,7 +913,7 @@ tcoord  = np.array([cat.az-cat.Δaz, cat.el-cat.Δel, cat.az*0]).T
 x, dcoord = model.fit_robust(icoord, tcoord, dcoord, verbose=verbosity)
 # Write out our final fit parameters
 pfull  = model.dof.unzip(x)
-model.dof_full.write(os.path.join(args.odir, "params.txt"), pfull, full=True)
+model.dof_full.write(os.path.join(args.odir, "params.txt"), pfull, full=True, header="model: %s" % model.name)
 # Dump the residuals. For each point we want:
 # * All the info in cat
 # * resid az,el

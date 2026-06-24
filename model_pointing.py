@@ -154,6 +154,15 @@ dtype_pinfo = [("name", "U25"), ("depend", "i"), ("fit","i"), ("default", "d"), 
 #    to generate the epxanded form needed in #2.
 # Going with 2+3
 
+# We fit for wafer coordinates, but in the actual mapmaking we will be dealing
+# with detectors, not wafers, so what we need is a per-wafer correction to apply
+# per wafer. I want to be able to write out something useful with dof.write, so
+# maybe the params themselves would contain offsets, not absolute coordinates
+# But I do need the abolute coordinates in the model. How about this?
+#  waf_pos_xi, waf_pos_eta are the fidicual pos, and are not fit
+#  waf_off_xi, waf_off_eta are the offsets we will fit, and are relative to the above
+# Then the mapmaker only needs to care about waf_off_*.
+
 class Pzipper:
 	dtype_annot = [("name", "U32"), ("type", "U32"), ("bin", "U32"), ("val", "d")]
 	def __init__(self, pinfo, labels, defaults=[]):
@@ -187,6 +196,7 @@ class Pzipper:
 			# dep:   what parameter depends on. Index into labels
 			# pbins: which bin each cat entry falls into for this parameter
 			# xinds: which indices into the x vector we map to.
+			# scale: divide by this when going to x
 			map.append((name, dep, pbins, np.arange(pnum)+ndof, scale))
 			ndof += pnum
 		self.map   = map
@@ -270,7 +280,7 @@ class Pzipper:
 		for ti in range(self.ntype):
 			# Will only fit parameters in this group
 			sub_pinfo = self.pinfo.copy()
-			sub_pinfo["fit"][sub_pinfo["depend"] != ti] = False
+			sub_pinfo.fit[sub_pinfo.depend != ti] = False
 			# Get the groups for this type. E.g. for the time-dependency,
 			# this would loop through the individual time-bins
 			lname, bins, bnames = [a[ti] for a in self.labels]
@@ -314,32 +324,57 @@ class Pzipper:
 		targ  = self.annot(xannot.val)
 		ikeys = [" ".join((row["name"], row["type"], row["bin"])) for row in xannot]
 		okeys = [" ".join((row["name"], row["type"], row["bin"])) for row in targ]
-		order = utils.find(ikeys, okeys)
+		order = utils.find(ikeys, okeys, default=-1)
 		x     = np.zeros(len(xannot))
-		for name, dep, pbins, xinds, scale in self.map:
-			x[xinds] = xannot.val[order[xinds]]/scale
+		for i, (name, dep, pbins, xinds, scale) in enumerate(self.map):
+			inds = order[xinds]
+			vals = np.where(inds >= 0, xannot.val[inds], self.pinfo.default[i])
+			x[xinds] = vals/scale
 		return x
-	def read(self, fname):
+	def read(self, fname, full=False):
+		"""Read a parameter file like what write produces, returning an x.
+		Note that only parameters that can be represented in this Pzipper's
+		active degrees of freedom will be included! Therefore you should
+		usually call this function with a model.dof_full, not just a plain model.dof"""
 		xannot = np.loadtxt(args.base_model, dtype=Pzipper.dtype_annot).view(np.recarray)
-		return self.parse(xannot)
-	def write(self, fname, x):
+		x      = self.parse(xannot)
+		if full: return self.unzip(x)
+		else: return x
+	def write(self, fname, x, full=False):
+		if full: x = self.zip(x)
 		xannot   = self.annot(x)
 		lens     = np.max([[len(row[a]) for a in ["name", "type", "bin"]] for row in xannot],0)
 		lens     = tuple(map(int, lens))
 		fmt      = "%%-%ds %%-%ds %%-%ds %%15.7e" % lens
 		np.savetxt(fname, xannot, fmt=fmt)
 
+def get_pinfo(pinfo0, fit=None):
+	pinfo = pinfo0.copy()
+	if   fit is None: return pinfo
+	if isinstance(fit, str): fit = [fit]
+	kmap = {p["name"]:i for i,p in enumerate(pinfo)}
+	for name in fit:
+		if name == "*": pinfo.fit[:] = True
+		else: pinfo.fit[kmap[name]] = True
+	return pinfo
+
 class Model:
-	def __init__(self, cat, dof=None, fit=None, defaults=[]):
+	def __init__(self, cat, dof=None, dof_full=None, fit=None, defaults=[]):
 		self.cat = cat
+		labels   = None
+		# These are the standard degrees of freedom that we will fit
 		if dof is None:
-			pinfo = self.pinfo0.copy()
-			if fit is not None:
-				pinfo.fit = False
-				pinfo.fit[kmap[name]] = True
-			labels = self.label(cat)
-			dof    = Pzipper(pinfo, labels, defaults=defaults)
+			pinfo = get_pinfo(self.pinfo0, fit=fit)
+			if labels is None: labels = self.label(cat)
+			dof   = Pzipper(pinfo, labels, defaults=defaults)
 		self.dof = dof
+		# These are the same, except everything that can be fit is included.
+		# This is mainly useful when reading in parameters
+		if dof_full is None:
+			pinfo_full = get_pinfo(self.pinfo0, fit="*")
+			if labels is None: labels = self.label(cat)
+			dof_full = Pzipper(pinfo_full, labels, defaults=defaults)
+		self.dof_full = dof_full
 	def variant(self, cat, dof): return self.__class__(cat, dof=dof)
 	@property
 	def pinfo(self): return self.dof.pinfo
@@ -373,7 +408,7 @@ class Model:
 			icoord = self._approx_inverse(pfull, ocoord, icoord)
 			ocoord[:,2] = self.eval(pfull, icoord)[:,2]
 		return icoord, ocoord
-	def fit(self, icoord, tcoord, dcoord, verbose=0, prefix=""):
+	def fit(self, icoord, tcoord, dcoord, verbose=0, prefix=[]):
 		"""Fit a model such that input coordinates icoord are transformed into
 		target coordinates tcoord with as small error as possible"""
 		if self.dof.ndof == 0: return
@@ -387,21 +422,11 @@ class Model:
 			chisq  = np.sum((mcoord[:,:2]-tcoord[:,:2])**2/dcoord[:,:2]**2)
 			step[0] += 1
 			if verbose > 0:
-				print("%s%4d %15.7e " % (prefix, step[0], chisq) + " ".join(["%12.5e" % val for val in x][:8]))
-				#dump_resid(os.path.join(args.odir, "resid_%s_%04d.txt" % (prefix.strip(), step[0])), icoord, tcoord, mcoord, dcoord)
-				#print("pfull")
-				#print(pfull)
-				#print("tcoord")
-				#print(tcoord/utils.degree)
-				#print("mcoord")
-				#print(mcoord/utils.degree)
-				#print("resid")
-				#print((tcoord-mcoord)/utils.degree)
-				#print()
+				print("%s%4d %15.7e " % (" ".join(prefix), step[0], chisq) + " ".join(["%12.5e" % val for val in x][:8]))
 			return chisq
 		x = optimize.fmin_powell(calc_chisq, x, disp=False)
 		return x
-	def fit_gibbs(self, icoord, tcoord, dcoord, niter=3, verbose=0, prefix=""):
+	def fit_gibbs(self, icoord, tcoord, dcoord, niter=3, verbose=0, prefix=[]):
 		# If needed, set our initial condition by writing to self.dof.defaults.
 		# Yes, awkward.
 		pfull  = self.dof.default()
@@ -410,7 +435,7 @@ class Model:
 		for it in range(niter):
 			for si, split in enumerate(splits):
 				if verbose > 0:
-					print("%s %3d/%d %3d/%d %s" % (prefix, it+1, niter, si+1, len(splits), split.name))
+					print("%s %3d/%d %3d/%d %s" % (" ".join(prefix), it+1, niter, si+1, len(splits), split.name))
 				inds, xinds, model = split.inds, split.xinds, split.model
 				# The model/dof/dof-internals split is awkward. Anyway, we pass in
 				# both the initial condition and state of the parameters we're not
@@ -420,20 +445,20 @@ class Model:
 				#print("inds", inds)
 				#print("defaults")
 				#print(model.dof.defaults)
-				x[xinds] = model.fit(icoord[inds], tcoord[inds], dcoord[inds], verbose=verbose-1, prefix=prefix + split.name + "_%02d" % it)
+				x[xinds] = model.fit(icoord[inds], tcoord[inds], dcoord[inds], verbose=verbose-1, prefix=prefix+[split.name,"%02d"%it])
 				# Need to keep x and pfull in sync. Could do this with a full
 				# unzip, but a partial unzip should be equivalent and faster
 				pfull[inds] = model.dof.unzip(x[xinds])
 			if verbose > 0:
 				mcoord = self.eval(pfull, icoord)
 				chisq  = np.sum((mcoord[:,:2]-tcoord[:,:2])**2/dcoord[:,:2]**2)
-				print("%s%4d %15.7e" % (prefix, it+1, chisq))
+				print("%s%4d %15.7e" % (" ".join(prefix), it+1, chisq))
 		return x
-	def fit_robust(self, icoord, tcoord, dcoord, niter=3, etol=3, errs=[0.3*utils.arcmin, 0.1*utils.arcmin, 0], verbose=0, prefix=""):
+	def fit_robust(self, icoord, tcoord, dcoord, niter=3, etol=3, errs=[0.3*utils.arcmin, 0.1*utils.arcmin, 0], verbose=0, prefix=[]):
 		penalty = np.zeros(len(icoord))
 		for it, err in enumerate(errs):
 			dcoord_eff = (dcoord**2 + err**2 + penalty[:,None])**0.5
-			x = self.fit_gibbs(icoord, tcoord, dcoord_eff, niter=niter, verbose=verbose, prefix=prefix + "_rit%d" % it)
+			x = self.fit_gibbs(icoord, tcoord, dcoord_eff, niter=niter, verbose=verbose, prefix=prefix + ["rit %d/%d"%(it+1,len(errs))])
 			if it < len(errs)-1:
 				pfull  = self.dof.unzip(x)
 				mcoord = self.eval(pfull, icoord)
@@ -444,7 +469,7 @@ class Model:
 		"""Given pfull, ocoord and icoord such that eval(pfull, icoord) ≈ ocoord,
 		return a new icoord that results in an even closer approximation."""
 		raise NotImplementedError
-	pinfo0 = np.zeros(0, dtype=dtype_pinfo)
+	pinfo0 = np.zeros(0, dtype=dtype_pinfo).view(np.recarray)
 
 class ModelStaticV2(Model):
 	def __init__(self, cat, dof=None, fit=None, defaults=[]):
@@ -486,8 +511,10 @@ class ModelStaticV2(Model):
 		return np.array([baz, bel, roll0]).T
 	# Here 0 = static, 1 = pos-dependent
 	pinfo0 = np.array([
-		("waf_pos_xi",          1, True, 0,       1*AMIN),
-		("waf_pos_eta",         1, True, 0,       1*AMIN),
+		("waf_pos_xi",          1, False,0,       1*AMIN),
+		("waf_pos_eta",         1, False,0,       1*AMIN),
+		("waf_off_xi",          1, True, 0,       1*AMIN),
+		("waf_off_eta",         1, True, 0,       1*AMIN),
 		("enc_offset_az",       0, True, 0,       1*DEG),
 		("enc_offset_el",       0, True, 0,       1*DEG),
 		("enc_offset_cr",       0, True, 0,       1*DEG),
@@ -502,7 +529,7 @@ class ModelStaticV2(Model):
 		("el_sag_pivot",        0, True, 90*DEG,  1*DEG),
 		("el_sag_lin",          0, True, 0,       0.01),
 		("el_sag_quad",         0, True, 0,       0.01),
-	], dtype=dtype_pinfo)
+	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelDynamicV2(ModelStaticV2):
 	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour):
@@ -533,9 +560,11 @@ class ModelDynamicV2(ModelStaticV2):
 		("el_sag_pivot",        0, False,   90*DEG,  1*DEG),
 		("el_sag_lin",          0, False,   0,       0.01),
 		("el_sag_quad",         0, False,   0,       0.01),
-		("waf_pos_xi",          1, True,    0,       1*AMIN),
-		("waf_pos_eta",         1, True,    0,       1*AMIN),
-	], dtype=dtype_pinfo)
+		("waf_pos_xi",          1, False,   0,       1*AMIN),
+		("waf_pos_eta",         1, False,   0,       1*AMIN),
+		("waf_off_xi",          1, True,    0,       1*AMIN),
+		("waf_off_eta",         1, True,    0,       1*AMIN),
+	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelRadRollHor(Model):
 	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour):
@@ -583,13 +612,15 @@ class ModelRadRollHor(Model):
 		("el_sag_pivot",        0, False,   90*DEG,  1*DEG),
 		("el_sag_lin",          0, False,   0,       0.01),
 		("el_sag_quad",         0, False,   0,       0.01),
-		("waf_pos_xi",          1, True,    0,       1*AMIN),
-		("waf_pos_eta",         1, True,    0,       1*AMIN),
+		("waf_pos_xi",          1, False,   0,       1*AMIN),
+		("waf_pos_eta",         1, False,   0,       1*AMIN),
+		("waf_off_xi",          1, True,    0,       1*AMIN),
+		("waf_off_eta",         1, True,    0,       1*AMIN),
 		("roff_r0",             2, True,    1*DEG, 0.1*DEG),
 		("roff_roll0",          2, False,   0,       1*DEG),
 		("roff_offset_az",      2, True,    0,       1*DEG),
 		("roff_offset_el",      2, True,    0,       1*DEG),
-	], dtype=dtype_pinfo)
+	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelRadRollArc(Model):
 	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour):
@@ -620,35 +651,40 @@ class ModelRadRollArc(Model):
 		deta  = scale * np.sin(ang)
 		# Apply it
 		pfull_off = pfull.copy()
-		pfull_off.waf_pos_xi  += dxi
-		pfull_off.waf_pos_eta += deta
+		pfull_off.waf_off_xi  += dxi
+		pfull_off.waf_off_eta += deta
 		# The rest goes as normal
 		q_base, q_lonlat, q_middle, q_det = build_v2_quats(pfull_off, baz, bel, broll)
 		coords = coordsys.Coords(q=q_base * q_lonlat * q_middle * q_det)
 		ocoord = np.array(restore_el(bel, coords.az, coords.el, coords.roll)).T
 		return ocoord
 	# Here 2 = static, 1 = wafer-dependent and 0 = time-dependent
+	# In this model, most of the v2 static parameters are static
+	# and not fit. Might want to change that in variant models in the
+	# future, but for now this seems to perform well
 	pinfo0 = np.array([
 		("enc_offset_az",       0, True,    0,       1*DEG),
 		("enc_offset_el",       0, True,    0,       1*DEG),
 		("enc_offset_cr",       0, True,    0,       1*DEG),
-		("base_tilt_sin",       0, False,   0,       1*DEG),
-		("base_tilt_cos",       0, False,   0,       1*DEG),
-		("el_axis_center_xi0",  0, False,   0,       1*DEG),
-		("el_axis_center_eta0", 0, False,   0,       1*DEG),
-		("mir_center_xi0",      0, False,   0,       1*DEG),
-		("mir_center_eta0",     0, False,   0,       1*DEG),
-		("cr_center_xi0",       0, False,   0,       1*DEG),
-		("cr_center_eta0",      0, False,   0,       1*DEG),
-		("el_sag_pivot",        0, False,   90*DEG,  1*DEG),
-		("el_sag_lin",          0, False,   0,       0.01),
-		("el_sag_quad",         0, False,   0,       0.01),
-		("waf_pos_xi",          1, True,    0,       1*AMIN),
-		("waf_pos_eta",         1, True,    0,       1*AMIN),
+		("base_tilt_sin",       2, False,   0,       1*DEG),
+		("base_tilt_cos",       2, False,   0,       1*DEG),
+		("el_axis_center_xi0",  2, False,   0,       1*DEG),
+		("el_axis_center_eta0", 2, False,   0,       1*DEG),
+		("mir_center_xi0",      2, False,   0,       1*DEG),
+		("mir_center_eta0",     2, False,   0,       1*DEG),
+		("cr_center_xi0",       2, False,   0,       1*DEG),
+		("cr_center_eta0",      2, False,   0,       1*DEG),
+		("el_sag_pivot",        2, False,   90*DEG,  1*DEG),
+		("el_sag_lin",          2, False,   0,       0.01),
+		("el_sag_quad",         2, False,   0,       0.01),
+		("waf_pos_xi",          1, False,   0,       1*AMIN),
+		("waf_pos_eta",         1, False,   0,       1*AMIN),
+		("waf_off_xi",          1, True,    0,       1*AMIN),
+		("waf_off_eta",         1, True,    0,       1*AMIN),
 		("arc_amp",             2, True,    0,       1*AMIN),
 		("arc_r0",              2, True,    1*DEG, 0.1*DEG),
 		("arc_roll0",           2, True,    0,       1*DEG),
-	], dtype=dtype_pinfo)
+	], dtype=dtype_pinfo).view(np.recarray)
 
 def build_v2_quats(pfull, baz, bel, roll):
 	"""Build the quaternion building blocks used in the static v2 model.
@@ -674,7 +710,10 @@ def build_v2_quats(pfull, baz, bel, roll):
 	amp = (pfull.base_tilt_sin**2 + pfull.base_tilt_cos**2)**0.5
 	q_base = coordsys.euler(2,phi) * coordsys.euler(1, amp) * coordsys.euler(2, -phi)
 	# Detectors
-	q_det  = coordsys.rotation_xieta(pfull.waf_pos_xi, pfull.waf_pos_eta)
+	q_det  = coordsys.rotation_xieta(
+		pfull.waf_pos_xi  + pfull.waf_off_xi,
+		pfull.waf_pos_eta + pfull.waf_off_eta,
+	)
 	return q_base, q_lonlat, q_middle, q_det
 
 def azel2xieta_v2(pfull, coord, icoord):
@@ -718,6 +757,8 @@ def time_split(ilabels, ctime, maxdur=np.inf):
 	allofthem = np.arange(len(names))
 	tmins  = ndimage.minimum(ctime, labels, allofthem)
 	tmaxs  = ndimage.maximum(ctime, labels, allofthem)
+	# avoid division by zero for groups with just one obs in them
+	tmaxs  = np.maximum(tmaxs, tmins+1)
 	nsplit = utils.floor((tmaxs-tmins)/maxdur)+1
 	durs   = (tmaxs-tmins)/nsplit
 	tid    = utils.floor((ctime-tmins[labels])/durs[labels])
@@ -818,19 +859,14 @@ def dump_resid(fname, cat, pfull, resid_hor, resid_xieta):
 			msg = "".join(parts)
 			ofile.write(msg + "\n")
 
-#def read_model
-#base_fit   = np.loadtxt(args.base_model, dtype=Pzipper.dtype_annot).view(np.recarray)
-
 verbosity  = args.verbose - args.quiet
 utils.mkdir(args.odir)
 
 # Read our catalog
 cat        = read_fit_cat(args.src_fits)
 # Set up the v2 model we're starting from
-#base_fit   = np.loadtxt(args.base_model, dtype=Pzipper.dtype_annot).view(np.recarray)
 base_model = ModelStaticV2(cat)
-base_x     = base_model.dof.read(args.base_model)
-base_pfull = base_model.dof.unzip(base_x)
+base_pfull = base_model.dof_full.read(args.base_model, full=True)
 
 # Recover our input coordinates. We also get a new ocoord because we're
 # inferring what the psi angle should be to get the known roll angle
@@ -847,13 +883,13 @@ tcoord  = np.array([cat.az-cat.Δaz, cat.el-cat.Δel, cat.az*0]).T
 #x       = model.fit_gibbs(icoord, tcoord, dcoord, verbose=verbosity)
 x, dcoord = model.fit_robust(icoord, tcoord, dcoord, verbose=verbosity)
 # Write out our final fit parameters
-model.dof.write(os.path.join(args.odir, "params.txt"), x)
+pfull  = model.dof.unzip(x)
+model.dof_full.write(os.path.join(args.odir, "params.txt"), pfull, full=True)
 # Dump the residuals. For each point we want:
 # * All the info in cat
 # * resid az,el
 # * resid xi,eta
 # * wafer xi,eta
-pfull   = model.dof.unzip(x)
 mcoord  = model.eval(pfull, icoord)
 resid_hor, resid_xieta = calc_resid(pfull, icoord, tcoord, mcoord)
 dump_resid(os.path.join(args.odir, "resid_per.txt"), cat, pfull, resid_hor, resid_xieta)

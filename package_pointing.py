@@ -4,7 +4,7 @@ parser.add_argument("params", help="Text file with model parameters, as written 
 parser.add_argument("sel",    help="Selector for which observations to package model for")
 parser.add_argument("odir",   help="Directory to write output sqlite and hdf data. Will be created if necessary")
 parser.add_argument("-C", "--context", type=str,   default="lat")
-parser.add_argument("-T", "--maxdt",   type=float, default=10, help="Max time offset between observation and model in days")
+parser.add_argument("-T", "--maxdt",   type=float, default=1, help="Max time offset between observation and model in days")
 args = parser.parse_args()
 import numpy as np, re, os
 from pixell import utils, bunch, sqlite
@@ -125,85 +125,87 @@ def parse_tpat(desc):
 def id2waf(subid):
 	obs, ws, band = subid.split(":")
 	fields = obs.split("_")
-	return ":".join(fields[2][-2:], ws)
+	return ":".join([fields[2][-2:], ws])
 
-def close(a,b,tol): return np.abs(a-b) <= tol
+def close(a,b,tol, rewind=False):
+	diff = a-b
+	if rewind: diff = (diff+np.pi)%(2*np.pi)-np.pi
+	return np.abs(diff) <= tol
 
 def sorted_range_cands(ranges, vals):
 	"""Given possibly overlapping ranges[n,{from,to}] sorted by
 	from, return the index of the first and beyond-last element in ranges
 	that could contain each entry in vals[m] as cand_ranges[m,{ifrom,ito}]"""
-	# First possible match is after last that ends before us
-	order2= np.searchsorted(ranges[:,1])
-	i1s0  = np.searchsorted(ranges[order2,1], vals)+1
-	bad   = i1s0 >= len(vals)
-	i1s   = order2[np.minimum(i1s0, len(vals))]
-	i1s[bad] = len(vals)
-	# Last possible match is first that starts after us
-	i2s   = np.searchsorted(ranges[:,0], ttarg)+1
+	# Hm, this was tricky. For now, just assume the durs aren't too different
+	t1s, t2s = ranges.T
+	maxdur = np.max(t2s-t1s)
+	i1s    = np.searchsorted(t1s+maxdur, vals)
+	i2s    = np.searchsorted(t1s,        vals)
 	cand_ranges = np.array([i1s, i2s]).T
-	return canc_ranges
+	return cand_ranges
 
-def tpat_lookukp(obsinfo, keys, ttol=1*utils.day, stol=1*utils.degree):
+def tpat_lookup(obsinfo, keys, ttol=1*utils.day, stol=1*utils.degree):
 	inds  = np.full(len(obsinfo), -1, int)
 	ttargs= obsinfo.ctime + obsinfo.dur/2
 	# Will end up looping in python, but let's make the start/end points smart at least.
-	order = np.argsort(info.keys[:,0])
-	keys  = info.keys[order].copy()
+	order = np.argsort(keys[:,0])
+	skeys = keys[order].copy()
 	# Apply time-padding
-	keys[:,0] -= ttol
-	keys[:,1] += ttol
+	skeys[:,0] -= ttol
+	skeys[:,1] += ttol
 	# Find sub-range we need to search through
-	i1s, i2s = sorted_range_cands(keys[:,2], ttargs)
+	i1s, i2s = sorted_range_cands(skeys[:,:2], ttargs).T
 	# Then loop through all the obsinfo entries and find the best match, if any
 	for ei, (entry, ttarg, i1, i2) in enumerate(zip(obsinfo, ttargs, i1s, i2s)):
-		ibest, dbest = 0, np.inf
+		ibest, dbest = -1, np.inf
 		for i in range(i1, i2):
-			t1, t2, az, el, roll = keys[i]
-			if t1-ttol <= ttarg and ttarg < t2+ttol and close(az, entry.baz, stol) and close(el, entry.bel, stol) and close(roll, entry.roll, stol):
+			t1, t2, az, el, roll = skeys[i]
+			if t1-ttol <= ttarg and ttarg < t2+ttol and close(az, entry.baz, stol, rewind=True) and close(el, entry.bel, stol) and close(roll, entry.roll, stol):
 				dist = np.abs(0.5*(t1+t2)-ttarg)
 				if dist < dbest:
 					ibest = i
 					dbest = dist
-		inds[ei] = order[ibest]
+		if ibest >= 0: inds[ei] = order[ibest]
 	return inds
 
 def parse_params(params):
 	res = {}
 	for ind, (name, type, bin, val) in enumerate(params):
-		if name not in res: res[name] = bunch.Bunch(type=type, keys=[], inds=[], vals=[])
+		if name not in res: res[name] = bunch.Bunch(type=type, bins=[], inds=[], vals=[])
 		if   type == "tpat":   key = parse_tpat(bin)
 		elif type == "static": key = bin
 		elif type == "wafer":  key = bin
 		else: raise ValueError("Unrecognized param type '%s'" % str(type))
-		res[name].keys.append(key)
+		res[name].bins.append(key)
 		res[name].inds.append(ind)
 		res[name].vals.append(val)
 	for key, val in res.items():
-		val.keys = np.array(val.keys)
+		val.bins = np.array(val.bins)
 		val.inds = np.array(val.inds)
 		val.vals = np.array(val.vals)
 	return res
 
 def eval_params(parsed, obsinfo, model="arc", ttol=1*utils.day, stol=1*utils.degree):
 	# Initialize the table
-	dtype = [("model", "U32")]
+	dtype = [("subid","S42"),("model", "S32")]
 	for name, info in parsed.items():
-		dtype.append((name, info.vals[0].dtype))
+		dtype.append((str(name), info.vals[0].dtype))
 	nobs  = len(obsinfo)
 	table = np.zeros(nobs, dtype).view(np.recarray)
 	good  = np.full(nobs, True, bool)
-	table["model"] = model
+	table["subid"] = np.char.encode(obsinfo.id)
+	table["model"] = model.encode()
 	# Get wafer id for each entry in obsinfo
 	wafers = np.array([id2waf(id) for id in obsinfo.id])
 	# Get the fields
 	for name, info in parsed.items():
-		if   info.type == "tpat": inds = tpat_lookup(obsinfo, info.keys)
-		elif info.type == "wafer": inds = utils.find(info.keys, wafers, default=-1)
+		if   info.type == "tpat":
+			inds = tpat_lookup(obsinfo, info.bins)
+		elif info.type == "wafer": inds = utils.find(info.bins, wafers, default=-1)
 		elif info.type == "static": inds = np.zeros(nobs, int)
 		else: raise ValueError("Unrecognized param type '%s'" % info.type)
 		valid = inds >= 0
-		table[name][valid] = info.val[inds[valid]]
+		table[name][valid] = info.vals[inds[valid]]
 		good &= valid
 	return table, good
 
@@ -213,7 +215,8 @@ loader  = loading.Loader(args.context, dev=dev)
 obsinfo = loader.query(args.sel)
 # Read the raw parametrs
 params, model = read_params(args.params)
-table, good = eval_params(params, obsinfo, model=model, ttol=args.maxdt)
+parsed  = parse_params(params)
+table, good = eval_params(parsed, obsinfo, model=model, ttol=args.maxdt)
 # Restrict to cases with a valid match
 print("Found a matching model for %d/%d subids" % (np.sum(good),len(obsinfo)))
 # Output as single hdf file with a dataset indicating the start of the time-range we cover,
@@ -223,7 +226,7 @@ bunch.write(args.odir + "/pointing_offsets.h5", bunch.Bunch(t0=table[good]))
 np.savetxt(args.odir + "/unmatched.txt", obsinfo.id[~good], fmt="%s")
 # Output an sqlite file with a single time-range pointing to this file
 utils.rm(args.odir + "/db.sqlite")
-with sqlite.open(args.odir + "/db.sqlite") as s:
+with sqlite.open(args.odir + "/db.sqlite", mode="rwc") as s:
 	s.execute("create table files (id integer, name text)")
 	s.execute("insert into files (id, name) values (?,?)", (0, "pointing_offsets.h5"))
 	print(s)

@@ -187,14 +187,14 @@ def parse_params(params):
 
 def eval_params(parsed, obsinfo, model="arc", ttol=1*utils.day, stol=1*utils.degree):
 	# Initialize the table
-	dtype = [("subid","S42"),("model", "S32")]
+	dtype = [("subid","S42"),("version", "S32")]
 	for name, info in parsed.items():
 		dtype.append((str(name), info.vals[0].dtype))
 	nobs  = len(obsinfo)
 	table = np.zeros(nobs, dtype).view(np.recarray)
 	good  = np.full(nobs, True, bool)
 	table["subid"] = np.char.encode(obsinfo.id)
-	table["model"] = model.encode()
+	table["version"] = model.encode()
 	# Get wafer id for each entry in obsinfo
 	wafers = np.array([id2waf(id) for id in obsinfo.id])
 	# Get the fields

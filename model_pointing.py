@@ -514,8 +514,6 @@ class ModelStaticV2(Model):
 	pinfo0 = np.array([
 		("waf_pos_xi",          1, False,0,       1*AMIN),
 		("waf_pos_eta",         1, False,0,       1*AMIN),
-		("waf_off_xi",          1, True, 0,       1*AMIN),
-		("waf_off_eta",         1, True, 0,       1*AMIN),
 		("enc_offset_az",       0, True, 0,       1*DEG),
 		("enc_offset_el",       0, True, 0,       1*DEG),
 		("enc_offset_cr",       0, True, 0,       1*DEG),
@@ -713,9 +711,13 @@ def build_v2_quats(pfull, baz, bel, roll):
 	amp = (pfull.base_tilt_sin**2 + pfull.base_tilt_cos**2)**0.5
 	q_base = coordsys.euler(2,phi) * coordsys.euler(1, amp) * coordsys.euler(2, -phi)
 	# Detectors
+	if "waf_off_xi" in pfull.dtype.names:
+		dxi  = pfull.waf_off_xi
+		deta = pfull.waf_off_eta
+	else: dxi, deta = 0,0
 	q_det  = coordsys.rotation_xieta(
-		pfull.waf_pos_xi  + pfull.waf_off_xi,
-		pfull.waf_pos_eta + pfull.waf_off_eta,
+		pfull.waf_pos_xi  + dxi,
+		pfull.waf_pos_eta + deta,
 	)
 	return q_base, q_lonlat, q_middle, q_det
 

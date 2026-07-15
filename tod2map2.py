@@ -1,5 +1,5 @@
 from __future__ import division, print_function
-import numpy as np, time, copy, argparse, os, sys, pipes, shutil, re
+import numpy as np, time, copy, argparse, os, sys, shlex, shutil, re
 from enlib import utils
 with utils.nowarn(): import h5py
 from enlib import enmap, pmat, fft, config, array_ops, mapmaking, nmat, errors, mpi
@@ -141,7 +141,7 @@ root = args.odir + "/" + (args.prefix + "_" if args.prefix else "")
 if comm.rank == 0:
 	config.save(root + "config.txt")
 	with open(root + "args.txt","w") as f:
-		argstring = " ".join([pipes.quote(a) for a in sys.argv[1:]])
+		argstring = " ".join([shlex.quote(a) for a in sys.argv[1:]])
 		f.write(argstring + "\n")
 		print(argstring)
 	with open(root + "env.txt","w") as f:

@@ -288,7 +288,7 @@ elif args.mode == "subtract":
 		reg_pad = dory.pad_region(reg_fid, args.pad)
 		print("%3d region %3d/%d %5d %5d %6d %6d" % (comm.rank, ri+1, len(regions), reg_fid[0,0], reg_fid[1,0], reg_fid[0,1], reg_fid[1,1]))
 		map    = enmap.read_map(args.imap, pixbox=reg_pad).astype(dtype)
-		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True, pixwin_order=args.pixwin_order, verbose=args.verbose, rmax=rmax, vmin=args.vmin).astype(dtype)
+		model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=np.float32, pixwin=True, pixwin_order=args.pixwin_order, verbose=args.verbose, rmax=rmax, vmin=args.vmin).astype(map.dtype, copy=False)
 		model[map==0] = 0
 		omaps.append(map-model)
 		if args.omodel: models.append(model)
@@ -322,7 +322,7 @@ elif args.mode == "subtract_nompi":
 	print("Reading %s" % args.imap)
 	map    = enmap.read_map(args.imap)
 	print("Subtracting")
-	model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=map.dtype, pixwin=True, pixwin_order=args.pixwin_order, verbose=args.verbose, rmax=rmax, vmin=args.vmin)
+	model  = pointsrcs.sim_srcs(map.shape, map.wcs, srcs, beam_prof, dtype=np.float32, pixwin=True, pixwin_order=args.pixwin_order, verbose=args.verbose, rmax=rmax, vmin=args.vmin).astype(map.dtype, copy=False)
 	map   -= model
 	print("Writing map")
 	enmap.write_map(args.omap, map)

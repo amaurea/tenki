@@ -46,7 +46,7 @@ def calc_map_block_mean(map, n):
 print("Reading map %s" % (mapfiles[0]))
 map = enmap.read_map(mapfiles[0]).preflat[args.component]
 print("Reading hit %s" % (hitfiles[0]))
-hit = enmap.read_map(hitfiles[0])
+hit = enmap.read_map(hitfiles[0]).preflat[0]
 # We assume that the hitcount maps are 2d
 def get_bias(bs):
 	# Get bias factor we get from estimating the ratio

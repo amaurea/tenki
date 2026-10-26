@@ -2,33 +2,53 @@ import argparse
 parser = argparse.ArgumentParser()
 parser.add_argument("ifile")
 parser.add_argument("ofile")
-parser.add_argument("-r", "--res",  type=int,   default=16)
-parser.add_argument("-l", "--lmax", type=int,   default=21000)
+parser.add_argument("-r", "--res",  type=str,   default="auto")
+parser.add_argument("-l", "--lmax", type=str,   default="auto")
 parser.add_argument(      "--vmax", type=float, default=1e5)
 parser.add_argument(      "--off",  type=str,   default="-0.5,-0.5")
 args = parser.parse_args()
 import numpy as np
-from pixell import enmap, utils, wcsutils, curvedsky
-from enlib import bench
+from pixell import enmap, utils, wcsutils, curvedsky, bench
 
 # Build mercator geometry. Res is log2 of the number of pixels around the sky.
 # Web maps have 256 pixels around the sky at z=0, so z = res+8. Normal ACT maps
 # have a resolution of 0.5 arcmin, corresponding to res = 15.4. So to preserve our
 # full resolution we would need res = 16, but res = 15 = 0.66', which is probably good enough.
-npix  = 2**args.res
+shape, wcs = enmap.read_map_geometry(args.ifile)
+if args.res == "auto":
+	nphi = np.abs(360/wcs.wcs.cdelt[0])
+	res  = utils.ceil(np.log2(nphi))
+else:
+	res  = int(args.res)
+if args.lmax == "auto":
+	nphi = np.abs(360/wcs.wcs.cdelt[0])
+	lmax = nphi//2-2
+else:
+	lmax = int(args.lmax)
+
+npix  = 2**res
 res   = 360/npix
 shape = (npix, npix)
 off   = utils.parse_floats(args.off)
 wcs   = wcsutils.explicit(ctype=["RA---MER", "DEC--MER"], cdelt=[-res,res], crval=[0,0], crpix=[npix//2+1+off[1],npix//2+1+off[0]])
 
-def logify(x, x0): return np.arcsinh(x/x0)
-def unlogify(x, x0): return np.sinh(x)*x0
+def logify(x, x0):
+	x /= x0
+	np.arcsinh(x, out=x)
+	return x
+def unlogify(x, x0):
+	np.sinh(x, out=x)
+	x *= x0
+	return x
 
 # Read in map
 with bench.show("read"):
 	imap  = enmap.read_map(args.ifile)
 shape = imap.shape[:-2]+shape
 dtype = imap.dtype
+
+#with bench.show("clip"):
+#	np.clip(imap, -args.vmax, args.vmax, out=imap)
 
 # Get rid of too high values, to avoid ringing
 with bench.show("logify"):
@@ -45,7 +65,7 @@ with bench.show("build mask"):
 
 # Transform
 with bench.show("map2alm"):
-	alms  = curvedsky.map2alm(imap, lmax=args.lmax)
+	alms  = curvedsky.map2alm(imap, lmax=lmax)
 del imap
 omap  = enmap.zeros(shape, wcs, dtype)
 with bench.show("alm2map"):

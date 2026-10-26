@@ -12,6 +12,7 @@ parser.add_argument("-G", "--group",  type=str,   default="obs", help="What to f
 parser.add_argument("-f", "--fit-offs", type=int, default=1)
 parser.add_argument("-v", "--verbose", action="count", default=1)
 parser.add_argument("-q", "--quiet",   action="count", default=0)
+parser.add_argument("-m", "--model",   type=str, default="arc")
 args = parser.parse_args()
 import numpy as np
 from pixell import utils, bunch, coordsys, colors, bench
@@ -175,7 +176,6 @@ class Pzipper:
 		self.defaults = defaults
 		# Build a dtype for pfull
 		self.dtype    = [(p["name"], "d") for p in pinfo]
-		self.labels   = labels
 		# Find how many degrees of freedom there are per label-type
 		lname, bins, bnames = labels
 		lnum = [len(bname) for bname in bnames]
@@ -418,8 +418,10 @@ class Model:
 		def calc_chisq(x):
 			pfull  = self.dof.unzip(x)
 			mcoord = self.eval(pfull, icoord)
+			# wrap-immune offset
+			diff = utils.rewind(mcoord[:,:2]-tcoord[:,:2])
 			# only ra,dec parts used in fit, not psi
-			chisq  = np.sum((mcoord[:,:2]-tcoord[:,:2])**2/dcoord[:,:2]**2)
+			chisq  = np.sum((diff)**2/dcoord[:,:2]**2)
 			step[0] += 1
 			if verbose > 0:
 				print("%s%4d %15.7e " % (" ".join(prefix), step[0], chisq) + " ".join(["%12.5e" % val for val in x][:8]))
@@ -532,8 +534,9 @@ class ModelStaticV2(Model):
 
 class ModelDynamicV2(ModelStaticV2):
 	name = "lat_v2"
-	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour):
+	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour, tol=1*utils.degree):
 		self.maxdur = maxdur
+		self.tol    = tol
 		ModelStaticV2.__init__(self, cat, dof=dof, fit=fit, defaults=defaults)
 	def label(self, data):
 		toks = parse_names(data.name)
@@ -564,63 +567,6 @@ class ModelDynamicV2(ModelStaticV2):
 		("waf_pos_eta",         1, False,   0,       1*AMIN),
 		("waf_off_xi",          1, True,    0,       1*AMIN),
 		("waf_off_eta",         1, True,    0,       1*AMIN),
-	], dtype=dtype_pinfo).view(np.recarray)
-
-class ModelRadRollHor(Model):
-	name = "rad_roll_hor"
-	def __init__(self, cat, dof=None, fit=None, defaults=[], maxdur=2.0*utils.hour, tol=1*utils.degree):
-		self.maxdur = maxdur
-		self.tol    = tol
-		Model.__init__(self, cat, dof=dof, fit=fit, defaults=defaults)
-	def variant(self, cat, dof):
-		return ModelRadRollHor(cat, dof=dof, maxdur=self.maxdur)
-	def label(self, data):
-		toks = parse_names(data.name)
-		ustatic, istatic = np.array(["-"]), np.zeros(len(data),int)
-		uwafer,  iwafer  = np.unique(toks.wafer, return_inverse=True)
-		# split by time and pattern
-		utpat,   itpat   = build_tpat(data, tol=self.tol, maxdur=self.maxdur)
-		name  = ("tpat", "wafer", "static")
-		inds  = (itpat, iwafer, istatic)
-		bname = (utpat, uwafer, ustatic)
-		return name, inds, bname
-	def eval(self, pfull, icoord):
-		# This model is identical to the static one, except we apply an r-dependent,
-		# roll-dependent displacement of az,el at the end
-		baz, bel, broll = icoord.T
-		q_base, q_lonlat, q_middle, q_det = build_v2_quats(pfull, baz, bel, broll)
-		coords = coordsys.Coords(q=q_base * q_lonlat * q_middle * q_det)
-		# Get the radius in the focal plane
-		r2    = pfull.waf_pos_xi**2 + pfull.waf_pos_eta**2
-		scale = (1-r2/pfull.roff_r0**2) * (broll-pfull.roff_roll0)
-		coords.az += pfull.roff_offset_az * scale
-		coords.el += pfull.roff_offset_el * scale
-		ocoord = np.array(restore_el(bel, coords.az, coords.el, coords.roll)).T
-		return ocoord
-	# Here 2 = static, 1 = wafer-dependent and 0 = time-dependent
-	pinfo0 = np.array([
-		("enc_offset_az",       0, True,    0,       1*DEG),
-		("enc_offset_el",       0, True,    0,       1*DEG),
-		("enc_offset_cr",       0, True,    0,       1*DEG),
-		("base_tilt_sin",       0, False,   0,       1*DEG),
-		("base_tilt_cos",       0, False,   0,       1*DEG),
-		("el_axis_center_xi0",  0, False,   0,       1*DEG),
-		("el_axis_center_eta0", 0, False,   0,       1*DEG),
-		("mir_center_xi0",      0, False,   0,       1*DEG),
-		("mir_center_eta0",     0, False,   0,       1*DEG),
-		("cr_center_xi0",       0, False,   0,       1*DEG),
-		("cr_center_eta0",      0, False,   0,       1*DEG),
-		("el_sag_pivot",        0, False,   90*DEG,  1*DEG),
-		("el_sag_lin",          0, False,   0,       0.01),
-		("el_sag_quad",         0, False,   0,       0.01),
-		("waf_pos_xi",          1, False,   0,       1*AMIN),
-		("waf_pos_eta",         1, False,   0,       1*AMIN),
-		("waf_off_xi",          1, True,    0,       1*AMIN),
-		("waf_off_eta",         1, True,    0,       1*AMIN),
-		("roff_r0",             2, True,    1*DEG, 0.1*DEG),
-		("roff_roll0",          2, False,   0,       1*DEG),
-		("roff_offset_az",      2, True,    0,       1*DEG),
-		("roff_offset_el",      2, True,    0,       1*DEG),
 	], dtype=dtype_pinfo).view(np.recarray)
 
 class ModelRadRollArc(Model):
@@ -732,13 +678,37 @@ def azel2xieta_v2(pfull, coord, icoord):
 	q_odet = (1/q_middle) * (1/q_lonlat) * (1/q_base) * q_tot
 	return np.array(coordsys.decompose_xieta(q_odet)).T
 
+#def build_tpat(data, tol=1*utils.degree, maxdur=2*utils.hour):
+#	"""Build the tpat = time+scanpat split"""
+#	# First split by time and pattern
+#	toks = parse_names(data.name)
+#	itime, tmins, tmaxs = time_split(toks.obs, data.ctime, maxdur=maxdur)
+#	ipat, azs,els,rolls = pattern_split(data.pat_baz, data.pat_bel, data.roll, tol=tol)
+#	# Then combine
+#	itpat, iinds  = utils.label_multi([itime,ipat], return_index=True)
+#	tmins, tmaxs  = [a[itime[iinds]] for a in [tmins, tmaxs]]
+#	azs,els,rolls = [a[ipat [iinds]] for a in [azs,els,rolls]]
+#	# Try to keep name reasonably compact
+#	names = np.array(["t:%.0f:+%.0f,az:%.0f,el:%.0f,roll:%.0f" % (
+#		t1,t2-t1,az,el,roll) for t1,t2,az,el,roll in
+#		zip(tmins,tmaxs,azs/utils.degree,els/utils.degree,rolls/utils.degree)])
+#	return names, itpat
+
+# The old build_tpat started from data.name, which means that equivalent
+# observations with different data.name would never be fused. Better approach:
+# 1. split by pattern
+# 2. then call time-split on the result
+
 def build_tpat(data, tol=1*utils.degree, maxdur=2*utils.hour):
 	"""Build the tpat = time+scanpat split"""
-	# First split by time and pattern
-	toks = parse_names(data.name)
-	itime, tmins, tmaxs = time_split(toks.obs, data.ctime, maxdur=maxdur)
+	# First split by pattern
 	ipat, azs,els,rolls = pattern_split(data.pat_baz, data.pat_bel, data.roll, tol=tol)
-	# Then combine
+	# Then split by gaps in ctime per pattern
+	gpat = gap_split(ipat, data.ctime, maxgap=maxdur)
+	# Then split too long groups
+	itime, tmins, tmaxs = time_split(gpat, data.ctime, maxdur=maxdur)
+	# Then combine. label_multi probably unecessary here, since time is already
+	# a subdivision, but doesn't hurt
 	itpat, iinds  = utils.label_multi([itime,ipat], return_index=True)
 	tmins, tmaxs  = [a[itime[iinds]] for a in [tmins, tmaxs]]
 	azs,els,rolls = [a[ipat [iinds]] for a in [azs,els,rolls]]
@@ -755,9 +725,6 @@ def pinfo2defaults(pinfo):
 		default[p["name"]] = p["default"]
 	return default
 
-#def dump_resid(fname, icoord, ocoord, mcoord, dcoord):
-#	np.savetxt(fname, np.concatenate([icoord,ocoord,mcoord,dcoord],1)/utils.degree, fmt="%10.3f")
-
 def parse_names(names):
 	patch = []
 	wafer = []
@@ -765,12 +732,28 @@ def parse_names(names):
 	obs   = []
 	for name in names:
 		toks = name.split("_")
-		patch.append(toks[0])
-		wafer.append(":".join(toks[1:-3]))
+		patch.append("_".join(toks[0:-5]))
+		wafer.append(":".join(toks[-5:-3]))
 		band.append(toks[-3])
 		obs.append(toks[-2])
 	return bunch.Bunch(patch=np.array(patch), wafer=np.array(wafer),
 		band=np.array(band), obs=np.array(obs))
+
+def gap_split(ilabels, ctime, maxgap):
+	sublabels = np.zeros_like(ilabels)
+	# For each group in ilabels, split it on ctime gaps > maxgap
+	uilabs, iorder, edges = utils.find_equal_groups_fast(ilabels)
+	for li, ilab in enumerate(uilabs):
+		# Get the indices for this group
+		inds   = iorder[edges[li]:edges[li+1]]
+		# Sorted ctime order
+		gtime  = ctime[inds]
+		torder = np.argsort(gtime)
+		sublab_sort = utils.cumsum(np.diff(gtime[torder]) > maxgap, endpoint=True).astype(int)
+		invorder = utils.inverse_order(torder)
+		sublabels[inds] = sublab_sort[invorder]
+	# Return new groups by comining ilabels and sublabels
+	return utils.label_multi([sublabels,ilabels])
 
 def time_split(ilabels, ctime, maxdur=np.inf):
 	names, labels = np.unique(ilabels, return_inverse=True)
@@ -905,9 +888,15 @@ ocoord  = np.array([cat.az, cat.el, cat.roll]).T
 dcoord  = np.array([cat.σaz, cat.σel, cat.σaz]).T
 icoord, ocoord = base_model.inverse(base_pfull, ocoord)
 
+tofit = args.fit.split(",") if args.fit is not None else None
+
 # Set up the model we want to fit
-model   = ModelRadRollArc(cat, defaults=[base_pfull])
-#model   = ModelDynamicV2(cat, defaults=[base_pfull])
+if   args.model == "arc":
+	model = ModelRadRollArc(cat, defaults=[base_pfull], fit=tofit)
+elif args.model == "v2":
+	model = ModelDynamicV2(cat, defaults=[base_pfull], fit=tofit)
+else:
+	raise ValueError("Unrecognized model '%s'" % str(args.model))
 # Set up the target coordinates we want to match
 tcoord  = np.array([cat.az-cat.Δaz, cat.el-cat.Δel, cat.az*0]).T
 #x       = model.fit(icoord, tcoord, dcoord, verbose=2, prefix="test")
